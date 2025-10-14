@@ -1,9 +1,12 @@
 """Utility functions for efficient tensor serialization/deserialization."""
 
-import io
+# import io
+import pickle
 from typing import Any
 
-import torch
+import dill
+
+# import torch
 
 
 def serialize_tensor(obj: Any) -> bytes:
@@ -13,10 +16,7 @@ def serialize_tensor(obj: Any) -> bytes:
     Returns:
         bytes: Serialized representation
     """
-    buffer = io.BytesIO()
-    torch.save(obj, buffer, _use_new_zipfile_serialization=False)
-    buffer.seek(0)
-    return buffer.read()
+    return dill.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def deserialize_tensor(data: bytes) -> Any:
@@ -27,9 +27,7 @@ def deserialize_tensor(data: bytes) -> Any:
     Returns:
         The deserialized tensor or nested structure
     """
-    buffer = io.BytesIO(data)
-    buffer.seek(0)
-    return torch.load(buffer, map_location="cpu")
+    return dill.loads(data)
 
 
 def serialize_payload(data: list[Any], loss_fn: Any = None, **kwargs) -> bytes:
@@ -57,3 +55,13 @@ def deserialize_payload(data: bytes) -> dict:
         dict: Deserialized payload with 'data', 'loss_fn', and other fields
     """
     return deserialize_tensor(data)
+
+
+def serialize_class(cls: type) -> bytes:
+    """Serialize a class definition using dill."""
+    return dill.dumps(cls, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def deserialize_class(data: bytes) -> type:
+    """Deserialize a class definition using dill."""
+    return dill.loads(data)

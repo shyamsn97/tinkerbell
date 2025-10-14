@@ -1,9 +1,11 @@
 """Utility functions for efficient tensor serialization/deserialization."""
 
-import io
+# import io
 
 # import threading
-from typing import Any
+# from typing import Any
+
+# from typing import Type
 
 # import httpx
 # import requests
@@ -13,60 +15,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response as FastAPIResponse
 
+from tinkerbell.utils import deserialize_payload, serialize_tensor
+
 LOCAL_PACKAGE = "tinkerbell"
-
-
-def serialize_tensor(obj: Any) -> bytes:
-    """Serialize a tensor or nested structure of tensors to bytes.
-    Args:
-        obj: A torch tensor, list, dict, or nested structure containing tensors
-    Returns:
-        bytes: Serialized representation
-    """
-    buffer = io.BytesIO()
-    torch.save(obj, buffer, _use_new_zipfile_serialization=False)
-    buffer.seek(0)
-    return buffer.read()
-
-
-def deserialize_tensor(data: bytes) -> Any:
-    """Deserialize bytes back to tensor or nested structure.
-
-    Args:
-        data: Serialized bytes from serialize_tensor
-    Returns:
-        The deserialized tensor or nested structure
-    """
-    buffer = io.BytesIO(data)
-    buffer.seek(0)
-    return torch.load(buffer, map_location="cpu")
-
-
-def serialize_payload(data: list[Any], **kwargs) -> bytes:
-    """Serialize a complete payload including data and additional parameters.
-
-    Args:
-        data: List of data points (can contain tensors)
-        loss_fn: Optional loss function or serializable representation
-        **kwargs: Additional parameters to serialize
-
-    Returns:
-        bytes: Serialized payload
-    """
-    payload = {"data": data, **kwargs}
-    return serialize_tensor(payload)
-
-
-def deserialize_payload(data: bytes) -> dict:
-    """Deserialize a complete payload.
-
-    Args:
-        data: Serialized bytes
-
-    Returns:
-        dict: Deserialized payload with 'data', 'loss_fn', and other fields
-    """
-    return deserialize_tensor(data)
 
 
 class FastAPITorchServer:
@@ -74,47 +25,59 @@ class FastAPITorchServer:
         self.app = FastAPI()
         self.host = host
         self.port = port
-        self.model = None  # Model stored on server
+        self.registered_modules = {}  # Store registered module classes
+        self.initialized_models = {}  # Store initialized models
         self.setup_routes()
         self.modal_app = None
         self.modal_image = None
 
+    def register_module(self, name: str, module_class: type[nn.Module]):
+        """Register a custom nn.Module class that can be instantiated via API.
+
+        Args:
+            name: Name to identify this module type
+            module_class: The nn.Module class (not an instance)
+        """
+        if not issubclass(module_class, nn.Module):
+            raise ValueError(f"{module_class} must be a subclass of nn.Module")
+        self.registered_modules[name] = module_class
+        print(f"Registered module: {name} -> {module_class.__name__}")
+
     def setup_routes(self):
-        @self.app.post("/multiply")
-        async def multiply(request: Request):
-            """Forward pass endpoint."""
-            body = await request.body()
-            payload = deserialize_payload(body)
-            data = payload["data"]
-            value = payload["value"]
-            out = data * value
-            serialized_result = serialize_tensor(out)
-            return FastAPIResponse(
-                content=serialized_result, media_type="application/octet-stream"
-            )
 
         @self.app.post("/initialize_model")
         async def initialize_model(request: Request):
-            """Initialize a PyTorch linear model on the server."""
+            """Initialize a PyTorch model on the server."""
             body = await request.body()
             payload = deserialize_payload(body)
-            input_dim = payload.get("input_dim", 10)
-            output_dim = payload.get("output_dim", 5)
+            name = payload.get("name")
+            config = payload.get("config", {})
 
             # Create model on the server
-            self.model = nn.Linear(input_dim, output_dim)
-            self.model.eval()  # Set to evaluation mode
+            if name not in self.registered_modules:
+                # Use registered custom module
+                return FastAPIResponse(
+                    content=f'{{"error": "Module type {name} not registered"}}'.encode(),
+                    status_code=400,
+                    media_type="application/json",
+                )
+
+            module_class = self.registered_modules[name]
+            self.initialized_models[name] = module_class(**config)
 
             return {
                 "status": "success",
-                "message": f"Model initialized with input_dim={input_dim}, output_dim={output_dim}",
-                "model_params": sum(p.numel() for p in self.model.parameters()),
+                "message": f"Model {name} initialized with config={config}",
+                "model_params": sum(
+                    p.numel() for p in self.initialized_models[name].parameters()
+                ),
             }
 
         @self.app.post("/forward")
         async def forward(request: Request):
             """Forward pass through the model stored on server."""
-            if self.model is None:
+            name = request.get("name")
+            if self.initialized_models.get(name, None) is None:
                 return FastAPIResponse(
                     content=b'{"error": "Model not initialized. Call /initialize_model first."}',
                     status_code=400,
@@ -130,28 +93,50 @@ class FastAPITorchServer:
                 input_tensor = torch.tensor(input_tensor)
 
             # Forward pass on server
-            with torch.no_grad():
-                output = self.model(input_tensor)
+            output = self.initialized_models[name](input_tensor)
 
             serialized_result = serialize_tensor(output)
             return FastAPIResponse(
                 content=serialized_result, media_type="application/octet-stream"
             )
 
-        @self.app.get("/model_info")
-        async def model_info():
-            """Get information about the current model."""
-            if self.model is None:
-                return {"status": "no_model", "message": "No model initialized"}
-
+        @self.app.get("/registered_modules")
+        async def list_registered_modules():
+            """List all registered module types."""
             return {
-                "status": "model_loaded",
-                "input_features": self.model.in_features,
-                "output_features": self.model.out_features,
-                "total_params": sum(p.numel() for p in self.model.parameters()),
-                "weight_shape": list(self.model.weight.shape),
-                "bias_shape": list(self.model.bias.shape),
+                "registered_modules": list(self.registered_modules.keys()),
+                "module_details": {
+                    name: cls.__name__ for name, cls in self.registered_modules.items()
+                },
             }
+
+        @self.app.post("/register_module")
+        async def register_module(
+            request: Request,
+        ):
+            """
+            Register a PyTorch module class with the server.
+
+            Args:
+                payload: Pickled module class (bytes)
+            """
+            import dill
+
+            data = await request.body()
+            print(f"Data: {data}")
+            payload = deserialize_payload(data).get("data")
+            name = payload["name"]
+            module_class = payload["module_class"]
+            print(f"Name: {name}")
+            print(f"Module class: {module_class}")
+
+            module_class = dill.loads(module_class)
+
+            # Store in registry
+            self.registered_modules[f"{name}"] = module_class
+
+            print(f"Registered module: {name}")
+            return {"status": "success", "module_name": name}
 
         @self.app.get("/health")
         async def health_check():
@@ -164,34 +149,6 @@ class FastAPITorchServer:
         port = self.port
         print(f"Starting Torch Training Server on {host}:{port}")
         uvicorn.run(self.app, host=host, port=port)
-
-    # def deploy(self, config: dict | None = None) -> Any:
-    #     """Deploy the server.
-
-    #     Args:
-    #         config: Optional configuration dictionary (can override host/port)
-
-    #     Returns:
-    #         Server configuration
-    #     """
-    #     if config:
-    #         host = config.get('host', self.host)
-    #         port = config.get('port', self.port)
-    #     else:
-    #         host = self.host
-    #         port = self.port
-
-    #     print(f"Starting Torch Training Server on {host}:{port}")
-
-    #     self.server_thread = threading.Thread(
-    #         target=uvicorn.run,
-    #         args=(self.app,),
-    #         kwargs={"host": host, "port": port},
-    #         daemon=True  # Thread will close when main program exits
-    #     )
-    #     self.server_thread.start()
-
-    #     return {"host": host, "port": port}
 
 
 class TorchServer:
@@ -220,8 +177,11 @@ class TorchServer:
                 "Modal is not installed. Install it with: pip install modal"
             )
 
+        app_name = "tinkerbell-torch-training"
+        label = "torch-nn-model"
+        app_name = f"{app_name}-{label}"
         # Create Modal app
-        app = modal.App(name="tinkerbell-torch-training")
+        app = modal.App(name=app_name)
 
         # Define Modal image with required dependencies
         image = modal.Image.debian_slim().uv_pip_install(
@@ -230,6 +190,8 @@ class TorchServer:
             "fastapi",
             "uvicorn",
             "pydantic",
+            "cloudpickle",
+            "dill",
         )
         image = image.add_local_python_source(LOCAL_PACKAGE)
 
@@ -244,10 +206,10 @@ class TorchServer:
             gpu="any",  # Request GPU
             volumes={"/checkpoints": volume},
             timeout=86400,  # 24 hours
-            allow_concurrent_inputs=10,
             serialized=True,
         )
-        @modal.asgi_app()
+        @modal.concurrent(max_inputs=24)
+        @modal.asgi_app(label=label)
         def serve():
             """Serve the FastAPI app on Modal."""
             # Create the server instance INSIDE the Modal function

@@ -1,7 +1,8 @@
 from typing import Any
 import httpx
-from tinkerbell.utils import serialize_payload, deserialize_tensor
+from tinkerbell.utils import serialize_payload, deserialize_tensor, serialize_class
 import torch
+import torch.nn as nn
 
 class TorchClient:
 
@@ -17,13 +18,27 @@ class TorchClient:
         self.timeout = timeout
         self.client = httpx.Client(timeout=timeout)
 
+    def register_module(self, name: str, module_class: type[nn.Module]):
+        """Register a custom nn.Module class that can be instantiated via API."""
+        import dill
+        payload = dill.dumps(module_class)
+        payload = {
+            "name": name,
+            "module_class": payload,
+        }
+        # payload = serialize_class(module_class)
+        return self.client.post(f"{self.base_url}/register_module", content=serialize_payload(payload), headers={"Content-Type": "application/octet-stream"})
+
+    def list_registered_modules(self) -> Any:
+        return self.client.get(f"{self.base_url}/registered_modules")
+
     def multiply(self, data: list[Any], value: float) -> Any:
         payload = serialize_payload(data, value=value)
         return self.client.post(f"{self.base_url}/multiply", content=payload, headers={"Content-Type": "application/octet-stream"})
 
-    def initialize_model(self, input_dim: int, output_dim: int) -> Any:
+    def initialize_model(self, config: dict) -> Any:
         """Initialize a PyTorch linear model on the server."""
-        payload = serialize_payload([], input_dim=input_dim, output_dim=output_dim)
+        payload = serialize_payload([], config=config)
         response = self.client.post(
             f"{self.base_url}/initialize_model",
             content=payload,
@@ -41,9 +56,9 @@ class TorchClient:
         )
         return deserialize_tensor(response.content)
 
-    def model_info(self) -> dict:
+    def list_registered_modules(self) -> dict:
         """Get information about the current model on the server."""
-        response = self.client.get(f"{self.base_url}/model_info")
+        response = self.client.get(f"{self.base_url}/registered_modules")
         return response.json()
 
     def health_check(self) -> Any:
@@ -56,85 +71,74 @@ if __name__ == "__main__":
     print("Starting Torch Server Tests")
     print("=" * 60)
 
+    base_url = "https://jesterlabs--torch-nn-model.modal.run"
+
     # Start server
     # server = TorchServer()
     # config = server.deploy()
     # print(f"\n✓ Server started at {config['host']}:{config['port']}")
 
     # Give server time to start
-    time.sleep(2)
+    # time.sleep(2)
 
     # Initialize client
-    import requests
-    
+    client = TorchClient(base_url=base_url, timeout=10.0)
+
     # Call health check with requests
-    base_url = "https://jesterlabs--tinkerbell-torch-training-torchserver-deploy-65957d.modal.run"
-    health_url = f"{base_url}/health"
-    health_response = requests.get(health_url)
-    print(f"Health check response: {health_response.json()}")
-
-    def initialize_model(input_dim: int, output_dim: int) -> Any:
-        """Initialize a PyTorch linear model on the server."""
-        payload = serialize_payload([], input_dim=input_dim, output_dim=output_dim)
-        response = requests.post(
-            f"{base_url}/initialize_model",
-            data=payload,
-            headers={"Content-Type": "application/octet-stream"}
-        )
-        return response.json()
-
-    def forward(data: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the model on the server."""
-        payload = serialize_payload(data)
-        response = requests.post(
-            f"{base_url}/forward",
-            data=payload,
-            headers={"Content-Type": "application/octet-stream"}
-        )
-        return deserialize_tensor(response.content)
-
-    def model_info() -> dict:
-        """Get information about the current model on the server."""
-        response = requests.get(f"{base_url}/model_info")
-        return response.json()
-
-    def forward(data: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the model on the server."""
-        payload = serialize_payload(data)
-        response = requests.post(
-            f"{base_url}/forward",
-            data=payload,
-            headers={"Content-Type": "application/octet-stream"}
-        )
-        return deserialize_tensor(response.content)
-
+    print(f"Health check response: {client.health_check()}")
 
     # Test 3: Initialize model
-    print("\n" + "=" * 60)
-    print("Test 3: Initialize Model")
-    print("=" * 60)
-    init_response = initialize_model(input_dim=10, output_dim=5)
-    print(f"Model initialization response: {init_response}")
+    # print("\n" + "=" * 60)
+    # print("Test 3: Initialize Model")
+    # print("=" * 60)
+    # init_response = client.initialize_model(config={"input_dim": 10, "output_dim": 5})
+    # print(f"Model initialization response: {init_response}")
 
     # Test 4: Model info
     print("\n" + "=" * 60)
     print("Test 4: Model Info")
     print("=" * 60)
-    info = model_info()
+    info = client.list_registered_modules()
     print(f"Model info: {info}")
 
-    # Test 5: Forward pass
+    # Test 5: Register module
     print("\n" + "=" * 60)
-    print("Test 5: Forward Pass")
+    print("Test 5: Register Module")
     print("=" * 60)
-    input_tensor = torch.randn(2, 10)  # batch_size=2, input_dim=10
-    print(f"Input tensor shape: {input_tensor.shape}")
-    print(f"Input tensor:\n{input_tensor}")
-    output = forward(input_tensor)
-    print(f"Output tensor shape: {output.shape}")
-    print(f"Output tensor:\n{output}")
-    print(f"Expected output shape: (2, 5)")
-    print(f"Shape matches: {output.shape == torch.Size([2, 5])}")
+
+    print(f"Before registering module")
+    print(client.list_registered_modules())
+    class CustomLinear(nn.Module):
+        def __init__(self, input_dim: int, output_dim: int):
+            super().__init__()
+            self.linear = nn.Linear(input_dim, output_dim)
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.tanh(self.linear(x)) * 250.0
+    print(f"CustomLinear: {CustomLinear}")
+    register_response = client.register_module(name="custom-linear", module_class=CustomLinear)
+    print(f"Register module response: {register_response}")
+    # Check for 500 error
+    if register_response.status_code == 500:
+        print(f"Error 500: {register_response.text}")
+        print(f"Response: {register_response.json() if register_response.text else 'No response body'}")
+
+    print(f"Register module response: {register_response}")
+    print(f"After registering module")
+    print(client.list_registered_modules())
+
+
+    # # Test 5: Forward pass
+    # print("\n" + "=" * 60)
+    # print("Test 5: Forward Pass")
+    # print("=" * 60)
+    # input_tensor = torch.randn(2, 10)  # batch_size=2, input_dim=10
+    # print(f"Input tensor shape: {input_tensor.shape}")
+    # print(f"Input tensor:\n{input_tensor}")
+    # output = forward(input_tensor)
+    # print(f"Output tensor shape: {output.shape}")
+    # print(f"Output tensor:\n{output}")
+    # print(f"Expected output shape: (2, 5)")
+    # print(f"Shape matches: {output.shape == torch.Size([2, 5])}")
 
 
     # client = TorchClient(base_url="https://jesterlabs--tinkerbell-torch-training-torchserver-deploy-65957d.modal.run/v1", timeout=10.0)
