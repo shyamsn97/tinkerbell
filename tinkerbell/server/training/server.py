@@ -68,3 +68,14 @@ class TrainingServer(abc.ABC):
         Returns:
             Any: A dictionary of the model / server configuration.
         """
+
+    @abc.abstractmethod
+    def connect(self, config) -> Any:
+        """Connect to the server.
+
+        Args:
+            config (_type_): A dictionary of the server configuration.
+
+        Returns:
+            Any: A dictionary of the server configuration.
+        """

@@ -1,8 +1,12 @@
+from this import d
 from typing import Any
 import httpx
-from tinkerbell.utils import serialize_payload, deserialize_tensor, serialize_class
+# from tinkerbell.utils import serialize_payload, deserialize_tensor, serialize_class
 import torch
 import torch.nn as nn
+import dill
+import pickle
+import json
 
 class TorchClient:
 
@@ -20,29 +24,31 @@ class TorchClient:
 
     def register_module(self, name: str, module_class: type[nn.Module]):
         """Register a custom nn.Module class that can be instantiated via API."""
-        import dill
-        payload = dill.dumps(module_class)
+        pickle_bytes = dill.dumps(module_class, protocol=pickle.HIGHEST_PROTOCOL)
         payload = {
             "name": name,
-            "module_class": payload,
+            "module_class": pickle_bytes,
         }
         # payload = serialize_class(module_class)
-        return self.client.post(f"{self.base_url}/register_module", content=serialize_payload(payload), headers={"Content-Type": "application/octet-stream"})
+        return self.client.post(f"{self.base_url}/register_module", content=dill.dumps(payload), headers={"Content-Type": "application/octet-stream"})
 
     def list_registered_modules(self) -> Any:
         return self.client.get(f"{self.base_url}/registered_modules")
 
     def multiply(self, data: list[Any], value: float) -> Any:
-        payload = serialize_payload(data, value=value)
+        payload = dill.dumps(data, value=value)
         return self.client.post(f"{self.base_url}/multiply", content=payload, headers={"Content-Type": "application/octet-stream"})
 
-    def initialize_model(self, config: dict) -> Any:
+    def initialize_model(self, name: str, config: dict) -> Any:
         """Initialize a PyTorch linear model on the server."""
-        payload = serialize_payload([], config=config)
+        payload = json.dumps({
+            "name": name,
+            "config": config,
+        })
         response = self.client.post(
             f"{self.base_url}/initialize_model",
             content=payload,
-            headers={"Content-Type": "application/octet-stream"}
+            headers={"Content-Type": "application/json"}
         )
         return response.json()
 

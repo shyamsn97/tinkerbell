@@ -7,6 +7,10 @@
 
 # from typing import Type
 
+from typing import Any, Dict
+
+import dill
+
 # import httpx
 # import requests
 import torch
@@ -15,7 +19,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response as FastAPIResponse
 
-from tinkerbell.utils import deserialize_payload, serialize_tensor
+from tinkerbell.utils import deserialize_tensor, serialize_tensor
 
 LOCAL_PACKAGE = "tinkerbell"
 
@@ -48,10 +52,9 @@ class FastAPITorchServer:
         @self.app.post("/initialize_model")
         async def initialize_model(request: Request):
             """Initialize a PyTorch model on the server."""
-            body = await request.body()
-            payload = deserialize_payload(body)
-            name = payload.get("name")
-            config = payload.get("config", {})
+            data = await request.json()
+            name = data.get("name")
+            config = data.get("config", {})
 
             # Create model on the server
             if name not in self.registered_modules:
@@ -76,7 +79,9 @@ class FastAPITorchServer:
         @self.app.post("/forward")
         async def forward(request: Request):
             """Forward pass through the model stored on server."""
-            name = request.get("name")
+            data = await request.json()
+            name = data.get("name")
+
             if self.initialized_models.get(name, None) is None:
                 return FastAPIResponse(
                     content=b'{"error": "Model not initialized. Call /initialize_model first."}',
@@ -84,9 +89,7 @@ class FastAPITorchServer:
                     media_type="application/json",
                 )
 
-            body = await request.body()
-            payload = deserialize_payload(body)
-            input_tensor = payload["data"]
+            input_tensor = data.get("data")
 
             # Ensure input is a tensor
             if not isinstance(input_tensor, torch.Tensor):
@@ -111,29 +114,27 @@ class FastAPITorchServer:
             }
 
         @self.app.post("/register_module")
-        async def register_module(
-            request: Request,
-        ):
+        async def register_module(request: Request):
             """
             Register a PyTorch module class with the server.
-
-            Args:
-                payload: Pickled module class (bytes)
+            Expects pickled dict with 'name' and 'module_class_bytes' keys.
             """
-            import dill
 
-            data = await request.body()
-            print(f"Data: {data}")
-            payload = deserialize_payload(data).get("data")
-            name = payload["name"]
-            module_class = payload["module_class"]
-            print(f"Name: {name}")
-            print(f"Module class: {module_class}")
+            body_bytes = await request.body()
+            data = dill.loads(body_bytes)  # or use deserialize_tensor if appropriate
 
-            module_class = dill.loads(module_class)
+            name = data.get("name")
+            module_class_bytes = data.get("module_class")
 
-            # Store in registry
-            self.registered_modules[f"{name}"] = module_class
+            if not name:
+                return FastAPIResponse(
+                    content=b'{"error": "module name is required"}',
+                    status_code=400,
+                    media_type="application/json",
+                )
+
+            module_class = dill.loads(module_class_bytes)
+            self.registered_modules[name] = module_class
 
             print(f"Registered module: {name}")
             return {"status": "success", "module_name": name}
