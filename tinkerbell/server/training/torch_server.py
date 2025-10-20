@@ -7,7 +7,7 @@
 
 # from typing import Type
 
-from typing import Any, Dict
+# from typing import Any, Dict
 
 import dill
 
@@ -19,7 +19,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response as FastAPIResponse
 
-from tinkerbell.utils import deserialize_tensor, serialize_tensor
+from tinkerbell.utils import serialize_tensor
 
 LOCAL_PACKAGE = "tinkerbell"
 

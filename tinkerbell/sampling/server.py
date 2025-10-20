@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import uvicorn
@@ -41,14 +44,40 @@ class GetWeightRequest(BaseModel):
     truncate_size: int = 100
 
 
-class FastAPISGLangServer:
+class SGLangServerConfig(BaseModel):
+    model_name: str
+    tokenizer: Optional[str] = None
+    engine_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DeployConfig(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 8000
+
+    @property
+    def deployment_type(self) -> str:
+        return "local"
+
+
+class ModalDeployConfig(DeployConfig):
+    gpu: str = "H100:1"
+    timeout: int = 86400
+    serialized: bool = True
+    container_idle_timeout: int = 300
+
+    @property
+    def deployment_type(self) -> str:
+        return "modal"
+
+
+class SGLangServer:
     def __init__(
         self,
         model_name: str,
         tokenizer: Optional[str] = None,
         host: str = "0.0.0.0",
         port: int = 8000,
-        **engine_kwargs,
+        engine_kwargs: Dict[str, Any] = Field(default_factory=dict),
     ):
         self.model_name = model_name
         self.tokenizer = tokenizer or model_name
@@ -57,7 +86,6 @@ class FastAPISGLangServer:
         self.engine_kwargs = engine_kwargs
         self.app = FastAPI(title="SGLang Inference Server")
         self.engine = None
-        self.setup_routes()
 
     def setup_routes(self):
         @self.app.on_event("startup")
@@ -151,8 +179,8 @@ class FastAPISGLangServer:
                 for i, result in enumerate(results)
             ]
 
-        @self.app.post("/get_weight")
-        async def get_weight(request: GetWeightRequest):
+        @self.app.post("/get_weights_by_name")
+        async def get_weights_by_name(request: GetWeightRequest):
             """
             Get a model weight by parameter name.
 
@@ -172,7 +200,108 @@ class FastAPISGLangServer:
                 logger.error(f"Error getting weight '{request.weight_name}': {str(e)}")
                 return {"error": str(e)}
 
-    def start(self):
-        """Start the FastAPI server."""
-        uvicorn.run(self.app, host=self.host, port=self.port, log_level="info")
+    def deploy(self, deploy_config: DeployConfig = DeployConfig()) -> None:
+        """Deploy the SGLang server."""
+        self.setup_routes()
+        uvicorn.run(
+            self.app, host=deploy_config.host, port=deploy_config.port, log_level="info"
+        )
 
+
+class ModalSGLangServer(SGLangServer):
+
+    def deploy(
+        self,
+        deploy_config: DeployConfig = DeployConfig(),
+    ) -> None:
+        """
+        Deploy the training server to Modal.
+
+        Returns:
+            modal.Function: The deployed Modal function
+        """
+
+        try:
+            import modal
+            from modal import runner
+        except ImportError:
+            raise ImportError(
+                "Modal is not installed. Install it with: pip install modal"
+            )
+
+        env_variables = {
+            "HF_TOKEN": os.environ.get("HF_TOKEN", None),
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        }
+
+        app_name = "tinkerbell-sglang-inference"
+        label = "sglang-model"
+        app_name = f"{app_name}-{label}"
+        # Create Modal app
+        app = modal.App(name=app_name)
+
+        # Define Modal image with required dependencies
+        image = (
+            modal.Image.from_registry(
+                "nvidia/cuda:12.6.0-devel-ubuntu22.04", add_python="3.12"
+            )
+            .apt_install("libnuma-dev", "build-essential", "clang")
+            .env({"CUDA_HOME": "/usr/local/cuda"})  # Add this line
+            .pip_install(
+                "torch==2.4.0",
+                extra_index_url="https://download.pytorch.org/whl/cu126",
+            )
+            .uv_pip_install(
+                "pybase64",
+                "zmq",
+                "xformers",
+                "transformers",
+                "numpy",
+                "fastapi",
+                "uvicorn",
+                "pydantic",
+                "cloudpickle",
+                "dill",
+                "flashinfer-python",  # Install FlashInfer first
+                "sglang[all]==0.5.2",
+                "sgl-kernel",
+                "huggingface_hub",
+                "hf_transfer",
+            )
+            .env(env_variables)
+        )
+        image = image.add_local_python_source("tinkerbell")
+
+        # Create a volume for model checkpoints if needed
+        volume = modal.Volume.from_name(
+            "tinkerbell-checkpoints", create_if_missing=True
+        )
+
+        # Define the Modal function
+        @app.function(
+            image=image,
+            gpu=deploy_config.gpu,  # Request GPU
+            volumes={"/checkpoints": volume},
+            timeout=deploy_config.timeout,  # 24 hours
+            serialized=deploy_config.serialized,
+            container_idle_timeout=deploy_config.container_idle_timeout,  # 5 minutes
+        )
+        @modal.concurrent(max_inputs=24)
+        @modal.asgi_app(label=label)
+        def serve():
+            """Serve the FastAPI app on Modal."""
+            # Create the server instance INSIDE the Modal function
+            # This prevents Modal from trying to serialize it
+            server = SGLangServer(
+                model_name=self.model_name,
+                tokenizer=self.tokenizer,
+                host=deploy_config.host,
+                port=deploy_config.port,
+                engine_kwargs=self.engine_kwargs,
+            )
+            server.setup_routes()
+            return server.app
+
+        with modal.enable_output():
+            # Deploy the app
+            runner.deploy_app(app)
