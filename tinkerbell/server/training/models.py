@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field, Callable
 from typing import Any
+
 import torch
+from pydantic import BaseModel, Field
 
 DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
     "name": "adamw",
@@ -13,9 +14,11 @@ DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {
     "scheduler": "cosine",
 }
 
+
 class HealthResponse(BaseModel):
     status: str
     name: str
+
 
 class SetupTrainRequest(BaseModel):
     rank: int
@@ -24,25 +27,34 @@ class SetupTrainRequest(BaseModel):
     master_port: str
     model_path: str
     parallelize_plan: dict[str, str]
-    optimizer_params: dict[str, Any] = Field(default_factory=lambda: DEFAULT_OPTIMIZER_PARAMS)
-    scheduler_params: dict[str, Any] = Field(default_factory=lambda: DEFAULT_SCHEDULER_PARAMS)
+    optimizer_params: dict[str, Any] = Field(
+        default_factory=lambda: DEFAULT_OPTIMIZER_PARAMS
+    )
+    scheduler_params: dict[str, Any] = Field(
+        default_factory=lambda: DEFAULT_SCHEDULER_PARAMS
+    )
     # metrics_fn: Callable
     # callbacks: list[Callable]
+
 
 class SetupTrainResponse(BaseModel):
     success: bool
     message: str
 
+
 class ForwardRequest(BaseModel):
     inputs: dict[str, torch.Tensor]
     forward_kwargs: dict[str, Any] = Field(default_factory=dict)
 
+
 class ForwardResponse(BaseModel):
     outputs: dict[str, torch.Tensor]
+
 
 class ForwardBackwardRequest(BaseModel):
     inputs: dict[str, torch.Tensor]
     forward_kwargs: dict[str, Any] = Field(default_factory=dict)
+
 
 class ForwardBackwardResponse(BaseModel):
     loss: float | None

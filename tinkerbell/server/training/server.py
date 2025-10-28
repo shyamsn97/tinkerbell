@@ -1,7 +1,18 @@
 import abc
-from fastapi import FastAPI
-from tinkerbell.server.training.models import SetupTrainRequest, SetupTrainResponse, ForwardRequest, ForwardResponse, ForwardBackwardRequest, ForwardBackwardResponse, HealthResponse
+
 import uvicorn
+from fastapi import FastAPI
+
+from tinkerbell.server.training.models import (
+    ForwardBackwardRequest,
+    ForwardBackwardResponse,
+    ForwardRequest,
+    ForwardResponse,
+    HealthResponse,
+    SetupTrainRequest,
+    SetupTrainResponse,
+)
+
 
 class TrainingServer(metaclass=abc.ABCMeta):
 
@@ -66,7 +77,9 @@ class TrainingServer(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    async def forward_backward(self, request: ForwardBackwardRequest) -> ForwardBackwardResponse:
+    async def forward_backward(
+        self, request: ForwardBackwardRequest
+    ) -> ForwardBackwardResponse:
         """Forward and backward pass through the model and compute the loss, as well as do a backward pass.
 
         Args:

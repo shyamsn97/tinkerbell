@@ -305,7 +305,7 @@ class ModalSGLangServer(SGLangServer):
                 "sgl-kernel",
                 "huggingface_hub",
                 "hf_transfer",
-                "ray"
+                "ray",
             )
             .env(env_variables)
         )

@@ -14,12 +14,12 @@ def get_submodules_with_wildcard(model, pattern):
     """Get all submodules matching a wildcard pattern."""
     regex_pattern = fnmatch.translate(pattern)
     regex = re.compile(regex_pattern)
-    
+
     matching_modules = []
     for name, module in model.named_modules():
         if regex.match(name):
             matching_modules.append(name)
-    
+
     return matching_modules
 
 
@@ -29,7 +29,7 @@ def print_gpu_memory(prefix="", rank=0):
     reserved = torch.cuda.memory_reserved() / 1024**3
     max_allocated = torch.cuda.max_memory_allocated() / 1024**3
     total = torch.cuda.get_device_properties(rank).total_memory / 1024**3
-    
+
     print(f"[Rank {rank}] {prefix}")
     print(f"  GPU Memory - Allocated: {allocated:.2f}GB | Reserved: {reserved:.2f}GB | Max: {max_allocated:.2f}GB | Total: {total:.2f}GB")
 
@@ -64,13 +64,13 @@ class TensorParallelWorker:
         config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
         config.n_layer = 4  # Small model for demo
         self.model = AutoModelForCausalLM.from_config(config)
-        
+
         # Define parallelization strategies
         strategies = {
             "column": ColwiseParallel,
             "row": RowwiseParallel,
         }
-        
+
         # Define parallelization plan
         parallelize_plan = {
             # Attention projections (all layers)
@@ -84,7 +84,7 @@ class TensorParallelWorker:
             "model.layers.*.mlp.up_proj": "column",
             "model.layers.*.mlp.down_proj": "row",
         }
-        
+
         # Build module parallelization plan
         module_parallelization_plan = {}
         for pattern in parallelize_plan.keys():
@@ -92,21 +92,21 @@ class TensorParallelWorker:
             module_names = get_submodules_with_wildcard(self.model, pattern)
             for name in module_names:
                 module_parallelization_plan[name] = strategy
-        
+
         # Initialize device mesh and parallelize model
         device_mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("tp",))
         self.model = parallelize_module(self.model, device_mesh, module_parallelization_plan)
         self.model = self.model.cuda()
-        
+
         # Print memory - clarify that each actor uses device 0 (Ray's CUDA_VISIBLE_DEVICES isolation)
         print_gpu_memory(f"Model loaded (Rank {self.rank}, physical device isolated by Ray as cuda:0)", 0)
 
         # Setup optimizer - disable foreach to handle mixed DTensor/Tensor parameters
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=5e-5, foreach=False)
-        
+
         print(f"[Rank {self.rank}] Setup complete")
         return True
-    
+
     def train_step(self):
         """Execute a single training step."""
         # Prepare data
@@ -114,21 +114,21 @@ class TensorParallelWorker:
         tokenizer.pad_token = tokenizer.eos_token
         inputs = tokenizer(["Hello world!"], return_tensors="pt", padding=True)
         input_ids = inputs["input_ids"].cuda()
-        
+
         # Training step
         self.model.train()
         outputs = self.model(input_ids=input_ids, labels=input_ids)
         loss = outputs.loss
-        
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        
+
         if self.rank == 0:
             print(f"[Rank {self.rank}] ✓ Training step complete! Loss: {loss.item():.4f}")
-        
+
         return loss.item() if self.rank == 0 else None
-    
+
     def cleanup(self):
         """Clean up the PyTorch distributed process group."""
         print(f"[Rank {self.rank}] Cleaning up torch distributed")

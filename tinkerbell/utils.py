@@ -1,21 +1,23 @@
 """Utility functions for efficient tensor serialization/deserialization."""
 
-import pickle
-from typing import Any
 import fnmatch
+import pickle
 import re
+from typing import Any
+
 import dill
+
 
 def get_submodules_with_wildcard(model, pattern):
     """Get all submodules matching a wildcard pattern."""
     regex_pattern = fnmatch.translate(pattern)
     regex = re.compile(regex_pattern)
-    
+
     matching_modules = []
     for name, module in model.named_modules():
         if regex.match(name):
             matching_modules.append(name)
-    
+
     return matching_modules
 
 
@@ -75,3 +77,26 @@ def serialize_class(cls: type) -> bytes:
 def deserialize_class(data: bytes) -> type:
     """Deserialize a class definition using dill."""
     return dill.loads(data)
+
+
+def get_host_and_port(server_url: str) -> tuple[str, int | None]:
+    """
+    Parse server URL to extract host and port.
+
+    Args:
+        server_url: URL in format "http://host:port", "host:port", "http://host", or "host"
+
+    Returns:
+        Tuple of (host, port) where port is None if not specified
+    """
+    from urllib.parse import urlparse
+
+    # Add scheme if not present to help urlparse
+    if not server_url.startswith(("http://", "https://")):
+        server_url = "https://" + server_url
+
+    parsed = urlparse(server_url)
+    host = parsed.hostname or parsed.netloc.split(":")[0]
+    port = parsed.port
+
+    return host, port

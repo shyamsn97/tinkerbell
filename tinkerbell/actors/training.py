@@ -1,20 +1,27 @@
 import os
+from typing import Any
+
 import torch
 import torch.distributed as dist
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    RowwiseParallel,
+    parallelize_module,
+)
+
 from tinkerbell.utils import get_submodules_with_wildcard
-from typing import Any
+
 
 class TrainingActor:
     def __init__(
-        self, 
-        rank: int, 
-        world_size: int, 
-        master_addr: str, 
+        self,
+        rank: int,
+        world_size: int,
+        master_addr: str,
         master_port: str,
-        model_path: str = "Qwen/Qwen3-0.6B",
+        model_name: str,
+        model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
         optimizer_params: dict[str, Any] = {},
         scheduler_params: dict[str, Any] = {},
@@ -23,7 +30,8 @@ class TrainingActor:
         self.world_size = world_size
         self.master_addr = master_addr
         self.master_port = master_port
-        self.model_path = model_path
+        self.model_name = model_name
+        self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.optimizer_params = optimizer_params
         self.scheduler_params = scheduler_params
@@ -41,11 +49,15 @@ class TrainingActor:
             "adadelta": torch.optim.Adadelta,
         }
         optimizer_config["foreach"] = False
-        optimizer = optimizer_dict[optimizer_name](self.model.parameters(), **optimizer_config)
+        optimizer = optimizer_dict[optimizer_name](
+            self.model.parameters(), **optimizer_config
+        )
         return optimizer
 
     def setup(self):
         """Initialize the PyTorch distributed process group and model."""
+        from transformers import AutoConfig, AutoModelForCausalLM
+
         print(f"[Rank {self.rank}] Initializing torch distributed")
 
         # Set environment variables for distributed setup
@@ -62,8 +74,7 @@ class TrainingActor:
         torch.cuda.set_device(0)
 
         # Load model
-        config = AutoConfig.from_pretrained(self.model_path)
-        config.n_layer = 4  # Small model for demo
+        config = AutoConfig.from_pretrained(self.model_name, **self.model_kwargs)
         self.model = AutoModelForCausalLM.from_config(config)
 
         # Define parallelization strategies
@@ -79,7 +90,7 @@ class TrainingActor:
         #     "model.layers.*.self_attn.k_proj": "column",
         #     "model.layers.*.self_attn.v_proj": "column",
         #     "model.layers.*.self_attn.o_proj": "row",
-            
+
         #     # MLP projections (all layers)
         #     "model.layers.*.mlp.gate_proj": "column",
         #     "model.layers.*.mlp.up_proj": "column",
@@ -95,8 +106,20 @@ class TrainingActor:
                 module_parallelization_plan[name] = strategy
 
         # Initialize device mesh and parallelize model
-        device_mesh = init_device_mesh("cuda", (1, self.world_size,), mesh_dim_names=("dp", "tp",))
-        self.model = parallelize_module(self.model, device_mesh, module_parallelization_plan)
+        device_mesh = init_device_mesh(
+            "cuda",
+            (
+                1,
+                self.world_size,
+            ),
+            mesh_dim_names=(
+                "dp",
+                "tp",
+            ),
+        )
+        self.model = parallelize_module(
+            self.model, device_mesh, module_parallelization_plan
+        )
         self.model = self.model.cuda()
 
         # # Print memory - clarify that each actor uses device 0 (Ray's CUDA_VISIBLE_DEVICES isolation)
@@ -117,24 +140,25 @@ class TrainingActor:
     def step(self):
         self.optimizer.step()
 
-    def forward(self, input_ids: torch.Tensor, **kwargs):
-        outputs = self.model(input_ids=input_ids, **kwargs)
+    async def forward(self, inputs: dict[str, torch.Tensor], **kwargs):
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor):
+                inputs[key] = value.cuda()
+
+        outputs = self.model(**inputs, **kwargs)
         return outputs
 
-    def forward_backward(self, inputs: dict[str, torch.Tensor], **kwargs):
+    async def forward_backward(self, inputs: dict[str, torch.Tensor], **kwargs):
         """Execute a single training step."""
         # Prepare data
         # tokenizer = AutoTokenizer.from_pretrained(self.model_path)
         # tokenizer.pad_token = tokenizer.eos_token
         # inputs = tokenizer(["Hello world!"], return_tensors="pt", padding=True)
         # input_ids = inputs["input_ids"].cuda()
-        for key, value in inputs.items():
-            if isinstance(value, torch.Tensor):
-                inputs[key] = value.cuda()
 
         # Training step
         self.model.train()
-        outputs = self.model(**inputs, **kwargs)
+        outputs = await self.forward(inputs, **kwargs)
         loss = outputs.loss
 
         self.optimizer.zero_grad()
