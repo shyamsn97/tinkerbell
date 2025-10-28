@@ -1,81 +1,83 @@
 import abc
-from typing import Any
+from fastapi import FastAPI
+from tinkerbell.server.training.models import SetupTrainRequest, SetupTrainResponse, ForwardRequest, ForwardResponse, ForwardBackwardRequest, ForwardBackwardResponse, HealthResponse
+import uvicorn
 
+class TrainingServer(metaclass=abc.ABCMeta):
 
-class TrainingServer(abc.ABC):
+    def __init__(
+        self,
+        name: str,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+    ):
+        self.name = name
+        self.host = host
+        self.port = port
+        self.app = FastAPI()
+        self.setup_routes()
+        self.health_status = "not_initialized"
+
+    def setup_routes(self):
+
+        @self.app.get("/health")
+        async def health() -> HealthResponse:
+            return HealthResponse(
+                status=self.health_status,
+                name=self.name,
+            )
+
+        @self.app.post("/setup")
+        async def setup(request: SetupTrainRequest) -> SetupTrainResponse:
+            response = await self.setup(request)
+            self.health_status = "initialized"
+            return response
+
+        @self.app.post("/forward")
+        async def forward(request: ForwardRequest):
+            response = await self.forward(request)
+            return response
+
+        @self.app.post("/forward_backward")
+        async def forward_backward(request: ForwardBackwardRequest):
+            response = await self.forward_backward(request)
+            return response
 
     @abc.abstractmethod
-    def forward(self, data: list[Any], loss_fn) -> Any:
+    async def setup(self, request: SetupTrainRequest) -> SetupTrainResponse:
+        """Setup the training environment.
+
+        Args:
+            request (SetupTrainRequest): A request containing the training environment configuration.
+
+        Returns:
+            SetupTrainResponse: A response containing the training environment configuration.
+        """
+
+    @abc.abstractmethod
+    async def forward(self, request: ForwardRequest) -> ForwardResponse:
         """Forward pass through the model and compute the loss.
 
         Args:
-            data (list[Any]): A list of data points to be processed by the model.
-            loss_fn (_type_): A loss function to be used to compute the loss.
+            request (ForwardRequest): A request containing the data and loss function.
 
         Returns:
-            Any: A list of loss values.
+            ForwardResponse: A response containing the output and loss.
         """
 
     @abc.abstractmethod
-    def forward_backward(self, data: list[Any], loss_fn) -> Any:
+    async def forward_backward(self, request: ForwardBackwardRequest) -> ForwardBackwardResponse:
         """Forward and backward pass through the model and compute the loss, as well as do a backward pass.
 
         Args:
-            data (list[Any]): A list of data points to be processed by the model.
-            loss_fn (_type_): A loss function to be used to compute the loss.
+            request (ForwardBackwardRequest): A request containing the data and loss function.
 
         Returns:
-            Any: A list of loss values.
+            ForwardBackwardResponse: A response containing the output and loss.
         """
 
-    @abc.abstractmethod
-    def optim_step(self, optimizer_params) -> Any:
-        """Perform an optimization step.
-
-        Args:
-            optimizer_params (_type_): A dictionary of optimizer parameters.
-
-        Returns:
-            Any: A dictionary of optimizer parameters.
-        """
-
-    @abc.abstractmethod
-    def save_state(self) -> Any:
-        """Save the state of the model.
-
-        Returns:
-            Any: A dictionary of the model state.
-        """
-
-    @abc.abstractmethod
-    def load_state(self, state: Any) -> Any:
-        """Load the state of the model.
-
-        Args:
-            state (_type_): A dictionary of the model state.
-
-        Returns:
-            Any: A dictionary of the model state.
-        """
-
-    @abc.abstractmethod
-    def deploy(self, config) -> Any:
-        """Deploy the model.
-
-        Args:
-            config (_type_): A dictionary of the model / server configuration.
-
-        Returns:
-            Any: A dictionary of the model / server configuration.
-        """
-
-    @abc.abstractmethod
-    def connect(self, config) -> Any:
-        """Connect to the server.
-
-        Args:
-            config (_type_): A dictionary of the server configuration.
-
-        Returns:
-            Any: A dictionary of the server configuration.
-        """
+    def run(self) -> str:
+        """Run the FastAPI server"""
+        uvicorn.run(self.app, host=self.host, port=self.port)
+        self.server_url = f"https://{self.host}:{self.port}"
+        return self.server_url

@@ -1,12 +1,22 @@
 """Utility functions for efficient tensor serialization/deserialization."""
 
-# import io
 import pickle
 from typing import Any
-
+import fnmatch
+import re
 import dill
 
-# import torch
+def get_submodules_with_wildcard(model, pattern):
+    """Get all submodules matching a wildcard pattern."""
+    regex_pattern = fnmatch.translate(pattern)
+    regex = re.compile(regex_pattern)
+    
+    matching_modules = []
+    for name, module in model.named_modules():
+        if regex.match(name):
+            matching_modules.append(name)
+    
+    return matching_modules
 
 
 def serialize_tensor(obj: Any) -> bytes:

@@ -1,34 +1,25 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import httpx
-from pydantic import BaseModel
 
-from tinkerbell.sampling.server import DeployConfig, ModalSGLangServer, SGLangServer
-
-
-class SamplingClientConfig(BaseModel):
-    server_url: str
-    server_port: Optional[int] = None
-    timeout: int = 600
-
-
-# class SamplingClientDeployConfig(BaseModel):
-#     server_config: SGLangServerConfig
-#     redeploy: bool = False
+from tinkerbell.sampling.server import (
+    DeployConfig,
+    ModalSGLangServer,
+    ServerConfig,
+    SGLangServer,
+)
 
 
 class SamplingClient:
     def __init__(
         self,
         server_url: str,
-        server_port: Optional[int] = None,
         timeout: int = 600,
     ):
         self.server_url = server_url
-        if server_port:
-            self.server_url = f"{self.server_url}:{server_port}"
+        self.timeout = timeout
+
+    def set_timeout(self, timeout: int):
         self.timeout = timeout
 
     def health(self) -> dict:
@@ -79,40 +70,35 @@ class SamplingClient:
     def connect(
         cls,
         server_url: str,
-        server_port: Optional[int] = None,
         timeout: int = 600,
     ) -> SamplingClient:
-        server_url = f"{server_url}"
-        if server_port:
-            server_url = f"{server_url}:{server_port}"
         response = httpx.get(f"{server_url}/health")
         if response.status_code != 200:
             raise ValueError(f"Failed to connect to the server: {response.text}")
-        return cls(server_url=server_url, server_port=server_port, timeout=timeout)
+        return cls(
+            server_url=server_url,
+            timeout=timeout,
+        )
 
-    # @classmethod
-    # def connect_or_deploy(
-    #     cls,
-    #     server_url: str,
-    #     server_port: Optional[int] = None,
-    #     timeout: int = 600,
-    # ) -> SamplingClient:
-    #     try:
-    #         return cls.connect(server_url, server_port, timeout)
-    #     except Exception as e:
-    #         return cls.deploy(server_url, server_port, timeout)
     @classmethod
-    def deploy(cls, *args, deploy_config: DeployConfig, **kwargs) -> SamplingClient:
+    def deploy(
+        cls,
+        server_config: ServerConfig,
+        deploy_config: DeployConfig = DeployConfig(),
+    ) -> SamplingClient:
 
         if deploy_config.deployment_type == "modal":
-            server = ModalSGLangServer(*args, **kwargs)
+            server = ModalSGLangServer(
+                config=server_config,
+            )
         else:
-            server = SGLangServer(*args, **kwargs)
+            server = SGLangServer(
+                config=server_config,
+            )
 
-        server.deploy(deploy_config)
+        server_url = server.deploy(deploy_config)
 
         # Return a client connected to the deployed server
-        return cls.connect(
-            server_url=f"http://{deploy_config.host}",
-            server_port=deploy_config.port,
+        return cls(
+            server_url=server_url,
         )
