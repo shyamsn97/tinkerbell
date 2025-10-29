@@ -118,7 +118,7 @@ class TrainingActor:
             ),
         )
         self.model = parallelize_module(
-            self.model, device_mesh, module_parallelization_plan
+            self.model, device_mesh["tp"], module_parallelization_plan
         )
         self.model = self.model.cuda()
 
@@ -140,16 +140,21 @@ class TrainingActor:
     def step(self):
         self.optimizer.step()
 
-    async def forward(self, inputs: dict[str, torch.Tensor], **kwargs):
-        for key, value in inputs.items():
-            if isinstance(value, torch.Tensor):
-                inputs[key] = value.cuda()
+    async def forward(self, inputs: dict[str, Any], **kwargs):
+        """Forward pass with automatic tensor conversion from lists/arrays."""
+        # Convert inputs to tensors if they're not already
+        for key in inputs:
+            if isinstance(inputs[key], (list, tuple)):
+                # Convert from JSON-deserialized lists back to tensors
+                inputs[key] = torch.tensor(inputs[key])
+            if isinstance(inputs[key], torch.Tensor):
+                inputs[key] = inputs[key].cuda()
 
         outputs = self.model(**inputs, **kwargs)
         return outputs
 
-    async def forward_backward(self, inputs: dict[str, torch.Tensor], **kwargs):
-        """Execute a single training step."""
+    async def forward_backward(self, inputs: dict[str, Any], **kwargs):
+        """Execute a single training step (accepts tensors or lists from JSON)."""
         # Prepare data
         # tokenizer = AutoTokenizer.from_pretrained(self.model_path)
         # tokenizer.pad_token = tokenizer.eos_token

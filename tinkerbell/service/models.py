@@ -48,7 +48,7 @@ class CreateTrainingActorsResponse(BaseModel):
 class ForwardRequest(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
-    inputs: dict[str, Any]
+    inputs: dict[str, Any] = Field(default_factory=lambda: {})
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 
 
@@ -58,7 +58,7 @@ class ForwardResponse(BaseModel):
 
 class ForwardBackwardRequest(BaseModel):
     model_name: str
-    inputs: dict[str, Any]
+    inputs: dict[str, Any] = Field(default_factory=lambda: {})
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 

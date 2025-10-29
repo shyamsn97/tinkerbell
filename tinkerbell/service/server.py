@@ -140,6 +140,43 @@ class TinkerbellServiceBackend(ServiceBackend):
             )
 
 
+class TinkerbellServiceDeployment:
+    def __init__(self, server_url: str):
+        self.backend = TinkerbellServiceBackend(server_url)
+
+    @APP.get("/health")
+    async def health(self) -> HealthResponse:
+        return HealthResponse(
+            status=self.backend.health_status,
+            name=self.backend.name,
+        )
+
+    @APP.post("/create_training_actors")
+    async def create_training_actors(
+        self,
+        request: CreateTrainingActorsRequest,
+    ) -> CreateTrainingActorsResponse:
+        return await self.backend.create_training_actors(request)
+
+    @APP.post("/forward")
+    async def forward(self, request: ForwardRequest) -> ForwardResponse:
+        return await self.backend.forward(request)
+
+    @APP.post("/forward_backward")
+    async def forward_backward(
+        self,
+        request: ForwardBackwardRequest,
+    ) -> ForwardBackwardResponse:
+        return await self.backend.forward_backward(request)
+
+    @APP.post("/get_actor_status")
+    async def get_actor_status(
+        self,
+        request: ActorStatusRequest,
+    ) -> ActorStatusResponse:
+        return await self.backend.get_actor_status(request)
+
+
 def deploy_service(server_url: str, **deployment_kwargs):
     """Deploy the TinkerbellService with Ray Serve.
 
@@ -163,46 +200,12 @@ def deploy_service(server_url: str, **deployment_kwargs):
 
     deployment_kwargs["ray_actor_options"] = {"num_gpus": 0}
 
-    @serve.deployment(**deployment_kwargs)
-    @serve.ingress(APP)
-    class TinkerbellServiceDeployment:
-        def __init__(self, server_url: str):
-            self.backend = TinkerbellServiceBackend(server_url)
-
-        @APP.get("/health")
-        async def health(self) -> HealthResponse:
-            return HealthResponse(
-                status=self.backend.health_status,
-                name=self.backend.name,
-            )
-
-        @APP.post("/create_training_actors")
-        async def create_training_actors(
-            self,
-            request: CreateTrainingActorsRequest,
-        ) -> CreateTrainingActorsResponse:
-            return await self.backend.create_training_actors(request)
-
-        @APP.post("/forward")
-        async def forward(self, request: ForwardRequest) -> ForwardResponse:
-            return await self.backend.forward(request)
-
-        @APP.post("/forward_backward")
-        async def forward_backward(
-            self,
-            request: ForwardBackwardRequest,
-        ) -> ForwardBackwardResponse:
-            return await self.backend.forward_backward(request)
-
-        @APP.post("/get_actor_status")
-        async def get_actor_status(
-            self,
-            request: ActorStatusRequest,
-        ) -> ActorStatusResponse:
-            return await self.backend.get_actor_status(request)
+    deployment = serve.deployment(**deployment_kwargs)(
+        serve.ingress(APP)(TinkerbellServiceDeployment)
+    )
 
     serve.run(
-        TinkerbellServiceDeployment.bind(server_url),
+        deployment.bind(server_url),
     )
 
     return server_url
