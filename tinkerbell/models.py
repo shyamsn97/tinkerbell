@@ -35,6 +35,7 @@ class CreateTrainingActorsRequest(BaseModel):
     )
     lora_config: dict[str, Any] = Field(default_factory=lambda: {})
     ray_worker_options: dict[str, Any] = Field(default_factory=lambda: {})
+    wait_until_ready: bool = False
     # metrics_fn: Callable
     # callbacks: list[Callable]
 
@@ -76,13 +77,6 @@ class ActorStatusResponse(BaseModel):
     message: str | None = None
 
 
-class ActorGroup(BaseModel):
-    workers: list[Any]
-    setup_refs: list[Any]
-    status: Literal["ready", "initializing"]
-    request: Any
-
-
 class DeployConfig(BaseModel):
     @property
     def deployment_type(self) -> str:
@@ -100,3 +94,7 @@ class ModalDeployConfig(DeployConfig):
     @property
     def deployment_type(self) -> str:
         return "modal"
+
+
+class RemoteFuture(BaseModel):
+    request_id: str

@@ -1,4 +1,5 @@
 import os
+import traceback
 from typing import Any
 
 import torch
@@ -83,20 +84,6 @@ class TrainingActor:
             "row": RowwiseParallel,
         }
 
-        # Define parallelization plan
-        # parallelize_plan = {
-        #     # Attention projections (all layers)
-        #     "model.layers.*.self_attn.q_proj": "column",
-        #     "model.layers.*.self_attn.k_proj": "column",
-        #     "model.layers.*.self_attn.v_proj": "column",
-        #     "model.layers.*.self_attn.o_proj": "row",
-
-        #     # MLP projections (all layers)
-        #     "model.layers.*.mlp.gate_proj": "column",
-        #     "model.layers.*.mlp.up_proj": "column",
-        #     "model.layers.*.mlp.down_proj": "row",
-        # }
-
         # Build module parallelization plan
         module_parallelization_plan = {}
         for pattern in self.parallelize_plan.keys():
@@ -140,20 +127,43 @@ class TrainingActor:
     def step(self):
         self.optimizer.step()
 
-    async def forward(self, inputs: dict[str, Any], **kwargs):
+    async def forward(self, inputs: list[dict[str, Any]], **kwargs):
         """Forward pass with automatic tensor conversion from lists/arrays."""
         # Convert inputs to tensors if they're not already
-        for key in inputs:
-            if isinstance(inputs[key], (list, tuple)):
-                # Convert from JSON-deserialized lists back to tensors
-                inputs[key] = torch.tensor(inputs[key])
-            if isinstance(inputs[key], torch.Tensor):
-                inputs[key] = inputs[key].cuda()
+        try:
+            for input in inputs:
+                for key in input:
+                    if isinstance(input[key], (list, tuple)):
+                        # Convert from JSON-deserialized lists back to tensors
+                        input[key] = torch.tensor(input[key])
+                    if isinstance(input[key], torch.Tensor):
+                        input[key] = input[key].cuda()
 
-        outputs = self.model(**inputs, **kwargs)
-        return outputs
+            batch_inputs = {}
+            for key in inputs[0]:
+                if isinstance(inputs[0][key], torch.Tensor):
+                    batch_inputs[key] = torch.stack(
+                        [input[key] for input in inputs]
+                    ).squeeze(0)
+                else:
+                    batch_inputs[key] = [input[key] for input in inputs]
 
-    async def forward_backward(self, inputs: dict[str, Any], **kwargs):
+            print(f"Actor Batch inputs: {batch_inputs}")
+            print(f"Actor Forward kwargs: {kwargs}")
+            print("Input shapes:")
+            for key in batch_inputs:
+                print(f"  - {key}: {batch_inputs[key].shape}")
+            # for key in kwargs:
+            #     print(f"  - {key}: {kwargs[key].shape}")
+            outputs = self.model(**batch_inputs, **kwargs)
+            print(f"Actor Outputs: {outputs}")
+            return outputs
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            print(f"Error in forward: {e}\n{tb_str}")
+            raise e
+
+    async def forward_backward(self, inputs: list[dict[str, Any]], **kwargs):
         """Execute a single training step (accepts tensors or lists from JSON)."""
         # Prepare data
         # tokenizer = AutoTokenizer.from_pretrained(self.model_path)
@@ -170,7 +180,7 @@ class TrainingActor:
         loss.backward()
         self.optimizer.step()
 
-        return loss.item() if self.rank == 0 else None
+        return {"loss": loss.item() if self.rank == 0 else None}
 
     def cleanup(self):
         """Clean up the PyTorch distributed process group."""

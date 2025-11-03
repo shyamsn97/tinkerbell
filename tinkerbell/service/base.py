@@ -4,7 +4,7 @@ import abc
 
 from fastapi import FastAPI
 
-from tinkerbell.service.models import (
+from tinkerbell.models import (
     ActorStatusRequest,
     ActorStatusResponse,
     CreateTrainingActorsRequest,

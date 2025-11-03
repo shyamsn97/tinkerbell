@@ -159,20 +159,20 @@ class SGLangInferenceActor:
             **engine_kwargs,
         )
         print(f"✓ SGLang engine initialized with {tp_size} GPUs")
-        
-    def generate(self, ):
+
+    def generate(self, prompt: str, max_tokens: int = 100, temperature: float = 0.7):
         """Generate text from a prompt."""
         sampling_params = {
             "max_new_tokens": max_tokens,
             "temperature": temperature,
         }
-        
+
         # Use async_generate with the event loop
         outputs = self.loop.run_until_complete(
             self.engine.async_generate(prompt, sampling_params)
         )
         return outputs["text"]
-    
+
     def shutdown(self):
         del self.engine
         return True

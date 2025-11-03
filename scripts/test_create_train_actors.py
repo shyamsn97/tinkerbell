@@ -46,11 +46,11 @@ def check_actor_status(client: httpx.Client):
         })
         status_data = response.json()
         print(f"Actor status: {status_data['status']}")
-        
+
         if status_data["status"] == "ready":
             print("Actors are ready!")
             break
-        
+
         time.sleep(2)
 
 
@@ -59,7 +59,7 @@ def forward_backward_example(client: httpx.Client):
     # Load tokenizer
     print(f"\nLoading tokenizer for {MODEL_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    
+
     # Example training batch
     texts = [
         "The quick brown fox jumps over the lazy dog.",
@@ -106,8 +106,13 @@ def forward_backward_example(client: httpx.Client):
     })
 
     result = response.json()
-    print(f"Loss: {result['loss']}")
-    return result
+    print("Request", result)
+    output = client.post("/get_result", json={
+        "request_id":result['request_id']
+    })
+    print("Output", output)
+    print(f"Loss: {output.json()['loss']}")
+    return output
 
 
 if __name__ == "__main__":
