@@ -54,20 +54,8 @@ def check_actor_status(client: httpx.Client):
         time.sleep(2)
 
 
-def forward_backward_example(client: httpx.Client):
-    """Tokenize input and perform forward-backward pass."""
-    # Load tokenizer
-    print(f"\nLoading tokenizer for {MODEL_NAME}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    # Example training batch
-    texts = [
-        "The quick brown fox jumps over the lazy dog.",
-        "Machine learning is transforming the world.",
-    ]
-
-    # Tokenize with padding and attention mask
-    print(f"Tokenizing {len(texts)} examples...")
+def tokenize_input(texts: list[str], tokenizer: AutoTokenizer) -> dict[str, list[int]]:
+    """Tokenize input texts."""
     encoded = tokenizer(
         texts,
         padding=True,
@@ -75,44 +63,59 @@ def forward_backward_example(client: httpx.Client):
         max_length=128,
         return_tensors="pt"
     )
-
-    # Convert tensors to lists for JSON serialization
-    # NOTE: Torch tensors are NOT JSON-serializable, so we must convert to lists
-    # The server will reconstruct tensors from these lists
     inputs = {
         "input_ids": encoded["input_ids"].tolist(),  # List[List[int]]
         "attention_mask": encoded["attention_mask"].tolist(),  # List[List[int]]
         "labels": encoded["input_ids"].tolist(),  # List[List[int]]
     }
+    return inputs
 
-    # You can also send float tensors the same way:
-    # Example: Position embeddings or custom weights
-    # float_example = torch.randn(2, 4)  # Some float tensor
-    # float_list = float_example.tolist()  # Converts to List[List[float]]
+def forward_backward_example(client: httpx.Client):
+    """Tokenize input and perform forward-backward pass."""
+    # Load tokenizer
+    print(f"\nLoading tokenizer for {MODEL_NAME}...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    print(f"Input shapes:")
-    print(f"  - input_ids: {encoded['input_ids'].shape} (dtype: {encoded['input_ids'].dtype})")
-    print(f"  - attention_mask: {encoded['attention_mask'].shape} (dtype: {encoded['attention_mask'].dtype})")
-    # print(f"  - float_example: {float_example.shape} (dtype: {float_example.dtype})")
-    print(f"\nAll tensors converted to lists for JSON serialization")
-    print(f"Sending forward_backward request...")
+    # Example training batch
+    tokenized_inputs = tokenize_input(["The quick brown fox jumps over the lazy dog.", "Machine learning is transforming the world."], tokenizer)
+
+    inputs1 = {k:v[0] for k,v in tokenized_inputs.items()}
+    inputs2 = {k:v[1] for k,v in tokenized_inputs.items()}
 
     # Send forward-backward request
-    response = client.post("/forward_backward", json={
+    targets1 = inputs1.pop("labels")
+    targets2 = inputs2.pop("labels")
+    response1 = client.post("/forward_backward", json={
         "model_name": MODEL_NAME,
-        "inputs": inputs,
+        "inputs": inputs1,
+        "targets": targets1,
         "forward_kwargs": {},
         "model_kwargs": {},
     })
 
-    result = response.json()
-    print("Request", result)
-    output = client.post("/get_result", json={
-        "request_id":result['request_id']
+    response2 = client.post("/forward_backward", json={
+        "model_name": MODEL_NAME,
+        "inputs": inputs2,
+        "targets": targets2,
+        "forward_kwargs": {},
+        "model_kwargs": {},
     })
-    print("Output", output)
-    print(f"Loss: {output.json()['loss']}")
-    return output
+
+    result1 = response1.json()
+    result2 = response2.json()
+    print("Request 1", result1)
+    print("Request 2", result2)
+    output1 = client.post("/get_result", json={
+        "request_id":result1['request_id']
+    })
+    print("Output 1", output1)
+    print(f"Loss: {output1.json()['loss']}")
+    output2 = client.post("/get_result", json={
+        "request_id":result2['request_id']
+    })
+    print("Output 2", output2)
+    print(f"Loss: {output2.json()['loss']}")
+    return output1, output2
 
 
 if __name__ == "__main__":

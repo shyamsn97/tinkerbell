@@ -127,10 +127,13 @@ class TrainingActor:
     def step(self):
         self.optimizer.step()
 
-    async def forward(self, inputs: list[dict[str, Any]], **kwargs):
+    async def forward(
+        self, inputs: list[dict[str, Any]], targets: Any = None, **kwargs
+    ):
         """Forward pass with automatic tensor conversion from lists/arrays."""
         # Convert inputs to tensors if they're not already
         try:
+            print("Number of inputs: ", len(inputs))
             for input in inputs:
                 for key in input:
                     if isinstance(input[key], (list, tuple)):
@@ -138,6 +141,12 @@ class TrainingActor:
                         input[key] = torch.tensor(input[key])
                     if isinstance(input[key], torch.Tensor):
                         input[key] = input[key].cuda()
+
+            if targets is not None:
+                if isinstance(targets, (list, tuple)):
+                    targets = torch.tensor(targets)
+                if isinstance(targets, torch.Tensor):
+                    targets = targets.cuda()
 
             batch_inputs = {}
             for key in inputs[0]:
@@ -148,13 +157,16 @@ class TrainingActor:
                 else:
                     batch_inputs[key] = [input[key] for input in inputs]
 
+            if targets is not None:
+                batch_inputs["labels"] = targets
+
             print(f"Actor Batch inputs: {batch_inputs}")
             print(f"Actor Forward kwargs: {kwargs}")
             print("Input shapes:")
             for key in batch_inputs:
                 print(f"  - {key}: {batch_inputs[key].shape}")
-            # for key in kwargs:
-            #     print(f"  - {key}: {kwargs[key].shape}")
+
+            self.model.train()
             outputs = self.model(**batch_inputs, **kwargs)
             print(f"Actor Outputs: {outputs}")
             return outputs
@@ -163,7 +175,9 @@ class TrainingActor:
             print(f"Error in forward: {e}\n{tb_str}")
             raise e
 
-    async def forward_backward(self, inputs: list[dict[str, Any]], **kwargs):
+    async def forward_backward(
+        self, inputs: list[dict[str, Any]], targets: Any = None, **kwargs
+    ):
         """Execute a single training step (accepts tensors or lists from JSON)."""
         # Prepare data
         # tokenizer = AutoTokenizer.from_pretrained(self.model_path)
@@ -172,15 +186,14 @@ class TrainingActor:
         # input_ids = inputs["input_ids"].cuda()
 
         # Training step
-        self.model.train()
-        outputs = await self.forward(inputs, **kwargs)
+        outputs = await self.forward(inputs, targets, **kwargs)
         loss = outputs.loss
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        # self.optimizer.zero_grad()
+        # loss.backward()
+        # self.optimizer.step()
 
-        return {"loss": loss.item() if self.rank == 0 else None}
+        return {"loss": loss.item() if loss is not None and self.rank == 0 else None}
 
     def cleanup(self):
         """Clean up the PyTorch distributed process group."""

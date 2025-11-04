@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 import ray
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tinkerbell.models import RemoteFuture
 from tinkerbell.training.actor import TrainingActor
@@ -23,8 +23,9 @@ class ForwardBackwardRequest(BaseModel):
     request_id: str
     model_name: str
     inputs: dict[str, Any]
-    forward_kwargs: dict[str, Any]
-    future: Any  # Will hold the result
+    targets: Any = None
+    forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
+    future: Any = None  # Will hold the result
 
 
 class ActorGroup:
@@ -68,7 +69,7 @@ class ActorGroup:
         return False
 
     async def forward_backward(
-        self, inputs: list[dict[str, Any]], **kwargs
+        self, inputs: list[dict[str, Any]], targets: Any = None, **kwargs
     ) -> list[dict[str, Any]]:
         """Forward and backward pass through the model with batched inputs."""
         if self.status != ActorStatus.READY:
@@ -78,7 +79,8 @@ class ActorGroup:
                     detail=f"Actors for model {self.model_name} are not ready",
                 )
         refs = [
-            worker.forward_backward.remote(inputs, **kwargs) for worker in self.workers
+            worker.forward_backward.remote(inputs, targets, **kwargs)
+            for worker in self.workers
         ]
         print(f"Forward-backward refs: {refs}")
         outputs = await asyncio.gather(*refs)
@@ -87,7 +89,11 @@ class ActorGroup:
 
 
 class TrainingManager:
-    def __init__(self, max_wait_time: float = 300.0, clock_cycle: float = 3.0):
+    def __init__(
+        self,
+        max_wait_time: float = 300.0,
+        clock_cycle: float = 5.0,
+    ):
         self.actor_groups: Dict[str, ActorGroup] = {}
         self.max_wait_time = max_wait_time
         self.clock_cycle = clock_cycle
@@ -103,7 +109,11 @@ class TrainingManager:
         if self.running:
             return
         self.running = True
-        # self.batch_processor_task = asyncio.create_task(self._batch_processor_loop())
+        if self.clock_cycle > 0.0:
+            # start the batch processor task
+            self.batch_processor_task = asyncio.create_task(
+                self._batch_processor_loop()
+            )
 
     async def stop(self):
         """Stop the batch processor background task."""
@@ -127,10 +137,9 @@ class TrainingManager:
         """Background task that processes batches at regular intervals."""
         while self.running:
             try:
-                for _ in range(int(self.clock_cycle)):
-                    await asyncio.sleep(1.0)
-                    print("Processing batches...")
-                    print(f"Request queue: {self.request_queue}")
+                await asyncio.sleep(self.clock_cycle)
+                print("Processing batches...")
+                print(f"Request queue: {self.request_queue}")
                 await self._process_all_batches()
             except asyncio.CancelledError:
                 print("Batch processor task cancelled")
@@ -162,21 +171,24 @@ class TrainingManager:
         # Check if actor is ready
         try:
             status = await self.get_actor_status(model_name)
+            print(f"Actor status: {status}")
             if status != ActorStatus.READY:
                 return
 
             # Batch all inputs together
             batch_inputs = [req.inputs for req in requests]
+            batch_targets = [req.targets for req in requests]
             # Assuming all requests use the same forward_kwargs (or merge them)
             forward_kwargs = requests[0].forward_kwargs if requests else {}
 
             print(f"Batch inputs: {batch_inputs}")
             print(f"Forward kwargs: {forward_kwargs}")
+            print(f"Batch targets: {batch_targets}")
             # Execute batch
             output = await self.actor_groups[model_name].forward_backward(
-                batch_inputs, **forward_kwargs
+                inputs=batch_inputs, targets=batch_targets, **forward_kwargs
             )
-            print(f"Output: {output}")
+            # print(f"Output: {output}")
             # Distribute results back to futures
             for req, output in zip(requests, output, strict=True):
                 if output is not None:
@@ -204,7 +216,11 @@ class TrainingManager:
         return status
 
     async def forward_backward(
-        self, model_name: str, inputs: dict[str, Any], forward_kwargs: dict[str, Any]
+        self,
+        model_name: str,
+        inputs: dict[str, Any],
+        targets: Any = None,
+        forward_kwargs: dict[str, Any] = {},
     ) -> RemoteFuture:
         """
         Queue a forward-backward request to be processed in the next batch.
@@ -227,13 +243,17 @@ class TrainingManager:
             request_id=str(uuid.uuid4()),
             model_name=model_name,
             inputs=inputs,
+            targets=targets,
             forward_kwargs=forward_kwargs,
             future=future,
         )
 
         # Add to queue
         self.request_queue[model_name].append(request)
-        await self._process_batch(model_name)
+
+        if self.clock_cycle <= 0.0:
+            # act immediately
+            await self._process_batch(model_name)
         return RemoteFuture(request_id=request.request_id)
 
     async def create_training_actors(
@@ -249,6 +269,10 @@ class TrainingManager:
         ray_worker_options: dict[str, Any] = {},
     ) -> str:
         """Create a training worker for the given model name."""
+        if model_name in self.actor_groups:
+            print(f"Training actors for model {model_name} already exists...")
+            return model_name
+
         num_gpus = 1  # num gpus per worker is 1 for tensor parallelism
 
         ray_training_actor = ray.remote(TrainingActor).options(

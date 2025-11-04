@@ -60,6 +60,7 @@ class ForwardResponse(BaseModel):
 class ForwardBackwardRequest(BaseModel):
     model_name: str
     inputs: dict[str, Any] = Field(default_factory=lambda: {})
+    targets: Any = None
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 

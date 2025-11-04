@@ -19,9 +19,20 @@ from tinkerbell.utils import get_host_and_port
 
 
 class TinkerbellServiceDeployment:
-    def __init__(self, server_url: str):
+    def __init__(
+        self,
+        server_url: str,
+        max_wait_time: float = 300.0,
+        clock_cycle: float = 10.0,
+    ):
         self.server_url = server_url
-        self.training_manager = TrainingManager()
+        print(
+            f"initializing training manager with max_wait_time: {max_wait_time} and clock_cycle: {clock_cycle}"
+        )
+        self.training_manager = TrainingManager(
+            max_wait_time=max_wait_time,
+            clock_cycle=clock_cycle,
+        )
 
     @APP.get("/health")
     async def health(self) -> HealthResponse:
@@ -60,7 +71,10 @@ class TinkerbellServiceDeployment:
         if not self.training_manager.running:
             await self.training_manager.start()
         return await self.training_manager.forward_backward(
-            request.model_name, request.inputs, request.forward_kwargs
+            model_name=request.model_name,
+            inputs=request.inputs,
+            targets=request.targets,
+            forward_kwargs=request.forward_kwargs,
         )
 
     @APP.post("/get_actor_status")
@@ -82,7 +96,12 @@ class TinkerbellServiceDeployment:
         return await self.training_manager.get_result(request.request_id)
 
 
-def deploy_service(server_url: str, **deployment_kwargs):
+def deploy_service(
+    server_url: str,
+    max_wait_time: float = 300.0,
+    clock_cycle: float = 10.0,
+    **deployment_kwargs,
+):
     """Deploy the TinkerbellService with Ray Serve.
 
     Args:
@@ -107,7 +126,11 @@ def deploy_service(server_url: str, **deployment_kwargs):
     )
 
     serve.run(
-        deployment.bind(server_url),
+        deployment.bind(
+            server_url=server_url,
+            max_wait_time=max_wait_time,
+            clock_cycle=clock_cycle,
+        ),
     )
 
     return server_url
@@ -115,6 +138,8 @@ def deploy_service(server_url: str, **deployment_kwargs):
 
 def deploy_on_modal(
     server_url: str,
+    max_wait_time: float = 300.0,
+    clock_cycle: float = 10.0,
     deploy_config: ModalDeployConfig = ModalDeployConfig(),
 ):
     """Deploy the TinkerbellService on Modal.
@@ -199,7 +224,11 @@ def deploy_on_modal(
     )
     def serve():
         # Use Ray Serve within Modal
-        deploy_service(server_url)
+        deploy_service(
+            server_url=server_url,
+            max_wait_time=max_wait_time,
+            clock_cycle=clock_cycle,
+        )
 
     with modal.enable_output():
         # Deploy the app
