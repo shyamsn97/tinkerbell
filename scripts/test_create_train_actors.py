@@ -1,7 +1,7 @@
 import httpx
 import torch
 from transformers import AutoTokenizer
-
+from tinkerbell.types.data import TensorData
 WORLD_SIZE = 4
 MASTER_ADDR = "127.0.0.1"
 MASTER_PORT = "29500"
@@ -63,9 +63,9 @@ def tokenize_input(texts: list[str], tokenizer: AutoTokenizer) -> dict[str, list
         return_tensors="pt"
     )
     inputs = {
-        "input_ids": encoded["input_ids"].tolist(),  # List[List[int]]
-        "attention_mask": encoded["attention_mask"].tolist(),  # List[List[int]]
-        "labels": encoded["input_ids"].tolist(),  # List[List[int]]
+        "input_ids": TensorData.from_torch(encoded["input_ids"]),  # List[List[int]]
+        "attention_mask": TensorData.from_torch(encoded["attention_mask"]),  # List[List[int]]
+        "labels": TensorData.from_torch(encoded["input_ids"]),  # List[List[int]]
     }
     return inputs
 
@@ -78,8 +78,9 @@ def forward_backward_example(client: httpx.Client):
     # Example training batch
     tokenized_inputs = tokenize_input(["The quick brown fox jumps over the lazy dog.", "Machine learning is transforming the world."], tokenizer)
 
-    inputs1 = {k:v[0] for k,v in tokenized_inputs.items()}
-    inputs2 = {k:v[1] for k,v in tokenized_inputs.items()}
+    print(f"Tokenized inputs: {tokenized_inputs['input_ids'].model_dump_json()}")
+    inputs1 = {k:v.slice(0).model_dump_json() for k,v in tokenized_inputs.items()}
+    inputs2 = {k:v.slice(1).model_dump_json() for k,v in tokenized_inputs.items()}
 
     # Send forward-backward request
     targets1 = inputs1.pop("labels")

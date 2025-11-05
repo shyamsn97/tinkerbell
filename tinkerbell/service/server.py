@@ -4,7 +4,8 @@ import ray
 from fastapi import FastAPI
 from ray import serve
 
-from tinkerbell.types import (  # ForwardBackwardResponse,
+from tinkerbell.training.manager import TrainingManager
+from tinkerbell.types import (
     ActorStatusRequest,
     ActorStatusResponse,
     CreateTrainingActorsRequest,
@@ -15,7 +16,6 @@ from tinkerbell.types import (  # ForwardBackwardResponse,
     ModalDeployConfig,
     RemoteFuture,
 )
-from tinkerbell.training.manager import TrainingManager
 from tinkerbell.utils import get_host_and_port
 
 APP = FastAPI()
@@ -73,6 +73,11 @@ class TinkerbellServiceDeployment:
     ) -> ForwardBackwardResponse:
         if not self.training_manager.running:
             await self.training_manager.start()
+        print(f"Request: {request}")
+        print(f"Request inputs: {request.inputs}, type: {type(request.inputs)}")
+        print(f"Request targets: {request.targets}, type: {type(request.targets)}")
+        print(f"Request forward_kwargs: {request.forward_kwargs}")
+        print(f"Request return_logprobs: {request.return_logprobs}")
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
             model_name=request.model_name,
             inputs=request.inputs,
@@ -161,12 +166,13 @@ def deploy_on_modal(
             (e.g., num_replicas, ray_actor_options, autoscaling_config)
     """
     try:
+        import os
+        import sys
+
         import modal
         from modal import runner
     except ImportError:
         raise ImportError("Modal is not installed. Install it with: pip install modal")
-
-    import os
 
     app = modal.App(name="tinkerbell-service")
 
@@ -186,7 +192,8 @@ def deploy_on_modal(
     # Define Modal image with required dependencies
     image = (
         modal.Image.from_registry(
-            "nvidia/cuda:12.6.0-devel-ubuntu22.04", add_python="3.12"
+            "nvidia/cuda:12.6.0-devel-ubuntu22.04",
+            add_python=f"{sys.version_info.major}.{sys.version_info.minor}",
         )
         .apt_install("libnuma-dev", "build-essential", "clang")
         .env({"CUDA_HOME": "/usr/local/cuda"})  # Add this line

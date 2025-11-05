@@ -1,7 +1,18 @@
-from tinkerbell.types.requests import CreateTrainingActorsRequest, ForwardBackwardRequest, ForwardRequest, ActorStatusRequest
-from tinkerbell.types.responses import CreateTrainingActorsResponse, ForwardBackwardResponse, ForwardResponse, ActorStatusResponse, HealthResponse
 from tinkerbell.types.deploy import DeployConfig, ModalDeployConfig
-from tinkerbell.types.data import RemoteFuture
+from tinkerbell.types.requests import (
+    ActorStatusRequest,
+    CreateTrainingActorsRequest,
+    ForwardBackwardRequest,
+    ForwardRequest,
+)
+from tinkerbell.types.responses import (
+    ActorStatusResponse,
+    CreateTrainingActorsResponse,
+    ForwardBackwardResponse,
+    ForwardResponse,
+    HealthResponse,
+    RemoteFuture,
+)
 
 __all__ = [
     "CreateTrainingActorsRequest",

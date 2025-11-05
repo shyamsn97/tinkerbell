@@ -1,6 +1,12 @@
 from typing import Any
+
 from pydantic import BaseModel, Field
-from tinkerbell.types.optimizer import DEFAULT_OPTIMIZER_PARAMS, DEFAULT_SCHEDULER_PARAMS
+
+from tinkerbell.types.data import TensorData
+from tinkerbell.types.optimizer import (
+    DEFAULT_OPTIMIZER_PARAMS,
+    DEFAULT_SCHEDULER_PARAMS,
+)
 
 
 class CreateTrainingActorsRequest(BaseModel):
@@ -25,7 +31,7 @@ class CreateTrainingActorsRequest(BaseModel):
 class ForwardRequest(BaseModel):
     model_name: str
     request_id: str | None = None
-    inputs: dict[str, Any] = Field(default_factory=lambda: {})
+    inputs: dict[str, TensorData] = Field(default_factory=lambda: {})
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     future: Any = None
 
@@ -33,12 +39,12 @@ class ForwardRequest(BaseModel):
 class ForwardBackwardRequest(BaseModel):
     model_name: str
     request_id: str | None = None
-    inputs: dict[str, Any] = Field(default_factory=lambda: {})
-    targets: Any = None
+    inputs: dict[str, TensorData] = Field(default_factory=lambda: {})
+    targets: TensorData | None = None
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     return_logprobs: bool = False
     future: Any = None
 
+
 class ActorStatusRequest(BaseModel):
     model_name: str
-

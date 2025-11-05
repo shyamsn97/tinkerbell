@@ -7,9 +7,9 @@ from typing import Any, Dict, Optional
 import ray
 from fastapi import HTTPException
 
+from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
-from tinkerbell.training.actor import TrainingActor
 
 
 class ActorStatus(Enum):
@@ -123,12 +123,20 @@ class TrainingManager:
             except asyncio.CancelledError:
                 pass
 
-    async def get_result(self, request_id: str) -> Dict[str, Any]:
+    async def get_result(self, request_id: str, max_wait_time: float = 300.0) -> Dict[str, Any]:
         """Get the result of a forward-backward request."""
+        import time
+
         # Wait for the result to be available
+        start_time = time.time()
         while request_id not in self.results:
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= max_wait_time:
+                raise TimeoutError(
+                    f"Result for request {request_id} not available after {max_wait_time} seconds"
+                )
             await asyncio.sleep(1.0)
-            print(f"Waiting for result {request_id}")
+            print(f"Waiting for result {request_id} (elapsed: {elapsed_time:.1f}s)")
         return self.results[request_id]
 
     async def _batch_processor_loop(self) -> None:
