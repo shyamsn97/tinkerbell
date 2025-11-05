@@ -6,26 +6,14 @@ from typing import Any, Dict, Optional
 
 import ray
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
 
-from tinkerbell.models import RemoteFuture
+from tinkerbell.models import ForwardBackwardRequest, ForwardRequest, RemoteFuture
 from tinkerbell.training.actor import TrainingActor
 
 
 class ActorStatus(Enum):
     READY = "ready"
     INITIALIZING = "initializing"
-
-
-class ForwardBackwardRequest(BaseModel):
-    """Represents a queued forward-backward request."""
-
-    request_id: str
-    model_name: str
-    inputs: dict[str, Any]
-    targets: Any = None
-    forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
-    future: Any = None  # Will hold the result
 
 
 class ActorGroup:
@@ -69,7 +57,11 @@ class ActorGroup:
         return False
 
     async def forward_backward(
-        self, inputs: list[dict[str, Any]], targets: Any = None, **kwargs
+        self,
+        inputs: list[dict[str, Any]],
+        targets: Any = None,
+        forward_kwargs: dict[str, Any] = {},
+        return_logprobs: bool = False,
     ) -> list[dict[str, Any]]:
         """Forward and backward pass through the model with batched inputs."""
         if self.status != ActorStatus.READY:
@@ -79,7 +71,12 @@ class ActorGroup:
                     detail=f"Actors for model {self.model_name} are not ready",
                 )
         refs = [
-            worker.forward_backward.remote(inputs, targets, **kwargs)
+            worker.forward_backward.remote(
+                inputs=inputs,
+                targets=targets,
+                forward_kwargs=forward_kwargs,
+                return_logprobs=return_logprobs,
+            )
             for worker in self.workers
         ]
         print(f"Forward-backward refs: {refs}")
@@ -180,13 +177,17 @@ class TrainingManager:
             batch_targets = [req.targets for req in requests]
             # Assuming all requests use the same forward_kwargs (or merge them)
             forward_kwargs = requests[0].forward_kwargs if requests else {}
+            return_logprobs = requests[0].return_logprobs if requests else False
 
             print(f"Batch inputs: {batch_inputs}")
             print(f"Forward kwargs: {forward_kwargs}")
             print(f"Batch targets: {batch_targets}")
             # Execute batch
             output = await self.actor_groups[model_name].forward_backward(
-                inputs=batch_inputs, targets=batch_targets, **forward_kwargs
+                inputs=batch_inputs,
+                targets=batch_targets,
+                forward_kwargs=forward_kwargs,
+                return_logprobs=return_logprobs,
             )
             # print(f"Output: {output}")
             # Distribute results back to futures
@@ -215,17 +216,7 @@ class TrainingManager:
         status = await self.actor_groups[model_name].get_status()
         return status
 
-    async def forward_backward(
-        self,
-        model_name: str,
-        inputs: dict[str, Any],
-        targets: Any = None,
-        forward_kwargs: dict[str, Any] = {},
-    ) -> RemoteFuture:
-        """
-        Queue a forward-backward request to be processed in the next batch.
-        Returns immediately with a future that will resolve when the batch is processed.
-        """
+    def _create_future(self, model_name: str) -> asyncio.Future:
         if model_name not in self.actor_groups:
             raise HTTPException(
                 status_code=404, detail=f"Group not found for model {model_name}"
@@ -237,14 +228,54 @@ class TrainingManager:
 
         # Create a future for this request
         future = asyncio.get_event_loop().create_future()
+        return future
 
-        # Create request object
+    async def forward(
+        self,
+        model_name: str,
+        inputs: dict[str, Any],
+        forward_kwargs: dict[str, Any] = {},
+        return_logprobs: bool = False,
+    ) -> RemoteFuture:
+        """
+        Queue a forward request to be processed in the next batch.
+        Returns immediately with a future that will resolve when the batch is processed.
+        """
+        future = self._create_future(model_name)
+        request = ForwardRequest(
+            request_id=str(uuid.uuid4()),
+            model_name=model_name,
+            inputs=inputs,
+            forward_kwargs=forward_kwargs,
+            return_logprobs=return_logprobs,
+            future=future,
+        )
+        self.request_queue[model_name].append(request)
+        if self.clock_cycle <= 0.0:
+            # act immediately
+            await self._process_batch(model_name)
+        return RemoteFuture(request_id=request.request_id)
+
+    async def forward_backward(
+        self,
+        model_name: str,
+        inputs: dict[str, Any],
+        targets: Any = None,
+        forward_kwargs: dict[str, Any] = {},
+        return_logprobs: bool = False,
+    ) -> RemoteFuture:
+        """
+        Queue a forward-backward request to be processed in the next batch.
+        Returns immediately with a future that will resolve when the batch is processed.
+        """
+        future = self._create_future(model_name)
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
             model_name=model_name,
             inputs=inputs,
             targets=targets,
             forward_kwargs=forward_kwargs,
+            return_logprobs=return_logprobs,
             future=future,
         )
 

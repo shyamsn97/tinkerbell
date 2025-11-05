@@ -11,6 +11,7 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
+from tinkerbell.training.loss import ForCausalLMLoss
 from tinkerbell.utils import get_submodules_with_wildcard
 
 
@@ -39,7 +40,9 @@ class TrainingActor:
         self.model = None
         self.optimizer = None
 
-    def _get_optimizer(self, optimizer_config: dict[str, Any]) -> torch.optim.Optimizer:
+    def _get_optimizer(
+        self, model: torch.nn.Module, optimizer_config: dict[str, Any]
+    ) -> torch.optim.Optimizer:
         optimizer_name = optimizer_config.pop("name", "adam").lower()
         optimizer_dict = {
             "adamw": torch.optim.AdamW,
@@ -51,14 +54,11 @@ class TrainingActor:
         }
         optimizer_config["foreach"] = False
         optimizer = optimizer_dict[optimizer_name](
-            self.model.parameters(), **optimizer_config
+            model.parameters(), **optimizer_config
         )
         return optimizer
 
-    def setup(self):
-        """Initialize the PyTorch distributed process group and model."""
-        from transformers import AutoConfig, AutoModelForCausalLM
-
+    def _setup_distributed(self):
         print(f"[Rank {self.rank}] Initializing torch distributed")
 
         # Set environment variables for distributed setup
@@ -74,10 +74,7 @@ class TrainingActor:
         # Each actor sees only one GPU as device 0
         torch.cuda.set_device(0)
 
-        # Load model
-        config = AutoConfig.from_pretrained(self.model_name, **self.model_kwargs)
-        self.model = AutoModelForCausalLM.from_config(config)
-
+    def _setup_tensor_parallel(self, model: torch.nn.Module) -> torch.nn.Module:
         # Define parallelization strategies
         strategies = {
             "column": ColwiseParallel,
@@ -88,7 +85,7 @@ class TrainingActor:
         module_parallelization_plan = {}
         for pattern in self.parallelize_plan.keys():
             strategy = strategies[self.parallelize_plan[pattern]]()
-            module_names = get_submodules_with_wildcard(self.model, pattern)
+            module_names = get_submodules_with_wildcard(model, pattern)
             for name in module_names:
                 module_parallelization_plan[name] = strategy
 
@@ -104,16 +101,25 @@ class TrainingActor:
                 "tp",
             ),
         )
-        self.model = parallelize_module(
-            self.model, device_mesh["tp"], module_parallelization_plan
+        model = parallelize_module(
+            model, device_mesh["tp"], module_parallelization_plan
         )
-        self.model = self.model.cuda()
+        model = model.cuda()
+        return model
 
-        # # Print memory - clarify that each actor uses device 0 (Ray's CUDA_VISIBLE_DEVICES isolation)
-        # print_gpu_memory(f"Model loaded (Rank {self.rank}, physical device isolated by Ray as cuda:0)", 0)
+    def setup(self):
+        """Initialize the PyTorch distributed process group and model."""
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        self._setup_distributed()
+
+        # Load model
+        config = AutoConfig.from_pretrained(self.model_name, **self.model_kwargs)
+        model = AutoModelForCausalLM.from_config(config)
+        self.model = self._setup_tensor_parallel(model)
 
         # Setup optimizer - disable foreach to handle mixed DTensor/Tensor parameters
-        self.optimizer = self._get_optimizer(self.optimizer_params)
+        self.optimizer = self._get_optimizer(self.model, self.optimizer_params)
 
         print(f"[Rank {self.rank}] Setup complete")
         return True
@@ -127,48 +133,56 @@ class TrainingActor:
     def step(self):
         self.optimizer.step()
 
+    def _prepare_inputs(
+        self, inputs: list[dict[str, Any]], targets: Any = None
+    ) -> dict[str, Any]:
+        print("Number of inputs: ", len(inputs))
+        for input in inputs:
+            for key in input:
+                if isinstance(input[key], (list, tuple)):
+                    # Convert from JSON-deserialized lists back to tensors
+                    input[key] = torch.tensor(input[key])
+                if isinstance(input[key], torch.Tensor):
+                    input[key] = input[key].cuda()
+
+        if targets is not None:
+            if isinstance(targets, (list, tuple)):
+                targets = torch.tensor(targets)
+            if isinstance(targets, torch.Tensor):
+                targets = targets.cuda()
+
+        batch_inputs = {}
+        for key in inputs[0]:
+            if isinstance(inputs[0][key], torch.Tensor):
+                batch_inputs[key] = torch.stack(
+                    [input[key] for input in inputs]
+                ).squeeze(0)
+            else:
+                batch_inputs[key] = [input[key] for input in inputs]
+        print(f"Actor Batch inputs: {batch_inputs}")
+        print("Input shapes:")
+        for key in batch_inputs:
+            print(f"  - {key}: {batch_inputs[key].shape}")
+        return batch_inputs, targets
+
     async def forward(
-        self, inputs: list[dict[str, Any]], targets: Any = None, **kwargs
-    ):
+        self,
+        batch_inputs: dict[str, Any],
+        with_grad: bool = True,
+        forward_kwargs: dict[str, Any] = {},
+        **kwargs,
+    ) -> torch.Tensor:
         """Forward pass with automatic tensor conversion from lists/arrays."""
         # Convert inputs to tensors if they're not already
         try:
-            print("Number of inputs: ", len(inputs))
-            for input in inputs:
-                for key in input:
-                    if isinstance(input[key], (list, tuple)):
-                        # Convert from JSON-deserialized lists back to tensors
-                        input[key] = torch.tensor(input[key])
-                    if isinstance(input[key], torch.Tensor):
-                        input[key] = input[key].cuda()
-
-            if targets is not None:
-                if isinstance(targets, (list, tuple)):
-                    targets = torch.tensor(targets)
-                if isinstance(targets, torch.Tensor):
-                    targets = targets.cuda()
-
-            batch_inputs = {}
-            for key in inputs[0]:
-                if isinstance(inputs[0][key], torch.Tensor):
-                    batch_inputs[key] = torch.stack(
-                        [input[key] for input in inputs]
-                    ).squeeze(0)
-                else:
-                    batch_inputs[key] = [input[key] for input in inputs]
-
-            if targets is not None:
-                batch_inputs["labels"] = targets
-
-            print(f"Actor Batch inputs: {batch_inputs}")
-            print(f"Actor Forward kwargs: {kwargs}")
-            print("Input shapes:")
-            for key in batch_inputs:
-                print(f"  - {key}: {batch_inputs[key].shape}")
-
-            self.model.train()
-            outputs = self.model(**batch_inputs, **kwargs)
-            print(f"Actor Outputs: {outputs}")
+            if with_grad:
+                self.model.train()
+                outputs = self.model(**batch_inputs, **forward_kwargs)
+            else:
+                self.model.eval()
+                with torch.no_grad():
+                    outputs = self.model(**batch_inputs, **forward_kwargs)
+            print(f"Actor Outputs logits shape {self.rank}: {outputs.logits.shape}")
             return outputs
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -176,22 +190,25 @@ class TrainingActor:
             raise e
 
     async def forward_backward(
-        self, inputs: list[dict[str, Any]], targets: Any = None, **kwargs
+        self,
+        inputs: list[dict[str, Any]],
+        targets: Any,
+        forward_kwargs: dict[str, Any] = {},
+        return_logprobs: bool = False,
+        **kwargs,
     ):
         """Execute a single training step (accepts tensors or lists from JSON)."""
-        # Prepare data
-        # tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-        # tokenizer.pad_token = tokenizer.eos_token
-        # inputs = tokenizer(["Hello world!"], return_tensors="pt", padding=True)
-        # input_ids = inputs["input_ids"].cuda()
-
-        # Training step
-        outputs = await self.forward(inputs, targets, **kwargs)
-        loss = outputs.loss
-
-        # self.optimizer.zero_grad()
-        # loss.backward()
-        # self.optimizer.step()
+        batch_inputs, targets = self._prepare_inputs(inputs, targets)
+        outputs = await self.forward(
+            batch_inputs=batch_inputs,
+            with_grad=True,
+            forward_kwargs=forward_kwargs,
+        )
+        loss = ForCausalLMLoss(
+            logits=outputs.logits,
+            labels=targets,
+        )
+        loss.backward()
 
         return {"loss": loss.item() if loss is not None and self.rank == 0 else None}
 

@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -46,27 +46,43 @@ class CreateTrainingActorsResponse(BaseModel):
     message: str
 
 
+class RemoteFuture(BaseModel):
+    request_id: str
+
+
 class ForwardRequest(BaseModel):
     model_name: str
-    model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
+    request_id: str | None = None
     inputs: dict[str, Any] = Field(default_factory=lambda: {})
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
+    future: Any = None
 
 
 class ForwardResponse(BaseModel):
-    outputs: dict[str, Any]
+    model_name: str
+    request_id: str | None = None
+    logprobs: List[List[int]] | None = None
+    outputs: dict[str, Any] | None = None
+    future: Any = None
 
 
 class ForwardBackwardRequest(BaseModel):
     model_name: str
+    request_id: str | None = None
     inputs: dict[str, Any] = Field(default_factory=lambda: {})
     targets: Any = None
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
-    model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
+    return_logprobs: bool = False
+    future: Any = None
 
 
 class ForwardBackwardResponse(BaseModel):
-    loss: float | None
+    model_name: str
+    request_id: str | None = None
+    loss: float | None = None
+    logprobs: List[List[int]] | None = None
+    outputs: dict[str, Any] | None = None
+    future: Any = None
 
 
 class ActorStatusRequest(BaseModel):
@@ -95,7 +111,3 @@ class ModalDeployConfig(DeployConfig):
     @property
     def deployment_type(self) -> str:
         return "modal"
-
-
-class RemoteFuture(BaseModel):
-    request_id: str

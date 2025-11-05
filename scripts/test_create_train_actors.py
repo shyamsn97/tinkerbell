@@ -26,7 +26,6 @@ def create_training_actors(client: httpx.Client):
     """Create training actors on the server."""
     response = client.post("/create_training_actors", json={
         "model_name": MODEL_NAME,
-        "model_kwargs": {},
         "world_size": WORLD_SIZE,
         "master_addr": MASTER_ADDR,
         "master_port": MASTER_PORT,
@@ -90,7 +89,6 @@ def forward_backward_example(client: httpx.Client):
         "inputs": inputs1,
         "targets": targets1,
         "forward_kwargs": {},
-        "model_kwargs": {},
     })
 
     response2 = client.post("/forward_backward", json={
@@ -98,7 +96,6 @@ def forward_backward_example(client: httpx.Client):
         "inputs": inputs2,
         "targets": targets2,
         "forward_kwargs": {},
-        "model_kwargs": {},
     })
 
     result1 = response1.json()
@@ -113,7 +110,7 @@ def forward_backward_example(client: httpx.Client):
     output2 = client.post("/get_result", json={
         "request_id":result2['request_id']
     })
-    print("Output 2", output2)
+    print("Output 2", output2.json())
     print(f"Loss: {output2.json()['loss']}")
     return output1, output2
 

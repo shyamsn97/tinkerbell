@@ -1,6 +1,7 @@
 from typing import Any, Dict
 
 import ray
+from fastapi import FastAPI
 from ray import serve
 
 from tinkerbell.models import (  # ForwardBackwardResponse,
@@ -9,13 +10,15 @@ from tinkerbell.models import (  # ForwardBackwardResponse,
     CreateTrainingActorsRequest,
     CreateTrainingActorsResponse,
     ForwardBackwardRequest,
+    ForwardBackwardResponse,
     HealthResponse,
     ModalDeployConfig,
     RemoteFuture,
 )
-from tinkerbell.service.base import APP
 from tinkerbell.training.manager import TrainingManager
 from tinkerbell.utils import get_host_and_port
+
+APP = FastAPI()
 
 
 class TinkerbellServiceDeployment:
@@ -47,15 +50,15 @@ class TinkerbellServiceDeployment:
         request: CreateTrainingActorsRequest,
     ) -> CreateTrainingActorsResponse:
         model_name = await self.training_manager.create_training_actors(
-            request.world_size,
-            request.master_addr,
-            request.master_port,
-            request.model_name,
-            request.model_kwargs,
-            request.parallelize_plan,
-            request.optimizer_params,
-            request.scheduler_params,
-            request.ray_worker_options,
+            world_size=request.world_size,
+            master_addr=request.master_addr,
+            master_port=request.master_port,
+            model_name=request.model_name,
+            model_kwargs=request.model_kwargs,
+            parallelize_plan=request.parallelize_plan,
+            optimizer_params=request.optimizer_params,
+            scheduler_params=request.scheduler_params,
+            ray_worker_options=request.ray_worker_options,
         )
         return CreateTrainingActorsResponse(
             success=True,
@@ -67,14 +70,22 @@ class TinkerbellServiceDeployment:
     async def forward_backward(
         self,
         request: ForwardBackwardRequest,
-    ) -> RemoteFuture:
+    ) -> ForwardBackwardResponse:
         if not self.training_manager.running:
             await self.training_manager.start()
-        return await self.training_manager.forward_backward(
+        remote_future: RemoteFuture = await self.training_manager.forward_backward(
             model_name=request.model_name,
             inputs=request.inputs,
             targets=request.targets,
             forward_kwargs=request.forward_kwargs,
+            return_logprobs=request.return_logprobs,
+        )
+        return ForwardBackwardResponse(
+            model_name=request.model_name,
+            request_id=remote_future.request_id,
+            loss=None,
+            logprobs=None,
+            outputs=None,
         )
 
     @APP.post("/get_actor_status")
