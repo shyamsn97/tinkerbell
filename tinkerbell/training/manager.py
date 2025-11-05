@@ -7,7 +7,8 @@ from typing import Any, Dict, Optional
 import ray
 from fastapi import HTTPException
 
-from tinkerbell.models import ForwardBackwardRequest, ForwardRequest, RemoteFuture
+from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
+from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.training.actor import TrainingActor
 
 

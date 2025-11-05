@@ -4,7 +4,7 @@ import ray
 from fastapi import FastAPI
 from ray import serve
 
-from tinkerbell.models import (  # ForwardBackwardResponse,
+from tinkerbell.types import (  # ForwardBackwardResponse,
     ActorStatusRequest,
     ActorStatusResponse,
     CreateTrainingActorsRequest,
