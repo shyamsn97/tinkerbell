@@ -12,6 +12,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from tinkerbell.training.loss import ForCausalLMLoss
+from tinkerbell.types.data import TensorData
 from tinkerbell.utils import get_submodules_with_wildcard
 
 
@@ -134,40 +135,41 @@ class TrainingActor:
         self.optimizer.step()
 
     def _prepare_inputs(
-        self, inputs: list[dict[str, Any]], targets: Any = None
+        self,
+        inputs: list[dict[str, TensorData]],
+        targets: dict[str, TensorData] | None = None,
     ) -> dict[str, Any]:
         print("Number of inputs: ", len(inputs))
-        for input in inputs:
-            for key in input:
-                if isinstance(input[key], (list, tuple)):
-                    # Convert from JSON-deserialized lists back to tensors
-                    input[key] = torch.tensor(input[key])
-                if isinstance(input[key], torch.Tensor):
+        print("Inputs: ", inputs)
+        print("Targets: ", targets)
+        try:
+            for input in inputs:
+                for key in input:
+                    input[key] = input[key].to_torch()
                     input[key] = input[key].cuda()
-
-        if targets is not None:
-            if isinstance(targets, (list, tuple)):
-                targets = torch.tensor(targets)
-            if isinstance(targets, torch.Tensor):
+            if targets is not None:
+                targets = torch.stack([t.to_torch() for t in targets])
                 targets = targets.cuda()
-
-        batch_inputs = {}
-        for key in inputs[0]:
-            if isinstance(inputs[0][key], torch.Tensor):
+            print("Torch inputs: ", inputs)
+            print("Torch targets: ", targets)
+            batch_inputs = {}
+            for key in inputs[0]:
                 batch_inputs[key] = torch.stack(
                     [input[key] for input in inputs]
                 ).squeeze(0)
-            else:
-                batch_inputs[key] = [input[key] for input in inputs]
-        print(f"Actor Batch inputs: {batch_inputs}")
-        print("Input shapes:")
-        for key in batch_inputs:
-            print(f"  - {key}: {batch_inputs[key].shape}")
-        return batch_inputs, targets
+            print(f"Actor Batch inputs: {batch_inputs}")
+            print("Input shapes:")
+            for key in batch_inputs:
+                print(f"  - {key}: {batch_inputs[key].shape}")
+            return batch_inputs, targets
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            print(f"Error in _prepare_inputs: {e}\n{tb_str}")
+            raise e
 
     async def forward(
         self,
-        batch_inputs: dict[str, Any],
+        batch_inputs: dict[str, torch.Tensor],
         with_grad: bool = True,
         forward_kwargs: dict[str, Any] = {},
         **kwargs,
@@ -191,7 +193,7 @@ class TrainingActor:
 
     async def forward_backward(
         self,
-        inputs: list[dict[str, Any]],
+        inputs: list[dict[str, TensorData]],
         targets: Any,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
@@ -204,11 +206,16 @@ class TrainingActor:
             with_grad=True,
             forward_kwargs=forward_kwargs,
         )
-        loss = ForCausalLMLoss(
-            logits=outputs.logits,
-            labels=targets,
-        )
-        loss.backward()
+        try:
+            loss = ForCausalLMLoss(
+                logits=outputs.logits,
+                labels=targets,
+            )
+            loss.backward()
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            print(f"Error in forward_backward: {e}\n{tb_str}")
+            raise e
 
         return {"loss": loss.item() if loss is not None and self.rank == 0 else None}
 

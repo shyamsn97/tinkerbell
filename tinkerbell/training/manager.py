@@ -123,7 +123,9 @@ class TrainingManager:
             except asyncio.CancelledError:
                 pass
 
-    async def get_result(self, request_id: str, max_wait_time: float = 300.0) -> Dict[str, Any]:
+    async def get_result(
+        self, request_id: str, max_wait_time: float = 300.0
+    ) -> Dict[str, Any]:
         """Get the result of a forward-backward request."""
         import time
 

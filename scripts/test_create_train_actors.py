@@ -14,7 +14,7 @@ parallelize_plan = {
     "model.layers.*.self_attn.k_proj": "column",
     "model.layers.*.self_attn.v_proj": "column",
     "model.layers.*.self_attn.o_proj": "row",
-    
+
     # MLP projections (all layers)
     "model.layers.*.mlp.gate_proj": "column",
     "model.layers.*.mlp.up_proj": "column",
@@ -78,9 +78,9 @@ def forward_backward_example(client: httpx.Client):
     # Example training batch
     tokenized_inputs = tokenize_input(["The quick brown fox jumps over the lazy dog.", "Machine learning is transforming the world."], tokenizer)
 
-    print(f"Tokenized inputs: {tokenized_inputs['input_ids'].model_dump_json()}")
-    inputs1 = {k:v.slice(0).model_dump_json() for k,v in tokenized_inputs.items()}
-    inputs2 = {k:v.slice(1).model_dump_json() for k,v in tokenized_inputs.items()}
+    print(f"Tokenized inputs: {tokenized_inputs['input_ids'].model_dump()}")
+    inputs1 = {k:v.slice(0).model_dump() for k,v in tokenized_inputs.items()}
+    inputs2 = {k:v.slice(1).model_dump() for k,v in tokenized_inputs.items()}
 
     # Send forward-backward request
     targets1 = inputs1.pop("labels")
@@ -119,7 +119,7 @@ def forward_backward_example(client: httpx.Client):
 if __name__ == "__main__":
     client = httpx.Client(
         base_url="https://jesterlabs--training-service.modal.run",
-        timeout=300.0
+        timeout=600.0
     )
 
     # Step 1: Create training actors

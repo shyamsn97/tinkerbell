@@ -4,10 +4,10 @@ from tinkerbell.models import ModalDeployConfig
 if __name__ == "__main__":
     deploy_config = ModalDeployConfig(
         gpu="A100",
-        num_gpus=4,
+        num_gpus=5,
         timeout=86400,
         container_idle_timeout=600,
-        max_inputs=100,
+        max_inputs=200,
     )
     server_url = "https://0.0.0.0:8000"
     deploy_on_modal(
