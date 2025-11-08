@@ -11,15 +11,14 @@ def fixed_cross_entropy(
     ignore_index: int = -100,
     **kwargs,
 ) -> torch.Tensor:
-    reduction = "sum" if num_items_in_batch is not None else "mean"
     loss = nn.functional.cross_entropy(
-        source, target, ignore_index=ignore_index, reduction=reduction
+        source, target, ignore_index=ignore_index, reduction="none"
     )
-    if reduction == "sum":
-        # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
-        if torch.is_tensor(num_items_in_batch):
-            num_items_in_batch = num_items_in_batch.to(loss.device)
-        loss = loss / num_items_in_batch
+    # if reduction == "sum":
+    #     # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
+    #     if torch.is_tensor(num_items_in_batch):
+    #         num_items_in_batch = num_items_in_batch.to(loss.device)
+    #     loss = loss / num_items_in_batch
     return loss
 
 
@@ -33,6 +32,7 @@ def ForCausalLMLoss(
 ) -> torch.Tensor:
     # Upcast to float if we need to compute the loss to avoid potential precision issues
     logits = logits.float()
+    batch_size = logits.shape[0]
     vocab_size = logits.shape[-1]
 
     if shift_labels is None:
@@ -47,4 +47,5 @@ def ForCausalLMLoss(
     loss = fixed_cross_entropy(
         logits, shift_labels, num_items_in_batch, ignore_index, **kwargs
     )
+    loss = loss.view(batch_size, -1).mean(dim=-1)
     return loss

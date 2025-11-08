@@ -1,4 +1,5 @@
 from tinkerbell.types.deploy import DeployConfig, ModalDeployConfig
+from tinkerbell.types.optimizer import ZeroGradRequest, ZeroGradResponse
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     CreateTrainingActorsRequest,
@@ -10,6 +11,7 @@ from tinkerbell.types.responses import (
     CreateTrainingActorsResponse,
     ForwardBackwardResponse,
     ForwardResponse,
+    GetRayActorsResponse,
     HealthResponse,
     RemoteFuture,
 )
@@ -27,4 +29,7 @@ __all__ = [
     "ModalDeployConfig",
     "HealthResponse",
     "RemoteFuture",
+    "GetRayActorsResponse",
+    "ZeroGradRequest",
+    "ZeroGradResponse",
 ]

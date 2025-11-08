@@ -1,5 +1,7 @@
 from typing import Any
 
+from pydantic import BaseModel
+
 DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
     "name": "adamw",
     "lr": 5e-5,
@@ -10,3 +12,22 @@ DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
 DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {
     "scheduler": "cosine",
 }
+
+
+class ZeroGradRequest(BaseModel):
+    model_name: str
+
+
+class ZeroGradResponse(BaseModel):
+    model_name: str
+    message: str
+
+
+class OptimStepRequest(BaseModel):
+    model_name: str
+    optimizer_params: dict[str, Any]
+
+
+class OptimStepResponse(BaseModel):
+    model_name: str
+    message: str

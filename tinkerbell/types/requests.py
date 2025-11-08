@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field
 
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.optimizer import (
-    DEFAULT_OPTIMIZER_PARAMS,
     DEFAULT_SCHEDULER_PARAMS,
 )
 
@@ -17,9 +16,6 @@ class CreateTrainingActorsRequest(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     parallelize_plan: dict[str, str] = Field(default_factory=lambda: {})
-    optimizer_params: dict[str, Any] = Field(
-        default_factory=lambda: DEFAULT_OPTIMIZER_PARAMS
-    )
     scheduler_params: dict[str, Any] = Field(
         default_factory=lambda: DEFAULT_SCHEDULER_PARAMS
     )

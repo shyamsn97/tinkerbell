@@ -12,9 +12,16 @@ from tinkerbell.types import (
     CreateTrainingActorsResponse,
     ForwardBackwardRequest,
     ForwardBackwardResponse,
+    GetRayActorsResponse,
     HealthResponse,
     ModalDeployConfig,
     RemoteFuture,
+)
+from tinkerbell.types.optimizer import (
+    OptimStepRequest,
+    OptimStepResponse,
+    ZeroGradRequest,
+    ZeroGradResponse,
 )
 from tinkerbell.utils import get_host_and_port
 
@@ -37,6 +44,24 @@ class TinkerbellServiceDeployment:
             clock_cycle=clock_cycle,
         )
 
+    @APP.post("/zero_grad")
+    async def zero_grad(self, request: ZeroGradRequest) -> ZeroGradResponse:
+        await self.training_manager.zero_grad(model_name=request.model_name)
+        return ZeroGradResponse(
+            model_name=request.model_name,
+            message=f"Gradients zeroed for model {request.model_name}",
+        )
+
+    @APP.post("/optim_step")
+    async def optim_step(self, request: OptimStepRequest) -> OptimStepResponse:
+        await self.training_manager.optim_step(
+            model_name=request.model_name, optimizer_params=request.optimizer_params
+        )
+        return OptimStepResponse(
+            model_name=request.model_name,
+            message=f"Optimizer stepped for model {request.model_name}",
+        )
+
     @APP.get("/health")
     async def health(self) -> HealthResponse:
         return HealthResponse(
@@ -56,7 +81,6 @@ class TinkerbellServiceDeployment:
             model_name=request.model_name,
             model_kwargs=request.model_kwargs,
             parallelize_plan=request.parallelize_plan,
-            optimizer_params=request.optimizer_params,
             scheduler_params=request.scheduler_params,
             ray_worker_options=request.ray_worker_options,
         )
@@ -110,6 +134,15 @@ class TinkerbellServiceDeployment:
         request: RemoteFuture,
     ) -> Dict[str, Any]:
         return await self.training_manager.get_result(request.request_id)
+
+    @APP.post("/get_ray_actors")
+    async def get_ray_actors(
+        self,
+    ) -> GetRayActorsResponse:
+        actors = ray.util.list_named_actors()
+        return GetRayActorsResponse(
+            actor_names=actors,
+        )
 
 
 def deploy_service(

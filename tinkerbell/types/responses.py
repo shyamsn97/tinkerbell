@@ -21,7 +21,6 @@ class ForwardResponse(BaseModel):
     request_id: str | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, Any] | None = None
-    future: Any = None
 
 
 class ForwardBackwardResponse(BaseModel):
@@ -30,7 +29,6 @@ class ForwardBackwardResponse(BaseModel):
     loss: float | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, TensorData] | None = None
-    future: Any = None
 
 
 class ActorStatusResponse(BaseModel):
@@ -40,3 +38,7 @@ class ActorStatusResponse(BaseModel):
 
 class RemoteFuture(BaseModel):
     request_id: str
+
+
+class GetRayActorsResponse(BaseModel):
+    actor_names: list[str]

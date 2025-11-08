@@ -2,6 +2,7 @@ import os
 import traceback
 from typing import Any
 
+import ray
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
@@ -16,6 +17,7 @@ from tinkerbell.types.data import TensorData
 from tinkerbell.utils import get_submodules_with_wildcard
 
 
+@ray.remote
 class TrainingActor:
     def __init__(
         self,
@@ -26,7 +28,6 @@ class TrainingActor:
         model_name: str,
         model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
-        optimizer_params: dict[str, Any] = {},
         scheduler_params: dict[str, Any] = {},
     ):
         self.rank = rank
@@ -36,10 +37,10 @@ class TrainingActor:
         self.model_name = model_name
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
-        self.optimizer_params = optimizer_params
         self.scheduler_params = scheduler_params
         self.model = None
         self.optimizer = None
+        self.ready = False
 
     def _get_optimizer(
         self, model: torch.nn.Module, optimizer_config: dict[str, Any]
@@ -112,6 +113,9 @@ class TrainingActor:
         """Initialize the PyTorch distributed process group and model."""
         from transformers import AutoConfig, AutoModelForCausalLM
 
+        if self.ready:
+            return True
+
         self._setup_distributed()
 
         # Load model
@@ -119,20 +123,9 @@ class TrainingActor:
         model = AutoModelForCausalLM.from_config(config)
         self.model = self._setup_tensor_parallel(model)
 
-        # Setup optimizer - disable foreach to handle mixed DTensor/Tensor parameters
-        self.optimizer = self._get_optimizer(self.model, self.optimizer_params)
-
         print(f"[Rank {self.rank}] Setup complete")
+        self.ready = True
         return True
-
-    def zero_grad(self):
-        self.optimizer.zero_grad()
-
-    def backward(self, loss):
-        loss.backward()
-
-    def step(self):
-        self.optimizer.step()
 
     def _prepare_inputs(
         self,
@@ -161,6 +154,7 @@ class TrainingActor:
             print("Input shapes:")
             for key in batch_inputs:
                 print(f"  - {key}: {batch_inputs[key].shape}")
+            print("Torch targets shape: ", targets.shape)
             return batch_inputs, targets
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -207,20 +201,30 @@ class TrainingActor:
             forward_kwargs=forward_kwargs,
         )
         try:
-            loss = ForCausalLMLoss(
+            per_batch_losses = ForCausalLMLoss(
                 logits=outputs.logits,
                 labels=targets,
             )
+            loss = per_batch_losses.mean()
             loss.backward()
         except Exception as e:
             tb_str = traceback.format_exc()
             print(f"Error in forward_backward: {e}\n{tb_str}")
             raise e
 
-        return {"loss": loss.item() if loss is not None and self.rank == 0 else None}
+        return (
+            {"loss": [per_batch_loss.item() for per_batch_loss in per_batch_losses]}
+            if loss is not None and self.rank == 0
+            else None
+        )
 
-    def cleanup(self):
-        """Clean up the PyTorch distributed process group."""
-        print(f"[Rank {self.rank}] Cleaning up torch distributed")
-        dist.destroy_process_group()
-        return True
+    def zero_grad(self):
+        for param in self.model.parameters():
+            param.grad = None
+
+    def backward(self, loss):
+        loss.backward()
+
+    def optim_step(self, optimizer_params: dict[str, Any] = {}):
+        optimizer = self._get_optimizer(self.model, optimizer_params)
+        optimizer.step()

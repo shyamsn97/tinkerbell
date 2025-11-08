@@ -1,4 +1,5 @@
 import asyncio
+import time
 import traceback
 import uuid
 from enum import Enum
@@ -15,20 +16,22 @@ from tinkerbell.types.responses import RemoteFuture
 class ActorStatus(Enum):
     READY = "ready"
     INITIALIZING = "initializing"
+    NOT_PRESENT = "not_present"
 
 
 class ActorGroup:
     def __init__(
         self,
         workers: list[Any],
-        setup_refs: list[Any],
         model_name: str,
         status: ActorStatus = ActorStatus.INITIALIZING,
+        max_wait_time: float = 600.0,
     ):
         self.workers = workers
-        self.setup_refs = setup_refs
+        self.setup_refs = [worker.setup.remote() for worker in self.workers]
         self.model_name = model_name
         self.status = status
+        self.max_wait_time = max_wait_time
 
     async def get_status(self) -> ActorStatus:
         # Non-blocking check
@@ -57,6 +60,11 @@ class ActorGroup:
             await asyncio.sleep(1.0)  # Wait 1 second before checking again
         return False
 
+    async def zero_grad(self) -> None:
+        """Zero the gradients for all workers."""
+        refs = [worker.zero_grad.remote() for worker in self.workers]
+        await asyncio.gather(*refs)
+
     async def forward_backward(
         self,
         inputs: list[dict[str, Any]],
@@ -66,11 +74,12 @@ class ActorGroup:
     ) -> list[dict[str, Any]]:
         """Forward and backward pass through the model with batched inputs."""
         if self.status != ActorStatus.READY:
-            if self.status != ActorStatus.READY:
+            if not await self.wait_until_ready():
                 raise HTTPException(
                     status_code=503,
                     detail=f"Actors for model {self.model_name} are not ready",
                 )
+        batch_size = len(inputs)
         refs = [
             worker.forward_backward.remote(
                 inputs=inputs,
@@ -83,7 +92,56 @@ class ActorGroup:
         print(f"Forward-backward refs: {refs}")
         outputs = await asyncio.gather(*refs)
         print(f"Forward-backward outputs: {outputs}")
-        return outputs
+        rank_0_output = [output for output in outputs if output is not None][0]
+        batched_output = [{} for _ in range(batch_size)]
+        for i in range(batch_size):
+            for key in rank_0_output:
+                batched_output[i][key] = rank_0_output[key][i]
+        return batched_output
+
+    async def optim_step(self, optimizer_params: dict[str, Any] = {}) -> None:
+        """Step the optimizer for all workers."""
+        refs = [
+            worker.optim_step.remote(optimizer_params=optimizer_params)
+            for worker in self.workers
+        ]
+        await asyncio.gather(*refs)
+
+
+@ray.remote
+class GlobalStateManager:
+    def __init__(self):
+        self.request_queue: Dict[str, list[ForwardBackwardRequest]] = {}
+        self.results: Dict[str, Any] = {}
+
+    def get_request_queue(self) -> Dict[str, list[ForwardBackwardRequest]]:
+        return self.request_queue
+
+    def get_requests(self, model_name: str) -> list[ForwardBackwardRequest]:
+        if model_name not in self.request_queue:
+            return []
+        return self.request_queue[model_name]
+
+    def clear_request_queue(self, model_name: str):
+        if model_name not in self.request_queue:
+            return
+        self.request_queue[model_name] = []
+
+    def add_request_to_queue(self, request: ForwardBackwardRequest):
+        if request.model_name not in self.request_queue:
+            self.request_queue[request.model_name] = []
+        self.request_queue[request.model_name].append(request)
+
+    def get_results(self) -> Dict[str, Any]:
+        return self.results
+
+    def get_result(self, request_id: str) -> Any:
+        if request_id not in self.results:
+            return None
+        return self.results[request_id]
+
+    def set_result(self, request_id: str, result: Any):
+        self.results[request_id] = result
 
 
 class TrainingManager:
@@ -97,8 +155,12 @@ class TrainingManager:
         self.clock_cycle = clock_cycle
 
         # Queue for batching requests
-        self.request_queue: Dict[str, list[ForwardBackwardRequest]] = {}
-        self.results: Dict[str, Any] = {}
+        self.global_state = GlobalStateManager.options(
+            get_if_exists=True,
+            lifetime="detached",
+            name="tinkerbell_global_state_manager",
+            num_gpus=0,
+        ).remote()
         self.batch_processor_task: Optional[asyncio.Task] = None
         self.running = False
 
@@ -127,27 +189,32 @@ class TrainingManager:
         self, request_id: str, max_wait_time: float = 300.0
     ) -> Dict[str, Any]:
         """Get the result of a forward-backward request."""
-        import time
-
         # Wait for the result to be available
         start_time = time.time()
-        while request_id not in self.results:
-            elapsed_time = time.time() - start_time
-            if elapsed_time >= max_wait_time:
-                raise TimeoutError(
-                    f"Result for request {request_id} not available after {max_wait_time} seconds"
-                )
+        elapsed_time = 0.0
+        request_id_is_in_results = False
+        while not request_id_is_in_results and elapsed_time < max_wait_time:
+            results = ray.get(self.global_state.get_results.remote())
+            if request_id in results:
+                request_id_is_in_results = True
+                break
             await asyncio.sleep(1.0)
+            elapsed_time = time.time() - start_time
             print(f"Waiting for result {request_id} (elapsed: {elapsed_time:.1f}s)")
-        return self.results[request_id]
+        if not request_id_is_in_results:
+            raise TimeoutError(
+                f"Result for request {request_id} not available after {max_wait_time} seconds"
+            )
+        return ray.get(self.global_state.get_result.remote(request_id=request_id))
 
     async def _batch_processor_loop(self) -> None:
         """Background task that processes batches at regular intervals."""
         while self.running:
             try:
+                request_queue = ray.get(self.global_state.get_request_queue.remote())
                 await asyncio.sleep(self.clock_cycle)
                 print("Processing batches...")
-                print(f"Request queue: {self.request_queue}")
+                print(f"Request queue: {request_queue}")
                 await self._process_all_batches()
             except asyncio.CancelledError:
                 print("Batch processor task cancelled")
@@ -161,21 +228,21 @@ class TrainingManager:
 
     async def _process_all_batches(self) -> None:
         """Process all pending batches across all model groups."""
-        for model_name in list(self.request_queue.keys()):
-            if len(self.request_queue[model_name]) > 0:
+        request_queue = ray.get(self.global_state.get_request_queue.remote())
+        for model_name in list(request_queue.keys()):
+            if len(request_queue[model_name]) > 0:
                 await self._process_batch(model_name)
 
     async def _process_batch(self, model_name: str) -> None:
         """Process a batch of requests for a specific model."""
         # Get all pending requests
-        requests = self.request_queue.get(model_name, [])
+        request_queue = ray.get(self.global_state.get_request_queue.remote())
+        requests = request_queue.get(model_name, [])
         print(f"Processing batch for model {model_name} with requests: {requests}")
         if len(requests) == 0:
             return
 
-        # Clear the queue for this model
-        self.request_queue[model_name] = []
-
+        self.global_state.clear_request_queue.remote(model_name=model_name)
         # Check if actor is ready
         try:
             status = await self.get_actor_status(model_name)
@@ -200,46 +267,26 @@ class TrainingManager:
                 forward_kwargs=forward_kwargs,
                 return_logprobs=return_logprobs,
             )
-            # print(f"Output: {output}")
+            print(f"Output: {len(output)} outputs")
+            print(f"Requests: {len(requests)} requests")
             # Distribute results back to futures
+
             for req, output in zip(requests, output, strict=True):
                 if output is not None:
-                    req.future.set_result(output)
-                    self.results[req.request_id] = output
-                else:
-                    req.future.set_exception(
-                        HTTPException(
-                            status_code=500,
-                            detail=f"Error processing request {req.request_id}",
-                        )
+                    self.global_state.set_result.remote(
+                        request_id=req.request_id, result=output
                     )
-
         except Exception as e:
-            for req in requests:
-                if not req.future.done():
-                    req.future.set_exception(e)
+            print(f"Error processing batch for model {model_name}: {e}")
+            raise e
 
     async def get_actor_status(self, model_name: str) -> ActorStatus:
         """Check if training actors are ready."""
         if model_name not in self.actor_groups:
-            return ActorStatus.INITIALIZING
+            return ActorStatus.NOT_PRESENT
 
         status = await self.actor_groups[model_name].get_status()
         return status
-
-    def _create_future(self, model_name: str) -> asyncio.Future:
-        if model_name not in self.actor_groups:
-            raise HTTPException(
-                status_code=404, detail=f"Group not found for model {model_name}"
-            )
-
-        # Initialize queue for this model if needed
-        if model_name not in self.request_queue:
-            self.request_queue[model_name] = []
-
-        # Create a future for this request
-        future = asyncio.get_event_loop().create_future()
-        return future
 
     async def forward(
         self,
@@ -252,16 +299,19 @@ class TrainingManager:
         Queue a forward request to be processed in the next batch.
         Returns immediately with a future that will resolve when the batch is processed.
         """
-        future = self._create_future(model_name)
+        if model_name not in self.actor_groups:
+            raise HTTPException(
+                status_code=404, detail=f"Group not found for model {model_name}"
+            )
+
         request = ForwardRequest(
             request_id=str(uuid.uuid4()),
             model_name=model_name,
             inputs=inputs,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
-            future=future,
         )
-        self.request_queue[model_name].append(request)
+        self.global_state.add_request_to_queue.remote(request=request)
         if self.clock_cycle <= 0.0:
             # act immediately
             await self._process_batch(model_name)
@@ -279,7 +329,11 @@ class TrainingManager:
         Queue a forward-backward request to be processed in the next batch.
         Returns immediately with a future that will resolve when the batch is processed.
         """
-        future = self._create_future(model_name)
+        if model_name not in self.actor_groups:
+            raise HTTPException(
+                status_code=404, detail=f"Group not found for model {model_name}"
+            )
+
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
             model_name=model_name,
@@ -287,16 +341,35 @@ class TrainingManager:
             targets=targets,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
-            future=future,
         )
 
         # Add to queue
-        self.request_queue[model_name].append(request)
+        self.global_state.add_request_to_queue.remote(request=request)
 
         if self.clock_cycle <= 0.0:
             # act immediately
             await self._process_batch(model_name)
         return RemoteFuture(request_id=request.request_id)
+
+    async def zero_grad(self, model_name: str) -> None:
+        """Zero the gradients for all workers."""
+        if model_name not in self.actor_groups:
+            raise HTTPException(
+                status_code=404, detail=f"Group not found for model {model_name}"
+            )
+        await self.actor_groups[model_name].zero_grad()
+
+    async def optim_step(
+        self, model_name: str, optimizer_params: dict[str, Any] = {}
+    ) -> None:
+        """Step the optimizer for all workers."""
+        if model_name not in self.actor_groups:
+            raise HTTPException(
+                status_code=404, detail=f"Group not found for model {model_name}"
+            )
+        await self.actor_groups[model_name].optim_step(
+            optimizer_params=optimizer_params
+        )
 
     async def create_training_actors(
         self,
@@ -306,7 +379,6 @@ class TrainingManager:
         model_name: str,
         model_kwargs: dict[str, Any],
         parallelize_plan: dict[str, str],
-        optimizer_params: dict[str, Any],
         scheduler_params: dict[str, Any],
         ray_worker_options: dict[str, Any] = {},
     ) -> str:
@@ -317,13 +389,17 @@ class TrainingManager:
 
         num_gpus = 1  # num gpus per worker is 1 for tensor parallelism
 
-        ray_training_actor = ray.remote(TrainingActor).options(
-            num_gpus=num_gpus, **ray_worker_options
-        )
+        cleaned_actor_name = model_name.replace("/", "_").replace(":", "_").lower()
         workers = []
         for rank in range(world_size):
             workers.append(
-                ray_training_actor.remote(
+                TrainingActor.options(
+                    num_gpus=num_gpus,
+                    get_if_exists=True,
+                    lifetime="detached",
+                    name=f"training_actor_{cleaned_actor_name}_{rank}",
+                    **ray_worker_options,
+                ).remote(
                     rank=rank,
                     world_size=world_size,
                     master_addr=master_addr,
@@ -331,23 +407,17 @@ class TrainingManager:
                     model_name=model_name,
                     model_kwargs=model_kwargs,
                     parallelize_plan=parallelize_plan,
-                    optimizer_params=optimizer_params,
                     scheduler_params=scheduler_params,
                 )
             )
 
-        # Trigger setup but don't wait
-        setup_refs = [worker.setup.remote() for worker in workers]
-
         # Store for later querying
         self.actor_groups[model_name] = ActorGroup(
             workers=workers,
-            setup_refs=setup_refs,
             model_name=model_name,
             status=ActorStatus.INITIALIZING,
+            max_wait_time=self.max_wait_time,
         )
-
-        self.request_queue[model_name] = []
 
         await self.start()
 

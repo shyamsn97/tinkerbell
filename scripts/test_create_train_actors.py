@@ -82,6 +82,12 @@ def forward_backward_example(client: httpx.Client):
     inputs1 = {k:v.slice(0).model_dump() for k,v in tokenized_inputs.items()}
     inputs2 = {k:v.slice(1).model_dump() for k,v in tokenized_inputs.items()}
 
+    print("Zeroing gradients...")
+    response = client.post("/zero_grad", json={
+        "model_name": MODEL_NAME,
+    })
+    print("Zero grad response:", response.json())
+    print("================================================")
     # Send forward-backward request
     targets1 = inputs1.pop("labels")
     targets2 = inputs2.pop("labels")
@@ -91,7 +97,7 @@ def forward_backward_example(client: httpx.Client):
         "targets": targets1,
         "forward_kwargs": {},
     })
-
+    
     response2 = client.post("/forward_backward", json={
         "model_name": MODEL_NAME,
         "inputs": inputs2,
@@ -111,8 +117,50 @@ def forward_backward_example(client: httpx.Client):
     output2 = client.post("/get_result", json={
         "request_id":result2['request_id']
     })
-    print("Output 2", output2.json())
+    print("Output 2", output2)
     print(f"Loss: {output2.json()['loss']}")
+    print("Backward pass complete!")
+    print("================================================")
+
+    print("Optimizing...")
+    response = client.post("/optim_step", json={
+        "model_name": MODEL_NAME,
+        "optimizer_params": {},
+    })
+    print("Optim step response:", response.json())
+    print("================================================")
+
+    response1 = client.post("/forward_backward", json={
+        "model_name": MODEL_NAME,
+        "inputs": inputs1,
+        "targets": targets1,
+        "forward_kwargs": {},
+    })
+
+    response2 = client.post("/forward_backward", json={
+        "model_name": MODEL_NAME,
+        "inputs": inputs2,
+        "targets": targets2,
+        "forward_kwargs": {},
+    })
+
+    result1 = response1.json()
+    result2 = response2.json()
+    print("Request 1 after optimization", result1)
+    print("Request 2 after optimization", result2)
+    output1 = client.post("/get_result", json={
+        "request_id":result1['request_id']
+    })
+    print("Output 1 after optimization", output1)
+    print(f"Loss: {output1.json()['loss']}")
+    output2 = client.post("/get_result", json={
+        "request_id":result2['request_id']
+    })
+    print("Output 2 after optimization", output2)
+    print(f"Loss: {output2.json()['loss']}")
+    print("Backward pass complete!")
+    print("================================================")
+
     return output1, output2
 
 
