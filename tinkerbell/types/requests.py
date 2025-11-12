@@ -24,6 +24,11 @@ class CreateTrainingActorsRequest(BaseModel):
     wait_until_ready: bool = False
 
 
+class SaveCheckpointRequest(BaseModel):
+    model_name: str
+    checkpoint_path: str
+
+
 class ForwardRequest(BaseModel):
     model_name: str
     request_id: str | None = None
@@ -44,3 +49,16 @@ class ForwardBackwardRequest(BaseModel):
 
 class ActorStatusRequest(BaseModel):
     model_name: str
+
+
+class CreateInferenceActorRequest(BaseModel):
+    model_path: str
+    tp_size: int
+    engine_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
+
+
+class GenerateRequest(BaseModel):
+    model_name: str
+    prompt: list[str]
+    max_tokens: int = 100
+    temperature: float = 0.7

@@ -105,7 +105,17 @@ class ActorGroup:
             worker.optim_step.remote(optimizer_params=optimizer_params)
             for worker in self.workers
         ]
-        await asyncio.gather(*refs)
+        outputs = asyncio.gather(*refs)
+        return [output for output in outputs if output is not None][0]
+
+    async def save_checkpoint(self, checkpoint_path: str) -> None:
+        """Save the checkpoint for all workers."""
+        refs = [
+            worker.save_checkpoint.remote(checkpoint_path=checkpoint_path)
+            for worker in self.workers
+        ]
+        outputs = asyncio.gather(*refs)
+        return [output for output in outputs if output is not None][0]
 
 
 @ray.remote
@@ -156,10 +166,11 @@ class TrainingManager:
 
         # Queue for batching requests
         self.global_state = GlobalStateManager.options(
+            num_gpus=0,
             get_if_exists=True,
             lifetime="detached",
             name="tinkerbell_global_state_manager",
-            num_gpus=0,
+            namespace="tinkerbell",
         ).remote()
         self.batch_processor_task: Optional[asyncio.Task] = None
         self.running = False
@@ -371,6 +382,16 @@ class TrainingManager:
             optimizer_params=optimizer_params
         )
 
+    async def save_checkpoint(self, model_name: str, checkpoint_path: str) -> None:
+        """Save the checkpoint for all workers."""
+        if model_name not in self.actor_groups:
+            raise HTTPException(
+                status_code=404, detail=f"Group not found for model {model_name}"
+            )
+        await self.actor_groups[model_name].save_checkpoint(
+            checkpoint_path=checkpoint_path
+        )
+
     async def create_training_actors(
         self,
         world_size: int,
@@ -398,6 +419,7 @@ class TrainingManager:
                     get_if_exists=True,
                     lifetime="detached",
                     name=f"training_actor_{cleaned_actor_name}_{rank}",
+                    namespace="tinkerbell",
                     **ray_worker_options,
                 ).remote(
                     rank=rank,

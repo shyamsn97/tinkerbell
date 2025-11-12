@@ -42,3 +42,19 @@ class RemoteFuture(BaseModel):
 
 class GetRayActorsResponse(BaseModel):
     actor_names: list[str]
+
+
+class SaveCheckpointResponse(BaseModel):
+    model_name: str
+    success: bool
+    message: str | None = None
+
+
+class CreateInferenceActorResponse(BaseModel):
+    success: bool
+    message: str | None = None
+
+
+class GenerateResponse(BaseModel):
+    text: str
+    tokens_generated: int | None = None

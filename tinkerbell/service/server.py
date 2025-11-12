@@ -1,21 +1,29 @@
+import asyncio
 from typing import Any, Dict
 
 import ray
 from fastapi import FastAPI
 from ray import serve
 
+from tinkerbell.inference.manager import InferenceManager
 from tinkerbell.training.manager import TrainingManager
 from tinkerbell.types import (
     ActorStatusRequest,
     ActorStatusResponse,
+    CreateInferenceActorRequest,
+    CreateInferenceActorResponse,
     CreateTrainingActorsRequest,
     CreateTrainingActorsResponse,
     ForwardBackwardRequest,
     ForwardBackwardResponse,
+    GenerateRequest,
+    GenerateResponse,
     GetRayActorsResponse,
     HealthResponse,
     ModalDeployConfig,
     RemoteFuture,
+    SaveCheckpointRequest,
+    SaveCheckpointResponse,
 )
 from tinkerbell.types.optimizer import (
     OptimStepRequest,
@@ -43,6 +51,7 @@ class TinkerbellServiceDeployment:
             max_wait_time=max_wait_time,
             clock_cycle=clock_cycle,
         )
+        self.inference_manager = InferenceManager()
 
     @APP.post("/zero_grad")
     async def zero_grad(self, request: ZeroGradRequest) -> ZeroGradResponse:
@@ -88,6 +97,18 @@ class TinkerbellServiceDeployment:
             success=True,
             model_name=model_name,
             message=f"Training actors for model {model_name} created...",
+        )
+
+    @APP.post("/save_checkpoint")
+    async def save_checkpoint(
+        self, request: SaveCheckpointRequest
+    ) -> SaveCheckpointResponse:
+        await self.training_manager.save_checkpoint(
+            model_name=request.model_name, checkpoint_path=request.checkpoint_path
+        )
+        return SaveCheckpointResponse(
+            model_name=request.model_name,
+            message=f"Checkpoint saved for model {request.model_name}",
         )
 
     @APP.post("/forward_backward")
@@ -144,6 +165,52 @@ class TinkerbellServiceDeployment:
             actor_names=actors,
         )
 
+    @APP.post("/create_inference_actor")
+    async def create_inference_actor(
+        self,
+        request: CreateInferenceActorRequest,
+    ) -> CreateInferenceActorResponse:
+        _ = self.inference_manager.create_inference_actor(
+            model_path=request.model_path,
+            tp_size=request.tp_size,
+            engine_kwargs=request.engine_kwargs,
+        )
+        return CreateInferenceActorResponse(
+            success=True,
+            message=f"Inference actor for model {request.model_path} created...",
+        )
+
+    @APP.post("/get_inference_actor_status")
+    async def get_inference_actor_status(
+        self,
+        request: ActorStatusRequest,
+    ) -> ActorStatusResponse:
+        status = await self.inference_manager.get_inference_actor_status(
+            request.model_name
+        )
+        return ActorStatusResponse(
+            status=status.value,
+            message=f"Inference actor status for model {request.model_name} is {status.value}",
+        )
+
+    @APP.post("/generate")
+    async def generate(
+        self,
+        request: GenerateRequest,
+    ) -> GenerateResponse:
+        inference_actor = self.inference_manager.get_inference_actor(request.model_name)
+        if inference_actor is None:
+            raise ValueError(
+                f"Inference actor for model {request.model_name} not found"
+            )
+        ref = inference_actor.generate.remote(
+            request.prompt, request.max_tokens, request.temperature
+        )
+        text = await asyncio.gather(ref)
+        return GenerateResponse(
+            text=text,
+        )
+
 
 def deploy_service(
     server_url: str,
@@ -161,7 +228,8 @@ def deploy_service(
             (e.g., num_replicas, ray_actor_options, autoscaling_config)
     """
     if not ray.is_initialized():
-        ray.init()
+        # Don't specify num_gpus - let Ray auto-detect all GPUs
+        ray.init(namespace="tinkerbell")
 
     host, port = get_host_and_port(server_url)
     serve.start(detached=True, http_options={"host": host, "port": port})

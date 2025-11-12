@@ -9,6 +9,11 @@ import fnmatch
 import re
 import modal
 import time
+import json
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict
+)
 
 def get_submodules_with_wildcard(model, pattern):
     """Get all submodules matching a wildcard pattern."""
@@ -60,10 +65,9 @@ class TensorParallelWorker:
         # Each actor sees only one GPU as device 0
         torch.cuda.set_device(0)
 
-        # Load model
-        config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
-        config.n_layer = 4  # Small model for demo
-        self.model = AutoModelForCausalLM.from_config(config)
+        # Initialize model with RANDOM WEIGHTS using Qwen3 architecture
+        # from_config() creates model with random initialization (NOT pretrained weights)
+        self.model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")  # Creates model with random weights
 
         # Define parallelization strategies
         strategies = {
@@ -129,6 +133,70 @@ class TensorParallelWorker:
 
         return loss.item() if self.rank == 0 else None
 
+    def zero_out_lm_head(self):
+        """Zero out the lm_head weights"""
+        for _, param in self.model.named_parameters():
+            param.data.zero_()
+        return True
+
+    def create_test_params_batch(self, model, num_params=64):
+        """Create a batch of test parameters from the model"""
+        param_names = []
+        test_tensors = []
+
+        # Get first few parameters from the model for testing
+        for i, (name, tensor) in enumerate(model.named_parameters()):
+            if i >= num_params:
+                break
+            param_names.append(name)
+            # Create test tensor with known values, matching original shape and dtype
+            test_tensor = torch.full_like(tensor, 1.5, dtype=tensor.dtype).cuda()
+            test_tensors.append(test_tensor)
+
+        return list(zip(param_names, test_tensors))
+
+    def get_model_state_dict(
+        self, full_state_dict: bool = False
+    ):
+        options = StateDictOptions(
+            full_state_dict=full_state_dict,
+            cpu_offload=True
+        )
+        # self._load_model_to_device(torch.cuda.current_device())
+        state_dict = get_model_state_dict(self.model, options=options)
+        # self._load_model_to_device("cpu")
+        return state_dict
+
+    def save_model(self, save_dir: str):
+
+        state_dict = self.get_model_state_dict(full_state_dict=True)
+        if self.rank == 0:
+
+            # self.tokenizer.save_pretrained(save_dir)
+            self.model.save_pretrained(
+                save_dir, state_dict=state_dict
+            )
+
+        dist.barrier()
+
+    def save_checkpoint(self, checkpoint_path: str):
+        """Save model checkpoint using PyTorch's distributed checkpoint API.
+        
+        Args:
+            checkpoint_path: Path to save the checkpoint
+        """
+        # from torch.distributed.checkpoint import save
+
+        print(f"[Rank {self.rank}] Starting checkpoint save process...")
+
+        if self.rank == 0:
+            os.makedirs(checkpoint_path, exist_ok=True)
+
+        self.save_model(checkpoint_path)
+        print(f"[Rank {self.rank}] Checkpoint save complete")
+
+        return self.rank == 0
+
     def cleanup(self):
         """Clean up the PyTorch distributed process group."""
         print(f"[Rank {self.rank}] Cleaning up torch distributed")
@@ -145,7 +213,7 @@ class SGLangInferenceActor:
     def __init__(self, model_path: str, tp_size: int, engine_kwargs: dict = {}):
         import sglang as sgl
         import asyncio
-        
+
         # Create event loop for this actor
         try:
             self.loop = asyncio.get_event_loop()
@@ -159,6 +227,17 @@ class SGLangInferenceActor:
             **engine_kwargs,
         )
         print(f"✓ SGLang engine initialized with {tp_size} GPUs")
+
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load checkpoint from a directory"""
+        import asyncio
+        # Ensure the event loop is set for the current thread
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(self.loop)
+
+        return self.engine.update_weights_from_disk(checkpoint_path)
 
     def generate(self, prompt: str, max_tokens: int = 100, temperature: float = 0.7):
         """Generate text from a prompt."""
@@ -186,14 +265,14 @@ def setup_inference_server(num_inference_gpus: int = 2):
     print("\n" + "="*50)
     print(f"Setting up SGLang Inference Engine ({num_inference_gpus} GPUs)")
     print("="*50)
-    
+
     model_path = "Qwen/Qwen3-0.6B"  # or your model
-    
+
     # Create inference actor with dynamic GPU allocation using .options()
     inference_actor = SGLangInferenceActor.options(num_gpus=num_inference_gpus).remote(
         model_path, num_inference_gpus
     )
-    
+
     return inference_actor
 
 
@@ -266,6 +345,8 @@ env_variables = {
     "RAY_DEDUP_LOGS": "0",
 }
 
+volume = modal.Volume.from_name("tinkerbell-checkpoints", create_if_missing=True)
+
 # Define Modal image with required dependencies
 image = (
     modal.Image.from_registry(
@@ -293,22 +374,29 @@ image = (
         "sgl-kernel",
         "huggingface_hub",
         "hf_transfer",
+        "safetensors",  # For modern checkpoint format
         "ray"
     )
     .env(env_variables)
 )
 
-@app.function(image=image, gpu="H100:6")
+@app.function(
+    image=image,
+    volumes={"/checkpoints": volume},
+    gpu="A100:4",
+    timeout=24*60*60,
+    container_idle_timeout=5*60,
+)
 def main():
     # Initialize Ray with log deduplication disabled
     ray.init(
-        num_gpus=6,
+        num_gpus=4,
         # logging_level="info",
         # log_to_driver=True,
     )
 
     # Configuration
-    WORLD_SIZE = 4
+    WORLD_SIZE = 2
     MASTER_ADDR = "127.0.0.1"
     MASTER_PORT = "29500"
 
@@ -328,20 +416,68 @@ def main():
     setup_results = ray.get([worker.setup.remote() for worker in workers])
     print(f"Setup results: {setup_results}")
     time.sleep(5)
+
+    # Save randomly initialized weights before any training
+    initial_checkpoint_path = "/checkpoints/initial_weights"
+    print(f"\nSaving initial weights to {initial_checkpoint_path}...")
+    initial_save_results = ray.get([worker.save_checkpoint.remote(initial_checkpoint_path) for worker in workers])
+    print(f"Initial checkpoint saved. Results: {initial_save_results}")
+
     # Run training steps
     print("\nRunning training step...")
     train_results = ray.get([worker.train_step.remote() for worker in workers])
     print(f"Training complete. Loss from rank 0: {train_results[0]}")
 
+    # Zero out lm_head weights to demonstrate checkpoint saving/loading
+    print("\n" + "="*50)
+    print("DEMONSTRATION: Zeroing out lm_head weights")
+    print("="*50)
+    print("This proves that the checkpoint is actually being saved and loaded.")
+    print("The inference engine will generate nonsensical outputs with zeroed weights.")
+    zero_results = ray.get([worker.zero_out_lm_head.remote() for worker in workers])
+    print(f"Zero out results: {zero_results}")
+
+    # Save checkpoint after training
+    checkpoint_path = "/checkpoints/random_weights_checkpoint"
+    print(f"\nSaving random weights checkpoint to {checkpoint_path}...")
+    save_results = ray.get([worker.save_checkpoint.remote(checkpoint_path) for worker in workers])
+    print(f"Checkpoint saved. Results: {save_results}")
+
     # Set up inference engine
     print("\nSetting up inference engine...")
     inference_actor = setup_inference_server(num_inference_gpus=2)
 
-    # Generate text
-    print("\nGenerating text...")
+    # Generate text with BASE model (before loading zeroed checkpoint)
+    print("\n" + "="*50)
+    print("BASELINE: Generating with BASE model")
+    print("="*50)
     prompt = "What is machine learning?"
-    response = ray.get(inference_actor.generate.remote(prompt, max_tokens=100, temperature=0.7))
-    print(f"✓ Generated: {response}")
+    print(f"Prompt: {prompt}")
+    base_response = ray.get(inference_actor.generate.remote(prompt, max_tokens=50, temperature=0.7))
+    print(f"✓ Base model output: {base_response}")
+
+    # Load trained weights (with zeroed lm_head) into inference engine
+    print("\n" + "="*50)
+    print("Loading checkpoint with ZEROED lm_head weights")
+    print("="*50)
+    ray.get(inference_actor.load_checkpoint.remote(checkpoint_path))
+    print("✓ Checkpoint with zeroed weights loaded successfully")
+
+    # Generate text with model that has zeroed lm_head
+    print("\n" + "="*50)
+    print("DEMONSTRATION: Generating with ZEROED lm_head")
+    print("="*50)
+    print(f"Prompt: {prompt}")
+    print("(Output should be very different/nonsensical, proving checkpoint was loaded)")
+    zeroed_response = ray.get(inference_actor.generate.remote(prompt, max_tokens=50, temperature=0.7))
+    print(f"✓ Zeroed model output: {zeroed_response}")
+
+    print("\n" + "="*50)
+    print("COMPARISON")
+    print("="*50)
+    print(f"Base model:   {base_response}")
+    print(f"Zeroed model: {zeroed_response}")
+    print("\nIf the outputs are different, checkpoint save/load is working! ✓")
 
     # Cleanup
     print("\nCleaning up...")

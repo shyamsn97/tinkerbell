@@ -4,7 +4,7 @@ from tinkerbell.models import ModalDeployConfig
 if __name__ == "__main__":
     deploy_config = ModalDeployConfig(
         gpu="A100",
-        num_gpus=5,
+        num_gpus=6,
         timeout=86400,
         container_idle_timeout=600,
         max_inputs=200,

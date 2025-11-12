@@ -5,6 +5,10 @@ from typing import Any
 import ray
 import torch
 import torch.distributed as dist
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -109,24 +113,6 @@ class TrainingActor:
         model = model.cuda()
         return model
 
-    def setup(self):
-        """Initialize the PyTorch distributed process group and model."""
-        from transformers import AutoConfig, AutoModelForCausalLM
-
-        if self.ready:
-            return True
-
-        self._setup_distributed()
-
-        # Load model
-        config = AutoConfig.from_pretrained(self.model_name, **self.model_kwargs)
-        model = AutoModelForCausalLM.from_config(config)
-        self.model = self._setup_tensor_parallel(model)
-
-        print(f"[Rank {self.rank}] Setup complete")
-        self.ready = True
-        return True
-
     def _prepare_inputs(
         self,
         inputs: list[dict[str, TensorData]],
@@ -160,6 +146,24 @@ class TrainingActor:
             tb_str = traceback.format_exc()
             print(f"Error in _prepare_inputs: {e}\n{tb_str}")
             raise e
+
+    def setup(self):
+        """Initialize the PyTorch distributed process group and model."""
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        if self.ready:
+            return True
+
+        self._setup_distributed()
+
+        # Load model
+        config = AutoConfig.from_pretrained(self.model_name, **self.model_kwargs)
+        model = AutoModelForCausalLM.from_config(config)
+        self.model = self._setup_tensor_parallel(model)
+
+        print(f"[Rank {self.rank}] Setup complete")
+        self.ready = True
+        return True
 
     async def forward(
         self,
@@ -218,13 +222,54 @@ class TrainingActor:
             else None
         )
 
-    def zero_grad(self):
+    def get_model_state_dict(self, full_state_dict: bool = False):
+        options = StateDictOptions(full_state_dict=full_state_dict, cpu_offload=True)
+        # self._load_model_to_device(torch.cuda.current_device())
+        state_dict = get_model_state_dict(self.model, options=options)
+        # self._load_model_to_device("cpu")
+        return state_dict
+
+    def save_model(self, save_dir: str):
+
+        state_dict = self.get_model_state_dict(full_state_dict=True)
+        if self.rank == 0:
+
+            # self.tokenizer.save_pretrained(save_dir)
+            self.model.save_pretrained(save_dir, state_dict=state_dict)
+
+        dist.barrier()
+
+    async def save_checkpoint(self, checkpoint_path: str):
+        """Save model checkpoint using PyTorch's distributed checkpoint API.
+
+        Args:
+            checkpoint_path: Path to save the checkpoint
+        """
+        # from torch.distributed.checkpoint import save
+
+        print(f"[Rank {self.rank}] Starting checkpoint save process...")
+
+        if self.rank == 0:
+            os.makedirs(checkpoint_path, exist_ok=True)
+
+        self.save_model(checkpoint_path)
+        print(f"[Rank {self.rank}] Checkpoint save complete")
+
+        return self.rank == 0
+
+    async def cleanup(self):
+        """Clean up the PyTorch distributed process group."""
+        print(f"[Rank {self.rank}] Cleaning up torch distributed")
+        dist.destroy_process_group()
+        return self.rank == 0
+
+    async def zero_grad(self):
         for param in self.model.parameters():
             param.grad = None
 
-    def backward(self, loss):
+    async def backward(self, loss):
         loss.backward()
 
-    def optim_step(self, optimizer_params: dict[str, Any] = {}):
+    async def optim_step(self, optimizer_params: dict[str, Any] = {}):
         optimizer = self._get_optimizer(self.model, optimizer_params)
         optimizer.step()

@@ -39,6 +39,7 @@ def create_training_actors(client: httpx.Client):
 def check_actor_status(client: httpx.Client):
     """Poll until actors are ready."""
     import time
+
     while True:
         response = client.post("/get_actor_status", json={
             "model_name": MODEL_NAME,
@@ -52,6 +53,15 @@ def check_actor_status(client: httpx.Client):
 
         time.sleep(2)
 
+def create_inference_actor(client: httpx.Client, model_path: str, tp_size: int, engine_kwargs: dict = {}):
+    """Create inference actor on the server."""
+    response = client.post("/create_inference_actor", json={
+        "model_path": model_path,
+        "tp_size": tp_size,
+        "engine_kwargs": engine_kwargs,
+    })
+    print("Create inference actor response:", response.json())
+    return response.json()
 
 def tokenize_input(texts: list[str], tokenizer: AutoTokenizer) -> dict[str, list[int]]:
     """Tokenize input texts."""
@@ -68,6 +78,7 @@ def tokenize_input(texts: list[str], tokenizer: AutoTokenizer) -> dict[str, list
         "labels": TensorData.from_torch(encoded["input_ids"]),  # List[List[int]]
     }
     return inputs
+
 
 def forward_backward_example(client: httpx.Client):
     """Tokenize input and perform forward-backward pass."""
@@ -162,7 +173,6 @@ def forward_backward_example(client: httpx.Client):
     print("================================================")
 
     return output1, output2
-
 
 if __name__ == "__main__":
     client = httpx.Client(
