@@ -204,11 +204,12 @@ class TinkerbellServiceDeployment:
                 f"Inference actor for model {request.model_name} not found"
             )
         ref = inference_actor.generate.remote(
-            request.prompt, request.max_tokens, request.temperature
+            request.prompts, request.max_tokens, request.temperature
         )
-        text = await asyncio.gather(ref)
+        outputs = await asyncio.gather(ref)
+        print(f"Generated Outputs: {outputs}")
         return GenerateResponse(
-            text=text,
+            outputs=outputs[0],
         )
 
 

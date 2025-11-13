@@ -56,7 +56,7 @@ class SGLangInferenceActor:
         return self.engine.update_weights_from_disk(checkpoint_path)
 
     async def generate(
-        self, prompt: str, max_tokens: int = 100, temperature: float = 0.7
+        self, prompts: list[str], max_tokens: int = 100, temperature: float = 0.7
     ):
         """Generate text from a prompt."""
         sampling_params = {
@@ -65,9 +65,9 @@ class SGLangInferenceActor:
         }
 
         # Use async_generate with the event loop
-        outputs = await self.engine.async_generate(prompt, sampling_params)
+        outputs = await self.engine.async_generate(prompts, sampling_params)
 
-        return outputs["text"]
+        return [output["text"] for output in outputs]
 
     async def shutdown(self):
         del self.engine

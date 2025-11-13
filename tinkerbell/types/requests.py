@@ -59,6 +59,6 @@ class CreateInferenceActorRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     model_name: str
-    prompt: list[str]
+    prompts: list[str]
     max_tokens: int = 100
     temperature: float = 0.7

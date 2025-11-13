@@ -400,50 +400,52 @@ def main():
     MASTER_ADDR = "127.0.0.1"
     MASTER_PORT = "29500"
 
-    # Create worker actors
-    workers = [
-        TensorParallelWorker.remote(
-            rank=i,
-            world_size=WORLD_SIZE,
-            master_addr=MASTER_ADDR,
-            master_port=MASTER_PORT
-        )
-        for i in range(WORLD_SIZE)
-    ]
+    # # Create worker actors
+    # workers = [
+    #     TensorParallelWorker.remote(
+    #         rank=i,
+    #         world_size=WORLD_SIZE,
+    #         master_addr=MASTER_ADDR,
+    #         master_port=MASTER_PORT
+    #     )
+    #     for i in range(WORLD_SIZE)
+    # ]
 
-    # Setup all workers (this initializes distributed training)
-    print("Setting up workers...")
-    setup_results = ray.get([worker.setup.remote() for worker in workers])
-    print(f"Setup results: {setup_results}")
-    time.sleep(5)
+    # # Setup all workers (this initializes distributed training)
+    # print("Setting up workers...")
+    # setup_results = ray.get([worker.setup.remote() for worker in workers])
+    # print(f"Setup results: {setup_results}")
+    # time.sleep(5)
 
-    # Save randomly initialized weights before any training
-    initial_checkpoint_path = "/checkpoints/initial_weights"
-    print(f"\nSaving initial weights to {initial_checkpoint_path}...")
-    initial_save_results = ray.get([worker.save_checkpoint.remote(initial_checkpoint_path) for worker in workers])
-    print(f"Initial checkpoint saved. Results: {initial_save_results}")
+    # # Save randomly initialized weights before any training
+    # initial_checkpoint_path = "/checkpoints/initial_weights"
+    # print(f"\nSaving initial weights to {initial_checkpoint_path}...")
+    # initial_save_results = ray.get([worker.save_checkpoint.remote(initial_checkpoint_path) for worker in workers])
+    # print(f"Initial checkpoint saved. Results: {initial_save_results}")
 
-    # Run training steps
-    print("\nRunning training step...")
-    train_results = ray.get([worker.train_step.remote() for worker in workers])
-    print(f"Training complete. Loss from rank 0: {train_results[0]}")
+    # # Run training steps
+    # print("\nRunning training step...")
+    # train_results = ray.get([worker.train_step.remote() for worker in workers])
+    # print(f"Training complete. Loss from rank 0: {train_results[0]}")
 
-    # Zero out lm_head weights to demonstrate checkpoint saving/loading
-    print("\n" + "="*50)
-    print("DEMONSTRATION: Zeroing out lm_head weights")
-    print("="*50)
-    print("This proves that the checkpoint is actually being saved and loaded.")
-    print("The inference engine will generate nonsensical outputs with zeroed weights.")
-    zero_results = ray.get([worker.zero_out_lm_head.remote() for worker in workers])
-    print(f"Zero out results: {zero_results}")
+    # # Zero out lm_head weights to demonstrate checkpoint saving/loading
+    # print("\n" + "="*50)
+    # print("DEMONSTRATION: Zeroing out lm_head weights")
+    # print("="*50)
+    # print("This proves that the checkpoint is actually being saved and loaded.")
+    # print("The inference engine will generate nonsensical outputs with zeroed weights.")
+    # zero_results = ray.get([worker.zero_out_lm_head.remote() for worker in workers])
+    # print(f"Zero out results: {zero_results}")
 
-    # Save checkpoint after training
-    checkpoint_path = "/checkpoints/random_weights_checkpoint"
-    print(f"\nSaving random weights checkpoint to {checkpoint_path}...")
-    save_results = ray.get([worker.save_checkpoint.remote(checkpoint_path) for worker in workers])
-    print(f"Checkpoint saved. Results: {save_results}")
+    # # Save checkpoint after training
+    # checkpoint_path = "/checkpoints/random_weights_checkpoint"
+    # print(f"\nSaving random weights checkpoint to {checkpoint_path}...")
+    # save_results = ray.get([worker.save_checkpoint.remote(checkpoint_path) for worker in workers])
+    # print(f"Checkpoint saved. Results: {save_results}")
 
     # Set up inference engine
+    import time
+    start_time = time.time()
     print("\nSetting up inference engine...")
     inference_actor = setup_inference_server(num_inference_gpus=2)
 
@@ -455,34 +457,35 @@ def main():
     print(f"Prompt: {prompt}")
     base_response = ray.get(inference_actor.generate.remote(prompt, max_tokens=50, temperature=0.7))
     print(f"✓ Base model output: {base_response}")
+    print(f"Time taken: {time.time() - start_time} seconds")
 
-    # Load trained weights (with zeroed lm_head) into inference engine
-    print("\n" + "="*50)
-    print("Loading checkpoint with ZEROED lm_head weights")
-    print("="*50)
-    ray.get(inference_actor.load_checkpoint.remote(checkpoint_path))
-    print("✓ Checkpoint with zeroed weights loaded successfully")
+    # # Load trained weights (with zeroed lm_head) into inference engine
+    # print("\n" + "="*50)
+    # print("Loading checkpoint with ZEROED lm_head weights")
+    # print("="*50)
+    # ray.get(inference_actor.load_checkpoint.remote(checkpoint_path))
+    # print("✓ Checkpoint with zeroed weights loaded successfully")
 
-    # Generate text with model that has zeroed lm_head
-    print("\n" + "="*50)
-    print("DEMONSTRATION: Generating with ZEROED lm_head")
-    print("="*50)
-    print(f"Prompt: {prompt}")
-    print("(Output should be very different/nonsensical, proving checkpoint was loaded)")
-    zeroed_response = ray.get(inference_actor.generate.remote(prompt, max_tokens=50, temperature=0.7))
-    print(f"✓ Zeroed model output: {zeroed_response}")
+    # # Generate text with model that has zeroed lm_head
+    # print("\n" + "="*50)
+    # print("DEMONSTRATION: Generating with ZEROED lm_head")
+    # print("="*50)
+    # print(f"Prompt: {prompt}")
+    # print("(Output should be very different/nonsensical, proving checkpoint was loaded)")
+    # zeroed_response = ray.get(inference_actor.generate.remote(prompt, max_tokens=50, temperature=0.7))
+    # print(f"✓ Zeroed model output: {zeroed_response}")
 
-    print("\n" + "="*50)
-    print("COMPARISON")
-    print("="*50)
-    print(f"Base model:   {base_response}")
-    print(f"Zeroed model: {zeroed_response}")
-    print("\nIf the outputs are different, checkpoint save/load is working! ✓")
+    # print("\n" + "="*50)
+    # print("COMPARISON")
+    # print("="*50)
+    # print(f"Base model:   {base_response}")
+    # print(f"Zeroed model: {zeroed_response}")
+    # print("\nIf the outputs are different, checkpoint save/load is working! ✓")
 
-    # Cleanup
-    print("\nCleaning up...")
-    cleanup_results = ray.get([worker.cleanup.remote() for worker in workers])
-    print(f"Cleanup results: {cleanup_results}")
+    # # Cleanup
+    # print("\nCleaning up...")
+    # cleanup_results = ray.get([worker.cleanup.remote() for worker in workers])
+    # print(f"Cleanup results: {cleanup_results}")
     
     # Shutdown Ray
     ray.shutdown()

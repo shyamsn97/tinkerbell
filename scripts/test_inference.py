@@ -33,11 +33,11 @@ def create_inference_actor(client: httpx.Client, model_path: str, tp_size: int, 
     print("Create inference actor response:", response.json())
     return response.json()
 
-def generate(client: httpx.Client, prompt: str, max_tokens: int = 100, temperature: float = 0.7):
+def generate(client: httpx.Client, prompts: list[str], max_tokens: int = 100, temperature: float = 0.7):
     """Generate text from a prompt."""
     response = client.post("/generate", json={
         "model_name": MODEL_NAME,
-        "prompt": prompt,
+        "prompts": prompts,
         "max_tokens": max_tokens,
         "temperature": temperature,
     })
@@ -50,7 +50,11 @@ if __name__ == "__main__":
         timeout=600.0
     )
 
+    import time
+    start_time = time.time()
     create_inference_actor(client, MODEL_NAME, 2)
     check_actor_status(client)
-    text = generate(client, "Explain how the human brain works.", max_tokens=128)
+    prompts = ["What is machine learning?", "What is the capital of France?"]
+    text = generate(client, prompts, max_tokens=50)
     print("Generated text:", text)
+    print(f"Time taken: {time.time() - start_time} seconds")

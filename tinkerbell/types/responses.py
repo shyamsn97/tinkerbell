@@ -56,5 +56,5 @@ class CreateInferenceActorResponse(BaseModel):
 
 
 class GenerateResponse(BaseModel):
-    text: str
+    outputs: list[str]
     tokens_generated: int | None = None
