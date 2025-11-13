@@ -105,8 +105,8 @@ class ActorGroup:
             worker.optim_step.remote(optimizer_params=optimizer_params)
             for worker in self.workers
         ]
-        outputs = asyncio.gather(*refs)
-        return [output for output in outputs if output is not None][0]
+        _ = await asyncio.gather(*refs)
+        return None
 
     async def save_checkpoint(self, checkpoint_path: str) -> None:
         """Save the checkpoint for all workers."""
@@ -114,8 +114,8 @@ class ActorGroup:
             worker.save_checkpoint.remote(checkpoint_path=checkpoint_path)
             for worker in self.workers
         ]
-        outputs = asyncio.gather(*refs)
-        return [output for output in outputs if output is not None][0]
+        _ = await asyncio.gather(*refs)
+        return None
 
 
 @ray.remote

@@ -2,10 +2,12 @@ import httpx
 import torch
 from transformers import AutoTokenizer
 from tinkerbell.types.data import TensorData
-WORLD_SIZE = 4
+
+WORLD_SIZE = 2
 MASTER_ADDR = "127.0.0.1"
 MASTER_PORT = "29500"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME_2 = "Qwen/Qwen2-0.5B-Instruct"
 
 # Define parallelization plan
 parallelize_plan = {
@@ -22,13 +24,13 @@ parallelize_plan = {
 }
 
 
-def create_training_actors(client: httpx.Client):
+def create_training_actors(client: httpx.Client, model_name: str, port: str = "29500"):
     """Create training actors on the server."""
     response = client.post("/create_training_actors", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
         "world_size": WORLD_SIZE,
         "master_addr": MASTER_ADDR,
-        "master_port": MASTER_PORT,
+        "master_port": port,
         "rank": 0,
         "parallelize_plan": parallelize_plan,
     })
@@ -36,13 +38,13 @@ def create_training_actors(client: httpx.Client):
     return response.json()
 
 
-def check_actor_status(client: httpx.Client):
+def check_actor_status(client: httpx.Client, model_name: str):
     """Poll until actors are ready."""
     import time
 
     while True:
         response = client.post("/get_actor_status", json={
-            "model_name": MODEL_NAME,
+            "model_name": model_name,
         })
         status_data = response.json()
         print(f"Actor status: {status_data['status']}")
@@ -80,11 +82,11 @@ def tokenize_input(texts: list[str], tokenizer: AutoTokenizer) -> dict[str, list
     return inputs
 
 
-def forward_backward_example(client: httpx.Client):
+def forward_backward_example(client: httpx.Client, model_name: str):
     """Tokenize input and perform forward-backward pass."""
     # Load tokenizer
-    print(f"\nLoading tokenizer for {MODEL_NAME}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    print(f"\nLoading tokenizer for {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Example training batch
     tokenized_inputs = tokenize_input(["The quick brown fox jumps over the lazy dog.", "Machine learning is transforming the world."], tokenizer)
@@ -95,7 +97,7 @@ def forward_backward_example(client: httpx.Client):
 
     print("Zeroing gradients...")
     response = client.post("/zero_grad", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
     })
     print("Zero grad response:", response.json())
     print("================================================")
@@ -103,14 +105,14 @@ def forward_backward_example(client: httpx.Client):
     targets1 = inputs1.pop("labels")
     targets2 = inputs2.pop("labels")
     response1 = client.post("/forward_backward", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
         "inputs": inputs1,
         "targets": targets1,
         "forward_kwargs": {},
     })
     
     response2 = client.post("/forward_backward", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
         "inputs": inputs2,
         "targets": targets2,
         "forward_kwargs": {},
@@ -135,21 +137,21 @@ def forward_backward_example(client: httpx.Client):
 
     print("Optimizing...")
     response = client.post("/optim_step", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
         "optimizer_params": {},
     })
     print("Optim step response:", response.json())
     print("================================================")
 
     response1 = client.post("/forward_backward", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
         "inputs": inputs1,
         "targets": targets1,
         "forward_kwargs": {},
     })
 
     response2 = client.post("/forward_backward", json={
-        "model_name": MODEL_NAME,
+        "model_name": model_name,
         "inputs": inputs2,
         "targets": targets2,
         "forward_kwargs": {},
@@ -184,20 +186,28 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Step 1: Creating training actors")
     print("=" * 60)
-    create_training_actors(client)
+    create_training_actors(client, MODEL_NAME, port="29500")
+    create_training_actors(client, MODEL_NAME_2, port="29501")
 
     # Step 2: Wait for actors to be ready
     print("\n" + "=" * 60)
     print("Step 2: Waiting for actors to be ready")
     print("=" * 60)
-    check_actor_status(client)
+    check_actor_status(client, MODEL_NAME)
+    check_actor_status(client, MODEL_NAME_2)
 
     # Step 3: Run forward-backward pass
     print("\n" + "=" * 60)
     print("Step 3: Running forward-backward pass")
     print("=" * 60)
-    forward_backward_example(client)
-
+    print(f"Running forward-backward pass for {MODEL_NAME}")
+    print("=" * 60)
+    forward_backward_example(client, MODEL_NAME)
+    print("=" * 60)
+    print(f"Running forward-backward pass for {MODEL_NAME_2}")
+    print("=" * 60)
+    forward_backward_example(client, MODEL_NAME_2)
+    print("=" * 60)
     print("\n" + "=" * 60)
     print("Done!")
     print("=" * 60)
