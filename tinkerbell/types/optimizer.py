@@ -1,6 +1,9 @@
-from typing import Any
+from typing import Any, Optional
 
-from pydantic import BaseModel
+from typing_extensions import Literal
+
+from ._models import BaseModel, StrictBase
+from .model_id import ModelID
 
 DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
     "name": "adamw",
@@ -14,20 +17,41 @@ DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {
 }
 
 
-class ZeroGradRequest(BaseModel):
-    model_name: str
+class AdamParams(StrictBase):
+    """Adam optimizer parameters."""
+
+    learning_rate: float = 0.0001
+    """Learning rate for the optimizer"""
+
+    beta1: float = 0.9
+    """Coefficient used for computing running averages of gradient"""
+
+    beta2: float = 0.95
+    """Coefficient used for computing running averages of gradient square"""
+
+    eps: float = 1e-12
+    """Term added to the denominator to improve numerical stability"""
+
+
+class ZeroGradRequest(StrictBase):
+    model_id: ModelID
 
 
 class ZeroGradResponse(BaseModel):
-    model_name: str
+    model_id: ModelID
     message: str
 
 
-class OptimStepRequest(BaseModel):
-    model_name: str
+class OptimStepRequest(StrictBase):
+    model_id: ModelID
     optimizer_params: dict[str, Any]
+    adam_params: Optional[AdamParams] = None
+    seq_id: Optional[int] = None
+    type: Optional[Literal["optim_step"]] = None
 
 
 class OptimStepResponse(BaseModel):
-    model_name: str
+    model_id: ModelID
     message: str
+    metrics: Optional[dict[str, float]] = None
+    """Optimization step metrics as key-value pairs"""

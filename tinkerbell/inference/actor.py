@@ -3,7 +3,7 @@ import ray
 
 @ray.remote
 class SGLangInferenceActor:
-    def __init__(self, model_path: str, tp_size: int, engine_kwargs: dict = {}):
+    def __init__(self, model_id: str, tp_size: int, engine_kwargs: dict = {}):
         # REALLY ANNOYING BUT NECESSARY FIX for https://github.com/sgl-project/sglang/issues/2536
         import signal
         import threading
@@ -29,11 +29,11 @@ class SGLangInferenceActor:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-        print(f"Setting up SGLang engine for model {model_path} with {tp_size} GPUs")
+        print(f"Setting up SGLang engine for model {model_id} with {tp_size} GPUs")
 
         # Initialize engine directly in __init__
         self.engine = sgl.Engine(
-            model_path=model_path,
+            model_path=model_id,
             tp_size=tp_size,
             **engine_kwargs,
         )

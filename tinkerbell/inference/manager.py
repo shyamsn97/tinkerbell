@@ -29,40 +29,38 @@ class InferenceManager:
 
     def create_inference_actor(
         self,
-        model_path: str,
+        model_id: str,
         tp_size: int,
         engine_kwargs: dict[str, Any] = {},
     ) -> str:
-        if model_path in self.inference_actors:
-            print(f"Inference actor for model {model_path} already exists...")
-            return model_path
+        if model_id in self.inference_actors:
+            print(f"Inference actor for model {model_id} already exists...")
+            return model_id
 
-        cleaned_model_name = model_path.replace("/", "_").replace(":", "_").lower()
-        self.inference_actors[model_path] = SGLangInferenceActor.options(
+        cleaned_model_name = model_id.replace("/", "_").replace(":", "_").lower()
+        self.inference_actors[model_id] = SGLangInferenceActor.options(
             num_gpus=tp_size,
             get_if_exists=True,
             lifetime="detached",
             name=f"inference_actor_{cleaned_model_name}",
             namespace="tinkerbell",
         ).remote(
-            model_path=model_path,
+            model_id=model_id,
             tp_size=tp_size,
             engine_kwargs=engine_kwargs,
         )
-        self.statuses[model_path] = InferenceActorStatus.INITIALIZING
-        self.ready_refs[model_path] = self.inference_actors[
-            model_path
-        ].is_ready.remote()
-        return model_path
+        self.statuses[model_id] = InferenceActorStatus.INITIALIZING
+        self.ready_refs[model_id] = self.inference_actors[model_id].is_ready.remote()
+        return model_id
 
-    async def get_inference_actor_status(self, model_path: str) -> InferenceActorStatus:
+    async def get_inference_actor_status(self, model_id: str) -> InferenceActorStatus:
         # Non-blocking check
-        if self.statuses[model_path] == InferenceActorStatus.INITIALIZING:
-            ready, _ = ray.wait([self.ready_refs[model_path]], num_returns=1, timeout=0)
+        if self.statuses[model_id] == InferenceActorStatus.INITIALIZING:
+            ready, _ = ray.wait([self.ready_refs[model_id]], num_returns=1, timeout=0)
             if ready:
-                self.statuses[model_path] = InferenceActorStatus.READY
-                _ = ray.get(self.ready_refs[model_path])
-        return self.statuses[model_path]
+                self.statuses[model_id] = InferenceActorStatus.READY
+                _ = ray.get(self.ready_refs[model_id])
+        return self.statuses[model_id]
 
-    def get_inference_actor(self, model_path: str) -> SGLangInferenceActor:
-        return self.inference_actors.get(model_path, None)
+    def get_inference_actor(self, model_id: str) -> SGLangInferenceActor:
+        return self.inference_actors.get(model_id, None)

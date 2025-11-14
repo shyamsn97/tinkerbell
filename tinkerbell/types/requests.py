@@ -1,45 +1,53 @@
-from typing import Any
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
-from tinkerbell.types.data import TensorData
-from tinkerbell.types.optimizer import (
-    DEFAULT_SCHEDULER_PARAMS,
-)
+from ._models import StrictBase
+from .data import TensorData
+from .lora_config import LoraConfig
+from .model_id import ModelID
+from .optimizer import DEFAULT_SCHEDULER_PARAMS
+from .request_id import RequestID
 
 
-class CreateTrainingActorsRequest(BaseModel):
-    rank: int
+class CreateTrainingActorsRequest(StrictBase):
     world_size: int
-    master_addr: str
-    master_port: str
-    model_name: str
+    model_id: ModelID
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     parallelize_plan: dict[str, str] = Field(default_factory=lambda: {})
     scheduler_params: dict[str, Any] = Field(
         default_factory=lambda: DEFAULT_SCHEDULER_PARAMS
     )
-    lora_config: dict[str, Any] = Field(default_factory=lambda: {})
+    lora_config: Optional[LoraConfig | dict[str, Any]] = Field(default=None)
     ray_worker_options: dict[str, Any] = Field(default_factory=lambda: {})
+    from_pretrained: bool = True
     wait_until_ready: bool = False
 
 
-class SaveCheckpointRequest(BaseModel):
-    model_name: str
+class SaveCheckpointRequest(StrictBase):
+    model_id: ModelID
     checkpoint_path: str
+    path: Optional[str] = None
+    seq_id: Optional[int] = None
 
 
-class ForwardRequest(BaseModel):
-    model_name: str
-    request_id: str | None = None
+class ActorRequest(StrictBase):
+    request_id: RequestID
+
+
+class ForwardRequest(StrictBase):
+    model_id: ModelID
+    request_id: Optional[RequestID] = None
+    seq_id: Optional[int] = None
     inputs: dict[str, TensorData] = Field(default_factory=lambda: {})
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     future: Any = None
 
 
-class ForwardBackwardRequest(BaseModel):
-    model_name: str
-    request_id: str | None = None
+class ForwardBackwardRequest(StrictBase):
+    model_id: ModelID
+    request_id: Optional[RequestID] = None
+    seq_id: Optional[int] = None
     inputs: dict[str, TensorData] = Field(default_factory=lambda: {})
     targets: TensorData | None = None
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
@@ -47,18 +55,18 @@ class ForwardBackwardRequest(BaseModel):
     future: Any = None
 
 
-class ActorStatusRequest(BaseModel):
-    model_name: str
+class ActorStatusRequest(StrictBase):
+    model_id: ModelID
 
 
-class CreateInferenceActorRequest(BaseModel):
-    model_path: str
+class CreateInferenceActorRequest(StrictBase):
+    model_id: ModelID
     tp_size: int
     engine_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 
 
-class GenerateRequest(BaseModel):
-    model_name: str
+class GenerateRequest(StrictBase):
+    model_id: ModelID
     prompts: list[str]
     max_tokens: int = 100
     temperature: float = 0.7

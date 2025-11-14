@@ -3,9 +3,24 @@
 import fnmatch
 import pickle
 import re
+import socket
 from typing import Any
 
 import dill
+
+
+def get_free_port() -> int:
+    """
+    Get a free port on the local machine.
+
+    Returns:
+        int: An available port number
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
 
 
 def get_submodules_with_wildcard(model, pattern):

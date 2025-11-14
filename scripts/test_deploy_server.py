@@ -14,5 +14,9 @@ if __name__ == "__main__":
         server_url=server_url,
         max_wait_time=300.0,
         clock_cycle=10.0,
-        deploy_config=deploy_config,
+        gpu=deploy_config.gpu,
+        num_gpus=deploy_config.num_gpus,
+        timeout=deploy_config.timeout,
+        container_idle_timeout=deploy_config.container_idle_timeout,
+        max_inputs=deploy_config.max_inputs,
     )

@@ -20,7 +20,6 @@ from tinkerbell.types import (
     GenerateResponse,
     GetRayActorsResponse,
     HealthResponse,
-    ModalDeployConfig,
     RemoteFuture,
     SaveCheckpointRequest,
     SaveCheckpointResponse,
@@ -55,20 +54,20 @@ class TinkerbellServiceDeployment:
 
     @APP.post("/zero_grad")
     async def zero_grad(self, request: ZeroGradRequest) -> ZeroGradResponse:
-        await self.training_manager.zero_grad(model_name=request.model_name)
+        await self.training_manager.zero_grad(model_id=request.model_id)
         return ZeroGradResponse(
-            model_name=request.model_name,
-            message=f"Gradients zeroed for model {request.model_name}",
+            model_id=request.model_id,
+            message=f"Gradients zeroed for model {request.model_id}",
         )
 
     @APP.post("/optim_step")
     async def optim_step(self, request: OptimStepRequest) -> OptimStepResponse:
         await self.training_manager.optim_step(
-            model_name=request.model_name, optimizer_params=request.optimizer_params
+            model_id=request.model_id, optimizer_params=request.optimizer_params
         )
         return OptimStepResponse(
-            model_name=request.model_name,
-            message=f"Optimizer stepped for model {request.model_name}",
+            model_id=request.model_id,
+            message=f"Optimizer stepped for model {request.model_id}",
         )
 
     @APP.get("/health")
@@ -83,11 +82,9 @@ class TinkerbellServiceDeployment:
         self,
         request: CreateTrainingActorsRequest,
     ) -> CreateTrainingActorsResponse:
-        model_name = await self.training_manager.create_training_actors(
+        model_id = await self.training_manager.create_training_actors(
             world_size=request.world_size,
-            master_addr=request.master_addr,
-            master_port=request.master_port,
-            model_name=request.model_name,
+            model_id=request.model_id,
             model_kwargs=request.model_kwargs,
             parallelize_plan=request.parallelize_plan,
             scheduler_params=request.scheduler_params,
@@ -95,8 +92,8 @@ class TinkerbellServiceDeployment:
         )
         return CreateTrainingActorsResponse(
             success=True,
-            model_name=model_name,
-            message=f"Training actors for model {model_name} created...",
+            model_id=model_id,
+            message=f"Training actors for model {model_id} created...",
         )
 
     @APP.post("/save_checkpoint")
@@ -104,11 +101,11 @@ class TinkerbellServiceDeployment:
         self, request: SaveCheckpointRequest
     ) -> SaveCheckpointResponse:
         await self.training_manager.save_checkpoint(
-            model_name=request.model_name, checkpoint_path=request.checkpoint_path
+            model_id=request.model_id, checkpoint_path=request.checkpoint_path
         )
         return SaveCheckpointResponse(
-            model_name=request.model_name,
-            message=f"Checkpoint saved for model {request.model_name}",
+            model_id=request.model_id,
+            message=f"Checkpoint saved for model {request.model_id}",
         )
 
     @APP.post("/forward_backward")
@@ -124,14 +121,14 @@ class TinkerbellServiceDeployment:
         print(f"Request forward_kwargs: {request.forward_kwargs}")
         print(f"Request return_logprobs: {request.return_logprobs}")
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
-            model_name=request.model_name,
+            model_id=request.model_id,
             inputs=request.inputs,
             targets=request.targets,
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
         )
         return ForwardBackwardResponse(
-            model_name=request.model_name,
+            model_id=request.model_id,
             request_id=remote_future.request_id,
             loss=None,
             logprobs=None,
@@ -143,10 +140,10 @@ class TinkerbellServiceDeployment:
         self,
         request: ActorStatusRequest,
     ) -> ActorStatusResponse:
-        status = await self.training_manager.get_actor_status(request.model_name)
+        status = await self.training_manager.get_actor_status(request.model_id)
         return ActorStatusResponse(
             status=status.value,
-            message=f"Actor status for model {request.model_name} is {status.value}",
+            message=f"Actor status for model {request.model_id} is {status.value}",
         )
 
     @APP.post("/get_result")
@@ -171,13 +168,13 @@ class TinkerbellServiceDeployment:
         request: CreateInferenceActorRequest,
     ) -> CreateInferenceActorResponse:
         _ = self.inference_manager.create_inference_actor(
-            model_path=request.model_path,
+            model_id=request.model_id,
             tp_size=request.tp_size,
             engine_kwargs=request.engine_kwargs,
         )
         return CreateInferenceActorResponse(
             success=True,
-            message=f"Inference actor for model {request.model_path} created...",
+            message=f"Inference actor for model {request.model_id} created...",
         )
 
     @APP.post("/get_inference_actor_status")
@@ -186,11 +183,11 @@ class TinkerbellServiceDeployment:
         request: ActorStatusRequest,
     ) -> ActorStatusResponse:
         status = await self.inference_manager.get_inference_actor_status(
-            request.model_name
+            request.model_id
         )
         return ActorStatusResponse(
             status=status.value,
-            message=f"Inference actor status for model {request.model_name} is {status.value}",
+            message=f"Inference actor status for model {request.model_id} is {status.value}",
         )
 
     @APP.post("/generate")
@@ -198,11 +195,9 @@ class TinkerbellServiceDeployment:
         self,
         request: GenerateRequest,
     ) -> GenerateResponse:
-        inference_actor = self.inference_manager.get_inference_actor(request.model_name)
+        inference_actor = self.inference_manager.get_inference_actor(request.model_id)
         if inference_actor is None:
-            raise ValueError(
-                f"Inference actor for model {request.model_name} not found"
-            )
+            raise ValueError(f"Inference actor for model {request.model_id} not found")
         ref = inference_actor.generate.remote(
             request.prompts, request.max_tokens, request.temperature
         )
@@ -255,10 +250,14 @@ def deploy_service(
 
 
 def deploy_on_modal(
-    server_url: str,
+    server_url: str = "https://0.0.0.0:8000",
     max_wait_time: float = 300.0,
     clock_cycle: float = 10.0,
-    deploy_config: ModalDeployConfig = ModalDeployConfig(),
+    gpu: str = "H100",
+    num_gpus: int = 1,
+    timeout: int = 86400,
+    container_idle_timeout: int = 600,
+    max_inputs: int = 100,
 ):
     """Deploy the TinkerbellService on Modal.
 
@@ -331,13 +330,13 @@ def deploy_on_modal(
 
     @app.function(
         image=image,
-        gpu=f"{deploy_config.gpu}:{deploy_config.num_gpus}",
+        gpu=f"{gpu}:{num_gpus}",
         volumes={"/checkpoints": volume},
-        timeout=deploy_config.timeout,
-        container_idle_timeout=deploy_config.container_idle_timeout,
+        timeout=timeout,
+        container_idle_timeout=container_idle_timeout,
         serialized=True,
     )
-    @modal.concurrent(max_inputs=deploy_config.max_inputs)
+    @modal.concurrent(max_inputs=max_inputs)
     @modal.web_server(
         8000,
         label="training-service",

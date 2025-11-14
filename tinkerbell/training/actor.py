@@ -29,7 +29,7 @@ class TrainingActor:
         world_size: int,
         master_addr: str,
         master_port: str,
-        model_name: str,
+        model_id: str,
         model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
         scheduler_params: dict[str, Any] = {},
@@ -38,7 +38,7 @@ class TrainingActor:
         self.world_size = world_size
         self.master_addr = master_addr
         self.master_port = master_port
-        self.model_name = model_name
+        self.model_id = model_id
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
@@ -118,9 +118,6 @@ class TrainingActor:
         inputs: list[dict[str, TensorData]],
         targets: dict[str, TensorData] | None = None,
     ) -> dict[str, Any]:
-        print("Number of inputs: ", len(inputs))
-        print("Inputs: ", inputs)
-        print("Targets: ", targets)
         try:
             for input in inputs:
                 for key in input:
@@ -129,18 +126,11 @@ class TrainingActor:
             if targets is not None:
                 targets = torch.stack([t.to_torch() for t in targets])
                 targets = targets.cuda()
-            print("Torch inputs: ", inputs)
-            print("Torch targets: ", targets)
             batch_inputs = {}
             for key in inputs[0]:
                 batch_inputs[key] = torch.stack(
                     [input[key] for input in inputs]
                 ).squeeze(0)
-            print(f"Actor Batch inputs: {batch_inputs}")
-            print("Input shapes:")
-            for key in batch_inputs:
-                print(f"  - {key}: {batch_inputs[key].shape}")
-            print("Torch targets shape: ", targets.shape)
             return batch_inputs, targets
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -157,7 +147,7 @@ class TrainingActor:
         self._setup_distributed()
 
         # Load model
-        config = AutoConfig.from_pretrained(self.model_name, **self.model_kwargs)
+        config = AutoConfig.from_pretrained(self.model_id, **self.model_kwargs)
         model = AutoModelForCausalLM.from_config(config)
         self.model = self._setup_tensor_parallel(model)
 
@@ -182,7 +172,6 @@ class TrainingActor:
                 self.model.eval()
                 with torch.no_grad():
                     outputs = self.model(**batch_inputs, **forward_kwargs)
-            print(f"Actor Outputs logits shape {self.rank}: {outputs.logits.shape}")
             return outputs
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -233,8 +222,6 @@ class TrainingActor:
 
         state_dict = self.get_model_state_dict(full_state_dict=True)
         if self.rank == 0:
-
-            # self.tokenizer.save_pretrained(save_dir)
             self.model.save_pretrained(save_dir, state_dict=state_dict)
 
         dist.barrier()
@@ -245,7 +232,6 @@ class TrainingActor:
         Args:
             checkpoint_path: Path to save the checkpoint
         """
-        # from torch.distributed.checkpoint import save
 
         print(f"[Rank {self.rank}] Starting checkpoint save process...")
 
