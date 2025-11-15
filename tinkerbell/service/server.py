@@ -93,6 +93,7 @@ class TinkerbellServiceDeployment:
             parallelize_plan=request.parallelize_plan,
             scheduler_params=request.scheduler_params,
             ray_worker_options=request.ray_worker_options,
+            initialize_random_weights=request.initialize_random_weights,
         )
         return CreateTrainingActorsResponse(
             success=True,

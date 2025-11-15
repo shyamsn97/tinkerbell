@@ -40,6 +40,7 @@ class ServiceClient:
         ray_worker_options: Optional[dict[str, Any]] = None,
         wait_until_ready: bool = False,
         deploy_config: DeployConfig | None = None,
+        initialize_random_weights: bool = False,
     ) -> TrainingClient:
         """
         Create training actors on the server.
@@ -70,6 +71,7 @@ class ServiceClient:
             lora_config=lora_config or {},
             ray_worker_options=ray_worker_options or {},
             wait_until_ready=wait_until_ready,
+            initialize_random_weights=initialize_random_weights,
         )
 
         with httpx.Client(base_url=self.server_url, timeout=self.timeout) as client:

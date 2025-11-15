@@ -33,6 +33,7 @@ class TrainingActor:
         model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
         scheduler_params: dict[str, Any] = {},
+        initialize_random_weights: bool = False,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -42,6 +43,7 @@ class TrainingActor:
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
+        self.initialize_random_weights = initialize_random_weights
         self.model = None
         self.optimizer = None
         self.ready = False
@@ -147,8 +149,13 @@ class TrainingActor:
         self._setup_distributed()
 
         # Load model
-        config = AutoConfig.from_pretrained(self.model_id, **self.model_kwargs)
-        model = AutoModelForCausalLM.from_config(config)
+        config = AutoConfig.from_pretrained(self.model_id)
+        if self.initialize_random_weights:
+            model = AutoModelForCausalLM.from_config(config, **self.model_kwargs)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                self.model_id, **self.model_kwargs
+            )
         self.model = self._setup_tensor_parallel(model)
 
         print(f"[Rank {self.rank}] Setup complete")

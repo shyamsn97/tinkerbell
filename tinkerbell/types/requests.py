@@ -20,8 +20,8 @@ class CreateTrainingActorsRequest(StrictBase):
     )
     lora_config: Optional[LoraConfig | dict[str, Any]] = Field(default=None)
     ray_worker_options: dict[str, Any] = Field(default_factory=lambda: {})
-    from_pretrained: bool = True
     wait_until_ready: bool = False
+    initialize_random_weights: bool = False
 
 
 class SaveCheckpointRequest(StrictBase):

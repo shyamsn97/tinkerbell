@@ -55,12 +55,15 @@ class InferenceManager:
 
     async def get_inference_actor_status(self, model_id: str) -> InferenceActorStatus:
         # Non-blocking check
-        if self.statuses[model_id] == InferenceActorStatus.INITIALIZING:
+        if (
+            self.statuses.get(model_id, InferenceActorStatus.NOT_SETUP)
+            == InferenceActorStatus.INITIALIZING
+        ):
             ready, _ = ray.wait([self.ready_refs[model_id]], num_returns=1, timeout=0)
             if ready:
                 self.statuses[model_id] = InferenceActorStatus.READY
                 _ = ray.get(self.ready_refs[model_id])
-        return self.statuses[model_id]
+        return self.statuses.get(model_id, InferenceActorStatus.NOT_SETUP)
 
     def get_inference_actor(self, model_id: str) -> SGLangInferenceActor:
         return self.inference_actors.get(model_id, None)

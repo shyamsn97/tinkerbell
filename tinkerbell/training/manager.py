@@ -324,6 +324,7 @@ class TrainingManager:
         parallelize_plan: dict[str, str],
         scheduler_params: dict[str, Any],
         ray_worker_options: dict[str, Any] = {},
+        initialize_random_weights: bool = False,
     ) -> str:
         """Create a training worker for the given model id."""
         if model_id in self.actor_groups:
@@ -353,6 +354,7 @@ class TrainingManager:
                     model_kwargs=model_kwargs,
                     parallelize_plan=parallelize_plan,
                     scheduler_params=scheduler_params,
+                    initialize_random_weights=initialize_random_weights,
                 )
             )
 
