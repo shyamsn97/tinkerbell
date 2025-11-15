@@ -20,9 +20,13 @@ from tinkerbell.types import (
     GenerateResponse,
     GetRayActorsResponse,
     HealthResponse,
+    LoadCheckpointRequest,
+    LoadCheckpointResponse,
     RemoteFuture,
     SaveCheckpointRequest,
     SaveCheckpointResponse,
+    ShutdownInferenceActorRequest,
+    ShutdownInferenceActorResponse,
 )
 from tinkerbell.types.optimizer import (
     OptimStepRequest,
@@ -39,7 +43,7 @@ class TinkerbellServiceDeployment:
     def __init__(
         self,
         server_url: str,
-        max_wait_time: float = 300.0,
+        max_wait_time: float = 600.0,
         clock_cycle: float = 10.0,
     ):
         self.server_url = server_url
@@ -105,6 +109,7 @@ class TinkerbellServiceDeployment:
         )
         return SaveCheckpointResponse(
             model_id=request.model_id,
+            success=True,
             message=f"Checkpoint saved for model {request.model_id}",
         )
 
@@ -206,6 +211,47 @@ class TinkerbellServiceDeployment:
         return GenerateResponse(
             outputs=outputs[0],
         )
+
+    @APP.post("/load_checkpoint")
+    async def load_checkpoint(
+        self,
+        request: LoadCheckpointRequest,
+    ) -> LoadCheckpointResponse:
+        try:
+            _ = await self.inference_manager.load_checkpoint(
+                model_id=request.model_id,
+                checkpoint_path=request.checkpoint_path,
+            )
+            return LoadCheckpointResponse(
+                model_id=request.model_id,
+                success=True,
+                message=f"Checkpoint loaded successfully from {request.checkpoint_path}",
+            )
+        except Exception as e:
+            return LoadCheckpointResponse(
+                model_id=request.model_id,
+                success=False,
+                message=f"Failed to load checkpoint: {str(e)}",
+            )
+
+    @APP.post("/shutdown_inference_actor")
+    async def shutdown_inference_actor(
+        self,
+        request: ShutdownInferenceActorRequest,
+    ) -> ShutdownInferenceActorResponse:
+        try:
+            _ = await self.inference_manager.shutdown(model_id=request.model_id)
+            return ShutdownInferenceActorResponse(
+                model_id=request.model_id,
+                success=True,
+                message=f"Inference actor for model {request.model_id} shut down successfully",
+            )
+        except Exception as e:
+            return ShutdownInferenceActorResponse(
+                model_id=request.model_id,
+                success=False,
+                message=f"Failed to shutdown inference actor: {str(e)}",
+            )
 
 
 def deploy_service(
@@ -350,5 +396,8 @@ def deploy_on_modal(
         )
 
     with modal.enable_output():
-        # Deploy the app
         runner.deploy_app(app)
+
+    return modal.Function.from_name(
+        "tinkerbell-service", "deploy_on_modal.<locals>.serve"
+    ).get_web_url()

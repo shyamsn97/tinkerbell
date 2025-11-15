@@ -21,12 +21,13 @@ class ServiceClient:
         try:
             _ = self.get_health()
             return True
-        except httpx.HTTPStatusError:
+        except Exception:
             return False
 
-    def deploy(self, deploy_config: DeployConfig) -> None:
-        if deploy_config.deployment_type == "modal":
-            deploy_config.deploy()
+    def deploy(self, deploy_config: DeployConfig) -> str:
+        if self.server_url is None:
+            self.server_url = deploy_config.deploy()
+        return self.server_url
 
     def create_training_client(
         self,

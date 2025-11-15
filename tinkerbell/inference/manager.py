@@ -64,3 +64,25 @@ class InferenceManager:
 
     def get_inference_actor(self, model_id: str) -> SGLangInferenceActor:
         return self.inference_actors.get(model_id, None)
+
+    async def load_checkpoint(self, model_id: str, checkpoint_path: str) -> bool:
+        """Load a checkpoint for a given model."""
+        inference_actor = self.get_inference_actor(model_id)
+        if inference_actor is None:
+            raise ValueError(f"Inference actor for model {model_id} not found")
+
+        result = await inference_actor.load_checkpoint.remote(checkpoint_path)
+        return result
+
+    async def shutdown(self, model_id: str) -> bool:
+        """Shutdown an inference actor."""
+        inference_actor = self.get_inference_actor(model_id)
+        if inference_actor is None:
+            raise ValueError(f"Inference actor for model {model_id} not found")
+
+        result = await inference_actor.shutdown.remote()
+        # Remove from tracking
+        self.inference_actors.pop(model_id, None)
+        self.statuses.pop(model_id, None)
+        self.ready_refs.pop(model_id, None)
+        return result

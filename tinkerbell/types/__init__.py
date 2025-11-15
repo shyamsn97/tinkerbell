@@ -54,7 +54,9 @@ from tinkerbell.types.requests import (
     ForwardBackwardRequest,
     ForwardRequest,
     GenerateRequest,
+    LoadCheckpointRequest,
     SaveCheckpointRequest,
+    ShutdownInferenceActorRequest,
 )
 
 # Responses
@@ -67,8 +69,10 @@ from tinkerbell.types.responses import (
     GenerateResponse,
     GetRayActorsResponse,
     HealthResponse,
+    LoadCheckpointResponse,
     RemoteFuture,
     SaveCheckpointResponse,
+    ShutdownInferenceActorResponse,
 )
 from tinkerbell.types.save_weights_request import SaveWeightsRequest
 from tinkerbell.types.save_weights_response import SaveWeightsResponse
@@ -122,7 +126,9 @@ __all__ = [
     "ForwardBackwardRequest",
     "ForwardRequest",
     "GenerateRequest",
+    "LoadCheckpointRequest",
     "SaveCheckpointRequest",
+    "ShutdownInferenceActorRequest",
     # Responses
     "ActorStatusResponse",
     "CreateInferenceActorResponse",
@@ -132,6 +138,8 @@ __all__ = [
     "GenerateResponse",
     "GetRayActorsResponse",
     "HealthResponse",
+    "LoadCheckpointResponse",
     "RemoteFuture",
     "SaveCheckpointResponse",
+    "ShutdownInferenceActorResponse",
 ]

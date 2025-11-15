@@ -62,3 +62,15 @@ class CreateInferenceActorResponse(BaseModel):
 class GenerateResponse(BaseModel):
     outputs: list[str]
     tokens_generated: int | None = None
+
+
+class LoadCheckpointResponse(BaseModel):
+    model_id: ModelID
+    success: bool
+    message: str | None = None
+
+
+class ShutdownInferenceActorResponse(BaseModel):
+    model_id: ModelID
+    success: bool
+    message: str | None = None

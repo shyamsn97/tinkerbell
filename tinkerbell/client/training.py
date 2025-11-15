@@ -4,14 +4,17 @@ from typing import Any, Optional
 import httpx
 from transformers import AutoTokenizer
 
+from tinkerbell.client.inference import InferenceClient
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.requests import (
     ActorStatusRequest,
+    CreateInferenceActorRequest,
     ForwardRequest,
     SaveCheckpointRequest,
 )
 from tinkerbell.types.responses import (
     ActorStatusResponse,
+    CreateInferenceActorResponse,
     ForwardBackwardResponse,
     ForwardResponse,
     SaveCheckpointResponse,
@@ -50,7 +53,9 @@ class TrainingClient:
             timeout: Request timeout in seconds
             tokenizer: Optional pre-loaded tokenizer
         """
-        self.client = httpx.Client(base_url=server_url, timeout=timeout)
+        self.server_url = server_url
+        self.timeout = timeout
+        self.client = httpx.Client(base_url=self.server_url, timeout=self.timeout)
         self.model_id = model_id
         self.tokenizer = self.get_tokenizer()
 
@@ -102,8 +107,7 @@ class TrainingClient:
         Returns:
             HuggingFaceTokenizer instance
         """
-        if self.tokenizer is None:
-            self.tokenizer = HuggingFaceTokenizer(self.model_id)
+        self.tokenizer = HuggingFaceTokenizer(self.model_id)
         return self.tokenizer
 
     def zero_grad(self) -> dict[str, Any]:
@@ -254,6 +258,61 @@ class TrainingClient:
         )
         response.raise_for_status()
         return SaveCheckpointResponse(**response.json())
+
+    def save_weights_and_get_sampling_client(
+        self,
+        checkpoint_path: str,
+        tp_size: Optional[int] = None,
+        engine_kwargs: Optional[dict[str, Any]] = None,
+        wait_until_ready: bool = True,
+    ) -> "InferenceClient":
+        """
+        Save model weights and return a loaded inference client for generation.
+
+        Args:
+            checkpoint_path: Path where checkpoint should be saved
+            tp_size: Tensor parallel size for inference (defaults to 1)
+            engine_kwargs: SGLang engine configuration parameters
+            wait_until_ready: Whether to block until inference actor is ready
+
+        Returns:
+            InferenceClient instance ready for generation
+        """
+        from tinkerbell.client.inference import InferenceClient
+
+        # Step 1: Save the checkpoint
+        self.save_checkpoint(checkpoint_path)
+
+        # Step 2: Create inference actor
+        request = CreateInferenceActorRequest(
+            model_id=self.model_id,
+            tp_size=tp_size or 1,
+            engine_kwargs=engine_kwargs or {},
+        )
+
+        response = self.client.post(
+            "/create_inference_actor",
+            json=request.model_dump(),
+        )
+        response.raise_for_status()
+        result = CreateInferenceActorResponse(**response.json())
+
+        if not result.success:
+            raise RuntimeError(f"Failed to create inference actor: {result.message}")
+
+        # Step 3: Create InferenceClient
+        inference_client = InferenceClient(
+            server_url=self.server_url,
+            model_id=self.model_id,
+            timeout=self.timeout,
+        )
+        _ = inference_client.load_checkpoint(checkpoint_path)
+
+        # Step 4: Wait until ready if requested
+        if wait_until_ready:
+            inference_client.wait_until_ready()
+
+        return inference_client
 
     def close(self):
         """Close the HTTP client."""

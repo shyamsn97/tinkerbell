@@ -70,3 +70,12 @@ class GenerateRequest(StrictBase):
     prompts: list[str]
     max_tokens: int = 100
     temperature: float = 0.7
+
+
+class LoadCheckpointRequest(StrictBase):
+    model_id: ModelID
+    checkpoint_path: str
+
+
+class ShutdownInferenceActorRequest(StrictBase):
+    model_id: ModelID

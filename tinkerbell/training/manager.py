@@ -120,7 +120,7 @@ class ActorGroup:
 class TrainingManager:
     def __init__(
         self,
-        max_wait_time: float = 300.0,
+        max_wait_time: float = 600.0,
         clock_cycle: float = 5.0,
     ):
         self.actor_groups: Dict[str, ActorGroup] = {}

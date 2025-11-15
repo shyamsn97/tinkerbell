@@ -3,15 +3,15 @@ from ._models import BaseModel
 
 class DeployConfig(BaseModel):
     server_url: str = "https://0.0.0.0:8000"
-    max_wait_time: float = 300.0
+    max_wait_time: float = 600.0
     clock_cycle: float = 10.0
 
     @property
     def deployment_type(self) -> str:
         return "local"
 
-    def deploy(self) -> None:
-        pass
+    def deploy(self) -> str:
+        return self.server_url
 
 
 class ModalDeployConfig(DeployConfig):
@@ -25,10 +25,10 @@ class ModalDeployConfig(DeployConfig):
     def deployment_type(self) -> str:
         return "modal"
 
-    def deploy(self) -> None:
+    def deploy(self) -> str:
         from tinkerbell.service.server import deploy_on_modal
 
-        deploy_on_modal(
+        modal_url = deploy_on_modal(
             server_url=self.server_url,
             max_wait_time=self.max_wait_time,
             clock_cycle=self.clock_cycle,
@@ -38,3 +38,4 @@ class ModalDeployConfig(DeployConfig):
             container_idle_timeout=self.container_idle_timeout,
             max_inputs=self.max_inputs,
         )
+        return modal_url
