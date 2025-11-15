@@ -35,7 +35,9 @@ class InferenceClient:
         """
         self.server_url = server_url
         self.timeout = timeout
-        self.client = httpx.Client(base_url=self.server_url, timeout=self.timeout)
+        self.client = httpx.Client(
+            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
+        )
         self.model_id = model_id
 
     def get_status(self) -> ActorStatusResponse:

@@ -12,7 +12,9 @@ class ServiceClient:
         self.timeout = timeout
 
     def get_health(self) -> HealthResponse:
-        with httpx.Client(base_url=self.server_url, timeout=self.timeout) as client:
+        with httpx.Client(
+            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
+        ) as client:
             response = client.get("/health")
             response.raise_for_status()
             return HealthResponse(**response.json())
@@ -74,7 +76,9 @@ class ServiceClient:
             initialize_random_weights=initialize_random_weights,
         )
 
-        with httpx.Client(base_url=self.server_url, timeout=self.timeout) as client:
+        with httpx.Client(
+            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
+        ) as client:
             response = client.post(
                 "/create_training_actors",
                 json=request.model_dump(),

@@ -55,7 +55,9 @@ class TrainingClient:
         """
         self.server_url = server_url
         self.timeout = timeout
-        self.client = httpx.Client(base_url=self.server_url, timeout=self.timeout)
+        self.client = httpx.Client(
+            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
+        )
         self.model_id = model_id
         self.tokenizer = self.get_tokenizer()
 
