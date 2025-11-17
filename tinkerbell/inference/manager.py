@@ -46,7 +46,6 @@ class InferenceManager:
             lifetime="detached",
             name=f"inference_actor_{cleaned_model_name}",
             namespace="tinkerbell",
-            max_concurrency=100,  # Allow concurrent requests for SGLang batching
         ).remote(
             model_id=model_id,
             tp_size=tp_size,

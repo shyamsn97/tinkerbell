@@ -39,7 +39,7 @@ training_client = service_client.create_training_client(
     model_id="Qwen/Qwen3-0.6B",
     tp_size=2,
     parallelize_plan=parallelize_plan,
-    initialize_random_weights=False,
+    initialize_random_weights=True,
 )
 training_client.wait_until_ready()
 
