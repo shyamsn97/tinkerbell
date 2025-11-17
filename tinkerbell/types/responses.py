@@ -35,7 +35,7 @@ class ForwardBackwardResponse(BaseModel):
 
 
 class ActorStatusResponse(BaseModel):
-    status: Literal["ready", "initializing", "not_present"]
+    status: Literal["ready", "initializing", "loading", "not_present"]
     message: str | None = None
 
 

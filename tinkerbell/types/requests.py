@@ -68,8 +68,7 @@ class CreateInferenceActorRequest(StrictBase):
 class GenerateRequest(StrictBase):
     model_id: ModelID
     prompts: list[str]
-    max_tokens: int = 100
-    temperature: float = 0.7
+    sampling_params: dict[str, Any] = Field(default_factory=lambda: {})
 
 
 class LoadCheckpointRequest(StrictBase):

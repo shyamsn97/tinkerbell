@@ -1,4 +1,5 @@
-import asyncio
+# import asyncio
+import logging
 from typing import Any, Dict
 
 import ray
@@ -35,6 +36,8 @@ from tinkerbell.types.optimizer import (
     ZeroGradResponse,
 )
 from tinkerbell.utils import get_host_and_port
+
+logger = logging.getLogger(__name__)
 
 APP = FastAPI()
 
@@ -204,13 +207,10 @@ class TinkerbellServiceDeployment:
         inference_actor = self.inference_manager.get_inference_actor(request.model_id)
         if inference_actor is None:
             raise ValueError(f"Inference actor for model {request.model_id} not found")
-        ref = inference_actor.generate.remote(
-            request.prompts, request.max_tokens, request.temperature
-        )
-        outputs = await asyncio.gather(ref)
-        print(f"Generated Outputs: {outputs}")
+        ref = inference_actor.generate.remote(request.prompts, request.sampling_params)
+        outputs = await ref
         return GenerateResponse(
-            outputs=outputs[0],
+            outputs=outputs,
         )
 
     @APP.post("/load_checkpoint")
@@ -226,13 +226,13 @@ class TinkerbellServiceDeployment:
             return LoadCheckpointResponse(
                 model_id=request.model_id,
                 success=True,
-                message=f"Checkpoint loaded successfully from {request.checkpoint_path}",
+                message=f"Checkpoint loading started from {request.checkpoint_path}. Use get_inference_actor_status to check when ready.",
             )
         except Exception as e:
             return LoadCheckpointResponse(
                 model_id=request.model_id,
                 success=False,
-                message=f"Failed to load checkpoint: {str(e)}",
+                message=f"Failed to start checkpoint loading: {str(e)}",
             )
 
     @APP.post("/shutdown_inference_actor")
@@ -278,7 +278,6 @@ def deploy_service(
     serve.start(detached=True, http_options={"host": host, "port": port})
 
     # Apply any custom deployment options if provided
-
     deployment_kwargs["ray_actor_options"] = {"num_gpus": 0}
 
     deployment = serve.deployment(**deployment_kwargs)(

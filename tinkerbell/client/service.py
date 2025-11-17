@@ -11,10 +11,38 @@ class ServiceClient:
         self.server_url = server_url
         self.timeout = timeout
 
+    def _create_client(self) -> httpx.Client:
+        """Create an httpx client with robust timeout and transport settings."""
+        # Configure timeout with separate values for connect and read
+        # This helps with VPN/proxy environments
+        timeout_config = httpx.Timeout(
+            connect=30.0,  # Connection timeout
+            read=self.timeout,  # Read timeout
+            write=30.0,  # Write timeout
+            pool=30.0,  # Pool timeout
+        )
+
+        # Configure transport with retries and connection limits
+        # Set higher limits to support concurrent requests from multiple threads
+        limits = httpx.Limits(
+            max_connections=200,  # Total connection pool size
+            max_keepalive_connections=100,  # Keep-alive connections
+        )
+
+        transport = httpx.HTTPTransport(
+            retries=3,  # Retry failed connections
+            limits=limits,
+        )
+
+        return httpx.Client(
+            base_url=self.server_url,
+            timeout=timeout_config,
+            transport=transport,
+            follow_redirects=True,
+        )
+
     def get_health(self) -> HealthResponse:
-        with httpx.Client(
-            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
-        ) as client:
+        with self._create_client() as client:
             response = client.get("/health")
             response.raise_for_status()
             return HealthResponse(**response.json())
@@ -76,9 +104,7 @@ class ServiceClient:
             initialize_random_weights=initialize_random_weights,
         )
 
-        with httpx.Client(
-            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
-        ) as client:
+        with self._create_client() as client:
             response = client.post(
                 "/create_training_actors",
                 json=request.model_dump(),

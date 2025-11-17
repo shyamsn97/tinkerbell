@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import ray
 
@@ -9,7 +9,8 @@ from tinkerbell.inference.actor import SGLangInferenceActor
 class InferenceActorStatus(Enum):
     READY = "ready"
     INITIALIZING = "initializing"
-    NOT_SETUP = "not_setup"
+    LOADING = "loading"
+    NOT_SETUP = "not_present"
 
 
 class InferenceManager:
@@ -19,6 +20,7 @@ class InferenceManager:
         self.inference_actors: Dict[str, SGLangInferenceActor] = {}
         self.statuses: Dict[str, InferenceActorStatus] = {}
         self.ready_refs: Dict[str, Any] = {}
+        self.loading_refs: Dict[str, Any] = {}  # Track checkpoint loading
 
         if not ray.is_initialized():
             ray.init(
@@ -44,6 +46,7 @@ class InferenceManager:
             lifetime="detached",
             name=f"inference_actor_{cleaned_model_name}",
             namespace="tinkerbell",
+            max_concurrency=100,  # Allow concurrent requests for SGLang batching
         ).remote(
             model_id=model_id,
             tp_size=tp_size,
@@ -54,28 +57,43 @@ class InferenceManager:
         return model_id
 
     async def get_inference_actor_status(self, model_id: str) -> InferenceActorStatus:
-        # Non-blocking check
-        if (
-            self.statuses.get(model_id, InferenceActorStatus.NOT_SETUP)
-            == InferenceActorStatus.INITIALIZING
-        ):
+        # Non-blocking check - FastAPI/Ray Serve already manages the event loop
+        current_status = self.statuses.get(model_id, InferenceActorStatus.NOT_SETUP)
+
+        if current_status == InferenceActorStatus.INITIALIZING:
             ready, _ = ray.wait([self.ready_refs[model_id]], num_returns=1, timeout=0)
             if ready:
                 self.statuses[model_id] = InferenceActorStatus.READY
                 _ = ray.get(self.ready_refs[model_id])
+
+        elif current_status == InferenceActorStatus.LOADING:
+            # Check if checkpoint loading is complete
+            ready, _ = ray.wait([self.loading_refs[model_id]], num_returns=1, timeout=0)
+            if ready:
+                # Loading complete, mark as ready
+                _ = ray.get(self.loading_refs[model_id])
+                self.statuses[model_id] = InferenceActorStatus.READY
+                del self.loading_refs[model_id]
+            return self.statuses[model_id]
+
         return self.statuses.get(model_id, InferenceActorStatus.NOT_SETUP)
 
-    def get_inference_actor(self, model_id: str) -> SGLangInferenceActor:
+    def get_inference_actor(self, model_id: str) -> Optional[SGLangInferenceActor]:
         return self.inference_actors.get(model_id, None)
 
     async def load_checkpoint(self, model_id: str, checkpoint_path: str) -> bool:
-        """Load a checkpoint for a given model."""
+        """Start loading a checkpoint in the background (fire-and-forget)."""
         inference_actor = self.get_inference_actor(model_id)
         if inference_actor is None:
             raise ValueError(f"Inference actor for model {model_id} not found")
 
-        result = await inference_actor.load_checkpoint.remote(checkpoint_path)
-        return result
+        # Start loading in background and return immediately
+        self.statuses[model_id] = InferenceActorStatus.LOADING
+        self.loading_refs[model_id] = inference_actor.update_weights_from_disk.remote(
+            checkpoint_path=checkpoint_path,
+            load_format=None,
+        )
+        return True
 
     async def shutdown(self, model_id: str) -> bool:
         """Shutdown an inference actor."""

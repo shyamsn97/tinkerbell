@@ -174,10 +174,38 @@ def forward_backward_example(client: httpx.Client, model_id: str):
     return output1, output2
 
 if __name__ == "__main__":
+    import sys
+    
     client = httpx.Client(
         base_url="https://jesterlabs--training-service.modal.run",
         timeout=600.0
     )
+    
+    # Check if user wants to test inference
+    if len(sys.argv) > 1 and sys.argv[1] == "test_inference":
+        # Example: python test_create_train_actors.py test_inference meta-llama/Llama-3.1-8B
+        inference_model = sys.argv[2] if len(sys.argv) > 2 else "meta-llama/Llama-3.1-8B"
+        num_threads = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+        
+        print("=" * 70)
+        print("INFERENCE BATCHING TEST")
+        print("=" * 70)
+        print(f"Model: {inference_model}")
+        print(f"Threads: {num_threads}")
+        print("=" * 70)
+        
+        # Create inference actor if needed
+        print("\nCreating/checking inference actor...")
+        create_inference_actor(client, inference_model, tp_size=1)
+        check_inference_actor_status(client, inference_model)
+        
+        # Run multithreaded test
+        results = test_mutlithreaded_inference(client, inference_model, num_threads)
+        
+        print("\n" + "=" * 70)
+        print("Test Complete!")
+        print("=" * 70)
+        sys.exit(0)
 
     # Step 1: Create training actors
     print("=" * 60)
@@ -208,3 +236,127 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Done!")
     print("=" * 60)
+
+
+def call_generate(client: httpx.Client, model_id: str, thread_id: int, results: list):
+    """Single threaded call to generate endpoint."""
+    import time
+    start = time.time()
+    
+    try:
+        response = client.post("/generate", json={
+            "model_id": model_id,
+            "prompts": [f"Thread {thread_id}: Tell me a very short story about AI"],
+            "sampling_params": {"max_new_tokens": 50, "temperature": 0.7}
+        })
+        response.raise_for_status()
+        elapsed = time.time() - start
+        
+        result = response.json()
+        print(f"✓ Thread {thread_id} completed in {elapsed:.2f}s")
+        print(f"  Output preview: {result['outputs'][0][:80]}...")
+        results.append((elapsed, result))
+    except Exception as e:
+        elapsed = time.time() - start
+        print(f"✗ Thread {thread_id} failed after {elapsed:.2f}s: {e}")
+        results.append((elapsed, None))
+
+
+def test_mutlithreaded_inference(client: httpx.Client, model_id: str, num_threads: int = 10):
+    """Test multithreaded inference to verify concurrent batching with SGLang.
+    
+    This test sends multiple concurrent requests to verify that:
+    1. FastAPI handles concurrent HTTP requests
+    2. Ray actor processes them concurrently (with max_concurrency)
+    3. SGLang's continuous batching kicks in to process them efficiently
+    """
+    import threading
+    import time
+    
+    print("\n" + "=" * 70)
+    print(f"Testing Multithreaded Inference with {num_threads} concurrent threads")
+    print("=" * 70)
+    
+    results = []
+    threads = []
+    start_time = time.time()
+    
+    # Launch all threads
+    print(f"Launching {num_threads} concurrent requests...")
+    for i in range(num_threads):
+        thread = threading.Thread(
+            target=call_generate,
+            args=(client, model_id, i, results)
+        )
+        thread.start()
+        threads.append(thread)
+    
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+    
+    total_time = time.time() - start_time
+    
+    # Analyze results
+    successful = len([r for r in results if r[1] is not None])
+    if successful > 0:
+        avg_latency = sum(r[0] for r in results if r[1] is not None) / successful
+    else:
+        avg_latency = 0
+    
+    print("\n" + "=" * 70)
+    print("Multithreaded Inference Results:")
+    print("=" * 70)
+    print(f"Total wall-clock time: {total_time:.2f}s")
+    print(f"Successful requests: {successful}/{num_threads}")
+    print(f"Average latency per request: {avg_latency:.2f}s")
+    print(f"Throughput: {successful/total_time:.2f} requests/second")
+    
+    # Determine if batching is working
+    print("\n" + "=" * 70)
+    print("Batching Analysis:")
+    print("=" * 70)
+    
+    # If requests were sequential, total time ≈ avg_latency * num_threads
+    # If batched, total time ≈ avg_latency (all complete together)
+    expected_sequential_time = avg_latency * num_threads
+    
+    if total_time < expected_sequential_time * 0.5:
+        print("✅ BATCHING IS WORKING!")
+        print(f"   → Concurrent execution: {total_time:.2f}s")
+        print(f"   → Sequential would take: ~{expected_sequential_time:.2f}s")
+        print(f"   → Speedup: {expected_sequential_time/total_time:.1f}x")
+        print(f"   → SGLang is successfully batching concurrent requests!")
+    else:
+        print("⚠️  BATCHING MAY NOT BE WORKING!")
+        print(f"   → Expected concurrent time: ~{avg_latency:.2f}s")
+        print(f"   → Actual time: {total_time:.2f}s")
+        print(f"   → Requests appear to be processed sequentially")
+        print(f"")
+        print(f"   Possible issues:")
+        print(f"   1. max_concurrency not set on Ray actor")
+        print(f"   2. Server not using async properly")
+        print(f"   3. Network/infrastructure bottlenecks")
+    print("=" * 70)
+    
+    return results
+
+
+def check_inference_actor_status(client: httpx.Client, model_id: str):
+    """Poll until inference actor is ready."""
+    import time
+    
+    print(f"\nWaiting for inference actor for {model_id} to be ready...")
+    while True:
+        response = client.post("/get_inference_actor_status", json={
+            "model_id": model_id,
+        })
+        status_data = response.json()
+        print(f"Inference actor status: {status_data['status']}")
+        
+        if status_data["status"] == "ready":
+            print("✓ Inference actor is ready!")
+            break
+        
+        time.sleep(2)
+

@@ -25,6 +25,9 @@ class HuggingFaceTokenizer:
     def __init__(self, model_id: str):
         self.hf_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
+    def apply_chat_template(self, messages: list[dict[str, str]]) -> str:
+        return self.hf_tokenizer.apply_chat_template(messages, tokenize=False)
+
     def encode(self, *args, **kwargs) -> dict[str, TensorData]:
         kwargs["return_tensors"] = "pt"
         encoded = self.hf_tokenizer.encode(*args, **kwargs)
@@ -55,8 +58,33 @@ class TrainingClient:
         """
         self.server_url = server_url
         self.timeout = timeout
+
+        # Configure timeout with separate values for connect and read
+        # This helps with VPN/proxy environments
+        timeout_config = httpx.Timeout(
+            connect=30.0,  # Connection timeout
+            read=self.timeout,  # Read timeout
+            write=30.0,  # Write timeout
+            pool=30.0,  # Pool timeout
+        )
+
+        # Configure transport with retries and connection limits
+        # Set higher limits to support concurrent requests from multiple threads
+        limits = httpx.Limits(
+            max_connections=200,  # Total connection pool size
+            max_keepalive_connections=100,  # Keep-alive connections
+        )
+
+        transport = httpx.HTTPTransport(
+            retries=3,  # Retry failed connections
+            limits=limits,
+        )
+
         self.client = httpx.Client(
-            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
+            base_url=self.server_url,
+            timeout=timeout_config,
+            transport=transport,
+            follow_redirects=True,
         )
         self.model_id = model_id
         self.tokenizer = self.get_tokenizer()

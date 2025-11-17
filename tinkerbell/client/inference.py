@@ -35,25 +35,35 @@ class InferenceClient:
         """
         self.server_url = server_url
         self.timeout = timeout
+
+        # Configure timeout with separate values for connect and read
+        # This helps with VPN/proxy environments
+        timeout_config = httpx.Timeout(
+            connect=30.0,  # Connection timeout
+            read=self.timeout,  # Read timeout
+            write=30.0,  # Write timeout
+            pool=30.0,  # Pool timeout
+        )
+
+        # Configure transport with retries and connection limits
+        # Set higher limits to support concurrent requests from multiple threads
+        limits = httpx.Limits(
+            max_connections=200,  # Total connection pool size
+            max_keepalive_connections=100,  # Keep-alive connections
+        )
+
+        transport = httpx.HTTPTransport(
+            retries=3,  # Retry failed connections
+            limits=limits,
+        )
+
         self.client = httpx.Client(
-            base_url=self.server_url, timeout=self.timeout, follow_redirects=True
+            base_url=self.server_url,
+            timeout=timeout_config,
+            transport=transport,
+            follow_redirects=True,
         )
         self.model_id = model_id
-
-    def get_status(self) -> ActorStatusResponse:
-        """
-        Get the status of the inference actor.
-
-        Returns:
-            ActorStatusResponse with current status
-        """
-        request = ActorStatusRequest(model_id=self.model_id)
-        response = self.client.post(
-            "/get_inference_actor_status",
-            json=request.model_dump(),
-        )
-        response.raise_for_status()
-        return ActorStatusResponse(**response.json())
 
     def wait_until_ready(
         self,
@@ -79,19 +89,32 @@ class InferenceClient:
 
             time.sleep(poll_interval)
 
+    def get_status(self) -> ActorStatusResponse:
+        """
+        Get the status of the inference actor.
+
+        Returns:
+            ActorStatusResponse with current status
+        """
+        request = ActorStatusRequest(model_id=self.model_id)
+        response = self.client.post(
+            "/get_inference_actor_status",
+            json=request.model_dump(),
+        )
+        response.raise_for_status()
+        return ActorStatusResponse(**response.json())
+
     def generate(
         self,
         prompts: list[str],
-        max_tokens: int = 100,
-        temperature: float = 0.7,
+        sampling_params: dict = {},
     ) -> list[str]:
         """
         Generate text from prompts.
 
         Args:
             prompts: List of prompts to generate from
-            max_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature
+            sampling_params: Sampling parameters
 
         Returns:
             List of generated text strings
@@ -99,8 +122,7 @@ class InferenceClient:
         request = GenerateRequest(
             model_id=self.model_id,
             prompts=prompts,
-            max_tokens=max_tokens,
-            temperature=temperature,
+            sampling_params=sampling_params,
         )
 
         response = self.client.post(
@@ -116,7 +138,10 @@ class InferenceClient:
         checkpoint_path: str,
     ) -> LoadCheckpointResponse:
         """
-        Load a checkpoint from a directory.
+        Start loading a checkpoint from a directory (async operation).
+
+        This method returns immediately after starting the load operation.
+        Use wait_until_ready() to poll until the checkpoint is fully loaded.
 
         Args:
             checkpoint_path: Path to the checkpoint directory
@@ -133,6 +158,7 @@ class InferenceClient:
             "/load_checkpoint",
             json=request.model_dump(),
         )
+
         response.raise_for_status()
         return LoadCheckpointResponse(**response.json())
 

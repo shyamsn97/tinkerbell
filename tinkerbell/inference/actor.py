@@ -1,4 +1,10 @@
+import asyncio
+import logging
+from typing import Any, Dict, Optional
+
 import ray
+
+logger = logging.getLogger(__name__)
 
 
 @ray.remote
@@ -17,8 +23,6 @@ class SGLangInferenceActor:
             return None
 
         signal.signal = patched_signal
-
-        import asyncio
 
         import sglang as sgl
 
@@ -43,26 +47,23 @@ class SGLangInferenceActor:
         """Simple method to check if actor is initialized"""
         return True
 
-    async def load_checkpoint(self, checkpoint_path: str):
-        """Load checkpoint from a directory"""
-        import asyncio
+    async def update_weights_from_disk(
+        self, checkpoint_path: str, load_format: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Load model checkpoint from disk (async version)."""
+        from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
 
-        # Ensure the event loop is set for the current thread
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(self.loop)
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
 
-        return self.engine.update_weights_from_disk(checkpoint_path)
+        obj = UpdateWeightFromDiskReqInput(
+            model_path=checkpoint_path,
+            load_format=load_format,
+        )
 
-    async def generate(
-        self, prompts: list[str], max_tokens: int = 100, temperature: float = 0.7
-    ):
+        return await self.engine.tokenizer_manager.update_weights_from_disk(obj, None)
+
+    async def generate(self, prompts: list[str], sampling_params: dict = {}):
         """Generate text from a prompt."""
-        sampling_params = {
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-        }
 
         # Use async_generate with the event loop
         outputs = await self.engine.async_generate(prompts, sampling_params)
