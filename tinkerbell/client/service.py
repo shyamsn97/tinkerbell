@@ -3,7 +3,12 @@ from typing import Any, Optional
 import httpx
 
 from tinkerbell.client.training import TrainingClient
-from tinkerbell.types import CreateTrainingActorsRequest, DeployConfig, HealthResponse
+from tinkerbell.types import (
+    CreateTrainingActorsRequest,
+    DeployConfig,
+    GetRayActorsResponse,
+    HealthResponse,
+)
 
 
 class ServiceClient:
@@ -53,6 +58,13 @@ class ServiceClient:
             return True
         except Exception:
             return False
+
+    def get_ray_actors(self) -> GetRayActorsResponse:
+        """Get list of all Ray actors from the server."""
+        with self._create_client() as client:
+            response = client.post("/get_ray_actors")
+            response.raise_for_status()
+            return GetRayActorsResponse(**response.json())
 
     def deploy(self, deploy_config: DeployConfig) -> str:
         if self.server_url is None:

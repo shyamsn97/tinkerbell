@@ -38,6 +38,14 @@ service_client = ServiceClient(timeout=600.0)
 server_url = service_client.deploy(deploy_config)
 print("Deployed to: ", server_url)
 
+# List all Ray actors using the server API
+print("\nRay actors:")
+ray_actors_response = service_client.get_ray_actors()
+for actor_name in ray_actors_response.actor_names:
+    print(f"  - {actor_name}")
+print()
+
+
 training_client = service_client.create_training_client(
     model_id="Qwen/Qwen3-0.6B",
     tp_size=2,

@@ -164,9 +164,10 @@ class TinkerbellServiceDeployment:
     async def get_ray_actors(
         self,
     ) -> GetRayActorsResponse:
-        actors = ray.util.list_named_actors()
+        actors = ray.util.list_named_actors(all_namespaces=True)
+        actor_names = [actor["name"] for actor in actors]
         return GetRayActorsResponse(
-            actor_names=actors,
+            actor_names=actor_names,
         )
 
     @APP.post("/create_inference_actor")
@@ -319,6 +320,17 @@ def deploy_on_modal(
         from modal import runner
     except ImportError:
         raise ImportError("Modal is not installed. Install it with: pip install modal")
+
+    # Check if server already exists
+    try:
+        existing_function = modal.Function.from_name(
+            "tinkerbell-service", "deploy_on_modal.<locals>.serve"
+        )
+        existing_url = existing_function.web_url
+        print(f"Server already exists at: {existing_url}")
+        return existing_url
+    except (modal.exception.NotFoundError, Exception):
+        print("No existing server found, deploying new one...")
 
     app = modal.App(name="tinkerbell-service")
 
