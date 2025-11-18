@@ -69,6 +69,7 @@ class InferenceClient:
         self,
         poll_interval: float = 2.0,
         verbose: bool = True,
+        timeout: float = 900.0,
     ) -> None:
         """
         Poll the server until the inference actor is ready.
@@ -76,15 +77,36 @@ class InferenceClient:
         Args:
             poll_interval: Time between status checks in seconds
             verbose: If True, prints status updates
+            timeout: Maximum time to wait in seconds (default: 15 minutes)
         """
+        start_time = time.time()
+        last_status = None
+        last_print_time = start_time
+
         while True:
+            elapsed = time.time() - start_time
+
+            if elapsed > timeout:
+                raise TimeoutError(
+                    f"Inference actor did not become ready within {timeout}s. "
+                    f"Last status: {last_status}"
+                )
+
             status = self.get_status()
-            if verbose:
-                print(f"Inference actor status: {status.status}")
+
+            # Print if status changed or every 30 seconds
+            status_changed = status.status != last_status
+            should_print_interval = (time.time() - last_print_time) >= 30
+
+            if verbose and (status_changed or should_print_interval):
+                print(f"[{elapsed:.1f}s] Inference actor status: {status.status}")
+                last_print_time = time.time()
+
+            last_status = status.status
 
             if status.status == "ready":
                 if verbose:
-                    print("Inference actor is ready!")
+                    print(f"✓ Inference actor is ready! (took {elapsed:.1f}s)")
                 break
 
             time.sleep(poll_interval)
@@ -99,35 +121,38 @@ class InferenceClient:
         request = ActorStatusRequest(model_id=self.model_id)
         response = self.client.post(
             "/get_inference_actor_status",
-            json=request.model_dump(),
+            json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
         return ActorStatusResponse(**response.json())
 
     def generate(
         self,
-        prompts: list[str],
-        sampling_params: dict = {},
+        *args,
+        **kwargs,
     ) -> list[str]:
         """
-        Generate text from prompts.
+        Generate text from the request.
 
         Args:
-            prompts: List of prompts to generate from
-            sampling_params: Sampling parameters
+            *args: Positional arguments to pass to the GenerateRequest
+            **kwargs: Keyword arguments to pass to the GenerateRequest
 
         Returns:
             List of generated text strings
         """
+        # Always include model_id from the client
+        if "model_id" not in kwargs:
+            kwargs["model_id"] = self.model_id
+
         request = GenerateRequest(
-            model_id=self.model_id,
-            prompts=prompts,
-            sampling_params=sampling_params,
+            *args,
+            **kwargs,
         )
 
         response = self.client.post(
             "/generate",
-            json=request.model_dump(),
+            json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
         result = GenerateResponse(**response.json())
@@ -156,7 +181,7 @@ class InferenceClient:
 
         response = self.client.post(
             "/load_checkpoint",
-            json=request.model_dump(),
+            json=request.model_dump(exclude_none=True),
         )
 
         response.raise_for_status()
@@ -173,7 +198,7 @@ class InferenceClient:
 
         response = self.client.post(
             "/shutdown_inference_actor",
-            json=request.model_dump(),
+            json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
         return ShutdownInferenceActorResponse(**response.json())

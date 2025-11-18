@@ -1,63 +1,65 @@
 import logging
+import multiprocessing
 import socket
-import subprocess
 import time
 from typing import Any, Dict, Optional
 
 import httpx
 import ray
 
+from tinkerbell.utils import kill_process_tree
+
 logger = logging.getLogger(__name__)
+
+
+def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Process:
+    """Launch SGLang server in a separate process.
+
+    Note: SGLang server output goes to Ray actor logs.
+    Use `ray logs <actor_name>` to view them.
+    """
+    p = multiprocessing.Process(target=launch_server_fn, args=(server_args,))
+    p.start()
+    return p
 
 
 @ray.remote
 class SGLangInferenceActor:
     def __init__(self, model_id: str, tp_size: int, engine_kwargs: dict = {}):
-        import signal
-        import threading
+        from sglang.srt.entrypoints.http_server import launch_server
+        from sglang.srt.server_args import ServerArgs
 
-        # Monkey patch signal.signal to ignore if not in main thread
-        _original_signal = signal.signal
+        print("=" * 80)
+        print("🚀 Initializing SGLang Inference Actor")
+        print(f"   Model: {model_id}")
+        print(f"   TP Size: {tp_size}")
+        print(f"   Engine kwargs: {engine_kwargs}")
+        print("=" * 80)
 
-        def patched_signal(signalnum, handler):
-            if threading.current_thread() is threading.main_thread():
-                return _original_signal(signalnum, handler)
-            return None
-
-        signal.signal = patched_signal
-
-        print(f"Setting up SGLang server for model {model_id} with {tp_size} GPUs")
-
+        self.client = None
+        self.server_process = None
         # Find available port
         self.port = self._find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
 
-        # Build server command
-        cmd = [
-            "python",
-            "-m",
-            "sglang.launch_server",
-            "--model-path",
-            model_id,
-            "--tp-size",
-            str(tp_size),
-            "--port",
-            str(self.port),
-            "--host",
-            "127.0.0.1",
-        ]
+        print(f"📡 Allocated port: {self.port}")
 
-        # Add engine kwargs as CLI args
-        for key, value in engine_kwargs.items():
-            cmd.extend([f"--{key.replace('_', '-')}", str(value)])
+        engine_kwargs["model_path"] = model_id
+        engine_kwargs["tp_size"] = tp_size
+        engine_kwargs["port"] = self.port
+        engine_kwargs["host"] = "127.0.0.1"
 
-        # Start SGLang server as subprocess
-        self.server_process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        print("🔧 Starting SGLang server process...")
+        server_args = ServerArgs(**engine_kwargs)
+        self.server_process = launch_server_process(server_args, launch_server)
+        print(f"Process PID: {self.server_process.pid}")
 
         # Wait for server to be ready
-        self._wait_for_server()
+        try:
+            self._wait_for_server()
+        except Exception as e:
+            self.shutdown()
+            raise e
 
         # Create HTTP client for making requests
         self.client = httpx.Client(
@@ -75,29 +77,37 @@ class SGLangInferenceActor:
             port = s.getsockname()[1]
         return port
 
-    def _wait_for_server(self, timeout: int = 300):
+    def _wait_for_server(self, timeout: int = 600):
         """Wait for SGLang server to be ready."""
         start_time = time.time()
+        last_log_time = start_time
+
+        print(f"Waiting for SGLang server to start on {self.base_url}...")
+        print("This may take several minutes while the model loads...")
+
         while time.time() - start_time < timeout:
-            # Check if subprocess is still alive
-            if self.server_process.poll() is not None:
-                # Process died, get stderr
-                stderr = self.server_process.stderr.read()
-                stdout = self.server_process.stdout.read()
+            elapsed = time.time() - start_time
+
+            # Check if process is still alive (for multiprocessing.Process, use is_alive())
+            if not self.server_process.is_alive():
+                # Process died
+                exitcode = self.server_process.exitcode
                 raise RuntimeError(
-                    f"SGLang server process died with exit code {self.server_process.returncode}\n"
-                    f"STDOUT: {stdout}\n"
-                    f"STDERR: {stderr}"
+                    f"SGLang server process died with exit code {exitcode}"
                 )
 
             try:
                 response = httpx.get(f"{self.base_url}/health", timeout=5.0)
                 if response.status_code == 200:
+                    print(f"✓ SGLang server ready after {elapsed:.1f}s")
                     return
-            except Exception as e:
-                # Only log occasionally to avoid spam
-                if (time.time() - start_time) % 10 < 2:
-                    logger.info(f"Waiting for SGLang server to be ready... ({e})")
+            except Exception:
+                # Log every 10 seconds with elapsed time
+                if time.time() - last_log_time >= 10:
+                    print(
+                        f"[{elapsed:.1f}s] Still waiting for SGLang server... (process is alive)"
+                    )
+                    last_log_time = time.time()
                 pass
             time.sleep(2)
         raise RuntimeError(f"SGLang server failed to start within {timeout}s")
@@ -125,32 +135,19 @@ class SGLangInferenceActor:
 
     def generate(
         self,
-        prompts: list[str] = None,
-        input_ids: list[list[int]] = None,
-        sampling_params: dict = {},
+        generate_request: dict[str, Any],
     ):
         """
-        Generate text from prompts or input_ids.
+        Generate text from the request.
 
         This uses SGLang's HTTP server which properly batches concurrent requests
         through its continuous batching scheduler.
 
         Args:
-            prompts: List of text prompts (mutually exclusive with input_ids)
-            input_ids: List of token id sequences (mutually exclusive with prompts)
-            sampling_params: Sampling parameters dict
+            generate_request: Dictionary of the GenerateRequest
         """
         # Use SGLang's native /generate endpoint which supports both text and input_ids
-        json_data = {"sampling_params": sampling_params}
-
-        if prompts is not None:
-            json_data["text"] = prompts
-        elif input_ids is not None:
-            json_data["input_ids"] = input_ids
-        else:
-            raise ValueError("Either prompts or input_ids must be provided")
-
-        response = self.client.post("/generate", json=json_data)
+        response = self.client.post("/generate", json=generate_request)
         response.raise_for_status()
         result = response.json()
 
@@ -160,10 +157,10 @@ class SGLangInferenceActor:
     def shutdown(self):
         """Shutdown the SGLang server."""
         try:
-            self.client.close()
-            self.server_process.terminate()
-            self.server_process.wait(timeout=10)
+            if self.client is not None:
+                self.client.close()
+            if self.server_process is not None:
+                kill_process_tree(self.server_process.pid)
         except Exception as e:
-            logger.error(f"Error shutting down SGLang server: {e}")
-            self.server_process.kill()
+            raise e
         return True

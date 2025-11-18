@@ -68,23 +68,21 @@ class ActorGroup:
 
     async def forward_backward(
         self,
-        inputs: list[dict[str, Any]],
-        targets: Any = None,
+        data: list[Any],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
     ) -> list[dict[str, Any]]:
-        """Forward and backward pass through the model with batched inputs."""
+        """Forward and backward pass through the model with list of Datum objects."""
         if self.status != ActorStatus.READY:
             if not await self.wait_until_ready():
                 raise HTTPException(
                     status_code=503,
                     detail=f"Actors for model {self.model_id} are not ready",
                 )
-        batch_size = len(inputs)
+        batch_size = len(data)
         refs = [
             worker.forward_backward.remote(
-                inputs=inputs,
-                targets=targets,
+                data=data,
                 forward_kwargs=forward_kwargs,
                 return_logprobs=return_logprobs,
             )
@@ -215,26 +213,43 @@ class TrainingManager:
         if status != ActorStatus.READY:
             return
 
-        # Batch all inputs together
-        batch_inputs = [req.inputs for req in requests]
-        batch_targets = [req.targets for req in requests]
+        # Batch all data together - flatten list of lists of Datum objects
+        batch_data = []
+        request_sizes = []  # Track how many datums each request has
+        for req in requests:
+            request_sizes.append(len(req.data))
+            batch_data.extend(req.data)
+
         # Assuming all requests use the same forward_kwargs (or merge them)
         forward_kwargs = requests[0].forward_kwargs if requests else {}
         return_logprobs = requests[0].return_logprobs if requests else False
 
         # Execute batch
         output = await self.actor_groups[model_id].forward_backward(
-            inputs=batch_inputs,
-            targets=batch_targets,
+            data=batch_data,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
         )
-        # Distribute results back to futures
+        # Distribute results back to requests
+        # output is a list of dicts, one per datum in batch_data
+        # We need to group them back by request
 
-        for req, output in zip(requests, output, strict=True):
-            if output is not None:
+        output_idx = 0
+        for req, req_size in zip(requests, request_sizes):
+            # Get the outputs for this request
+            req_outputs = output[output_idx : output_idx + req_size]
+            output_idx += req_size
+
+            # Aggregate outputs for this request
+            if req_outputs:
+                # Combine all outputs for this request into a single dict
+                combined_output = {}
+                for key in req_outputs[0].keys():
+                    # Collect all values for this key across all datums in this request
+                    combined_output[key] = [out[key] for out in req_outputs]
+
                 self.global_store.set_result.remote(
-                    request_id=req.request_id, result=output
+                    request_id=req.request_id, result=combined_output
                 )
 
     async def get_actor_status(self, model_id: str) -> ActorStatus:
@@ -248,7 +263,7 @@ class TrainingManager:
     async def forward(
         self,
         model_id: str,
-        inputs: dict[str, Any],
+        data: list[Any],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
     ) -> RemoteFuture:
@@ -260,9 +275,8 @@ class TrainingManager:
         request = ForwardRequest(
             request_id=str(uuid.uuid4()),
             model_id=model_id,
-            inputs=inputs,
+            data=data,
             forward_kwargs=forward_kwargs,
-            return_logprobs=return_logprobs,
         )
         _ = ray.get(self.global_store.add_request_to_queue.remote(request=request))
         if self.clock_cycle <= 0.0:
@@ -273,8 +287,7 @@ class TrainingManager:
     async def forward_backward(
         self,
         model_id: str,
-        inputs: dict[str, Any],
-        targets: Any = None,
+        data: list[Any],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
     ) -> RemoteFuture:
@@ -286,8 +299,7 @@ class TrainingManager:
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
             model_id=model_id,
-            inputs=inputs,
-            targets=targets,
+            data=data,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
         )

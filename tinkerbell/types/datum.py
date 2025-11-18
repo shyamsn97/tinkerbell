@@ -1,20 +1,14 @@
 from typing import Any
 
+import numpy as np
+import torch
 from pydantic import model_validator
 
 from ._models import StrictBase
 from .data import TensorData
 from .loss_fn_inputs import LossFnInputs
 from .model_input import ModelInput
-
-try:
-    import torch  # type: ignore[import-not-found]
-
-    _HAVE_TORCH = True
-except ImportError:
-    _HAVE_TORCH = False
-
-import numpy as np
+from .tensor_dtype import _key_to_type
 
 __all__ = ["Datum"]
 
@@ -26,28 +20,26 @@ class Datum(StrictBase):
     """Dictionary mapping field names to tensor data"""
 
     model_input: ModelInput
-
-    @model_validator(mode="before")
-    @classmethod
-    def convert_tensors(cls, data: Any) -> Any:
-        """Convert torch.Tensor and numpy arrays to TensorData in loss_fn_inputs during construction."""
-        if isinstance(data, dict) and "loss_fn_inputs" in data:
-            loss_fn_inputs = data["loss_fn_inputs"]
-            if isinstance(loss_fn_inputs, dict):
-                converted_inputs = {}
-                for key, value in loss_fn_inputs.items():
-                    converted_inputs[key] = cls._maybe_convert_array(key, value)
-                data = dict(data)  # Make a copy
-                data["loss_fn_inputs"] = converted_inputs
-        return data
+    """Model input as a ModelInput object or a list of token IDs"""
 
     @classmethod
     def _maybe_convert_array(cls, key: str, value: Any) -> Any:
-        """Convert torch.Tensor, numpy array, or 1-D list to TensorData if needed."""
-        if _HAVE_TORCH and isinstance(value, torch.Tensor):
+        """Convert torch.Tensor, numpy array, dict, or 1-D list to TensorData if needed."""
+        if isinstance(value, TensorData):
+            # Already a TensorData, no conversion needed
+            return value
+        elif isinstance(value, torch.Tensor):
             return TensorData.from_torch(value)
         elif isinstance(value, np.ndarray):
             return TensorData.from_numpy(value)
+        elif (
+            isinstance(value, dict)
+            and "data" in value
+            and "dtype" in value
+            and "shape" in value
+        ):
+            # Reconstruct TensorData from serialized dict (from JSON/model_dump)
+            return TensorData(**value)
         elif isinstance(value, list):
             # assume it's 1d and infer the dtype from the key
             return TensorData(
@@ -56,12 +48,25 @@ class Datum(StrictBase):
         else:
             return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def convert_tensors(cls, data: Any) -> Any:
+        """Convert torch.Tensor and numpy arrays to TensorData in loss_fn_inputs during construction."""
+        if isinstance(data, dict):
+            # Only process loss_fn_inputs here - let ModelInput handle its own validation
+            if "loss_fn_inputs" in data and isinstance(data["loss_fn_inputs"], dict):
+                for inner_key, value in data["loss_fn_inputs"].items():
+                    data["loss_fn_inputs"][inner_key] = cls._maybe_convert_array(
+                        "loss_fn_inputs", value
+                    )
+        return data
 
-_key_to_type = {
-    "target_tokens": "int64",
-    "weights": "float32",
-    "advantages": "float32",
-    "logprobs": "float32",
-    "clip_low_threshold": "float32",
-    "clip_high_threshold": "float32",
-}
+    def to_torch(self, device: Any = None) -> dict[str, torch.Tensor]:
+        """Convert Datum to a dictionary of torch tensors."""
+        return {
+            "model_input": self.model_input.to_torch(device=device),
+            "loss_fn_inputs": {
+                key: value.to_torch(device=device)
+                for key, value in self.loss_fn_inputs.items()
+            },
+        }

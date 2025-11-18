@@ -35,7 +35,7 @@ from tinkerbell.types.optimizer import (
     ZeroGradRequest,
     ZeroGradResponse,
 )
-from tinkerbell.utils import get_host_and_port
+from tinkerbell.utils import get_host_and_port, model_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +125,12 @@ class TinkerbellServiceDeployment:
         if not self.training_manager.running:
             await self.training_manager.start()
         print(f"Request: {request}")
-        print(f"Request inputs: {request.inputs}, type: {type(request.inputs)}")
-        print(f"Request targets: {request.targets}, type: {type(request.targets)}")
+        print(f"Request data: {request.data}, type: {type(request.data)}")
         print(f"Request forward_kwargs: {request.forward_kwargs}")
         print(f"Request return_logprobs: {request.return_logprobs}")
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
             model_id=request.model_id,
-            inputs=request.inputs,
-            targets=request.targets,
+            data=request.data,
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
         )
@@ -207,7 +205,8 @@ class TinkerbellServiceDeployment:
         inference_actor = self.inference_manager.get_inference_actor(request.model_id)
         if inference_actor is None:
             raise ValueError(f"Inference actor for model {request.model_id} not found")
-        ref = inference_actor.generate.remote(request.prompts, request.sampling_params)
+        request_dict = model_to_dict(request, exclude=["model_id"], exclude_none=True)
+        ref = inference_actor.generate.remote(request_dict)
         outputs = await ref
         return GenerateResponse(
             outputs=outputs,

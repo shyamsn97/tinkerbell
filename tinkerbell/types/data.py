@@ -1,20 +1,20 @@
 # from https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/tensor_data.py
 from __future__ import annotations
 
-from typing import Any, List
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 from ._models import StrictBase
 from .tensor_dtype import TensorDtype
 
-try:
-    import torch  # type: ignore[import-not-found]
-
-    _HAVE_TORCH = True
-except ImportError:
-    _HAVE_TORCH = False
+if TYPE_CHECKING:
+    from PIL.Image import Image
+else:
+    Image = Any
 
 
 def _convert_tensor_dtype_to_numpy(dtype: TensorDtype) -> npt.DTypeLike:
@@ -29,9 +29,6 @@ def _convert_tensor_dtype_to_numpy(dtype: TensorDtype) -> npt.DTypeLike:
 
 def _convert_tensor_dtype_to_torch(dtype: TensorDtype) -> "torch.dtype":
     """Convert TensorDtype to torch dtype."""
-    if not _HAVE_TORCH:
-        raise ImportError("PyTorch is not installed. Cannot convert to torch dtype.")
-
     if dtype == "float32":
         return torch.float32
     elif dtype == "int64":
@@ -92,17 +89,14 @@ class TensorData(StrictBase):
             arr = arr.reshape(self.shape)
         return arr
 
-    def to_torch(self) -> "torch.Tensor":
+    def to_torch(self, device: Any = None) -> torch.Tensor:
         """Convert TensorData to torch tensor."""
-        if not _HAVE_TORCH:
-            raise ImportError(
-                "PyTorch is not installed. Cannot convert to torch tensor."
-            )
-
         torch_dtype = _convert_tensor_dtype_to_torch(self.dtype)
         tensor = torch.tensor(self.data, dtype=torch_dtype)
         if self.shape is not None:
             tensor = tensor.reshape(self.shape)
+        if device is not None:
+            tensor = tensor.to(device)
         return tensor
 
     def tolist(self) -> List[Any]:
@@ -112,3 +106,26 @@ class TensorData(StrictBase):
         torch_tensor = self.to_torch()
         torch_tensor = torch_tensor[index]
         return TensorData.from_torch(torch_tensor)
+
+
+@dataclass
+class ImageData:
+    url: str
+    detail: Optional[Literal["auto", "low", "high"]] = "auto"
+
+
+# Type definitions for multimodal input data
+# Individual data item types for each modality
+ImageDataInputItem = Union[Image, str, ImageData, Dict]
+AudioDataInputItem = Union[str, Dict]
+VideoDataInputItem = Union[str, Dict]
+# Union type for any multimodal data item
+MultimodalDataInputItem = Union[
+    ImageDataInputItem, VideoDataInputItem, AudioDataInputItem
+]
+# Format types supporting single items, lists, or nested lists for batch processing
+MultimodalDataInputFormat = Union[
+    List[List[MultimodalDataInputItem]],
+    List[MultimodalDataInputItem],
+    MultimodalDataInputItem,
+]

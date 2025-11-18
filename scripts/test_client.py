@@ -1,5 +1,8 @@
+from pydoc import text
 from tinkerbell.client import TrainingClient, ServiceClient
 from tinkerbell.types import ModalDeployConfig
+from tinkerbell.types.datum import Datum
+from tinkerbell.types.model_input import ModelInput
 
 import time
 import concurrent.futures
@@ -44,14 +47,105 @@ training_client = service_client.create_training_client(
 training_client.wait_until_ready()
 
 print("Training client ready")
+
+# ============================================================================
+# TRAINING EXAMPLE: Forward-Backward Pass
+# ============================================================================
+print("\n" + "=" * 70)
+print("TRAINING EXAMPLE: Running forward-backward passes")
+print("=" * 70)
+
+# Create training examples
+training_texts = [
+    "The quick brown fox jumps over the lazy dog.",
+    "Machine learning is transforming the world.",
+    "Python is a popular programming language.",
+    "Neural networks can learn complex patterns.",
+]
+
+print(f"\nTraining on {len(training_texts)} examples...")
+print("Texts:")
+for i, text in enumerate(training_texts):
+    print(f"  {i+1}. {text}")
+
+# Tokenize the training examples
+tokenizer = training_client.tokenizer
+encoded = tokenizer(
+    training_texts,
+    padding=True,
+    truncation=True,
+    max_length=128,
+    return_tensors="pt"
+)
+
+# Create Datum objects for each training example
+training_data = []
+for i in range(len(training_texts)):
+    datum = Datum(
+        model_input=ModelInput(
+            tokens=encoded["input_ids"].slice(i),
+            attention_mask=encoded["attention_mask"].slice(i),
+        ),
+        loss_fn_inputs={
+            "labels": encoded["input_ids"].slice(i),  # Use input_ids as labels for language modeling
+        }
+    )
+    training_data.append(datum)
+
+# Training loop: Run multiple iterations with gradient descent
+num_training_steps = 5
+print(f"\nRunning {num_training_steps} training steps...")
+
+for step in range(num_training_steps):
+    print(f"\n--- Training Step {step + 1}/{num_training_steps} ---")
+    
+    # Zero gradients
+    training_client.zero_grad()
+    
+    # Forward-backward pass
+    response = training_client.forward_backward(
+        data=training_data,
+        forward_kwargs={},
+    )
+    
+    # Get the result
+    result = training_client.get_result(response.request_id)
+    losses = result.get("loss", [])
+    
+    if losses:
+        avg_loss = sum(losses) / len(losses)
+        print(f"  Average Loss: {avg_loss:.4f}")
+        print(f"  Individual Losses: {[f'{loss:.4f}' for loss in losses]}")
+    
+    # Optimizer step with AdamW
+    training_client.optim_step(
+        optimizer_params={
+            "name": "adamw",
+            "lr": 1e-4,
+            "weight_decay": 0.01,
+        }
+    )
+    print(f"  ✓ Gradients applied")
+
+print("\n" + "=" * 70)
+print("Training complete! Loss should have decreased over iterations.")
+print("=" * 70 + "\n")
+
 # After training, save weights and get inference client
+print("Saving trained model weights...")
 sampling_client = training_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/saved-qwen",
-    tp_size=2,
+    tp_size=1,
     wait_until_ready=True
 )
 print("Sampling client ready")
-# Generate text
+
+# ============================================================================
+# INFERENCE EXAMPLE: Text Generation
+# ============================================================================
+print("\n" + "=" * 70)
+print("INFERENCE EXAMPLE: Generating text with trained model")
+print("=" * 70 + "\n")
 
 messages = [
     [
@@ -112,37 +206,38 @@ print("=" * 70)
 print("Multithreaded request to generate...")
 start_time = time.time()
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [executor.submit(sampling_client.generate, prompts=[formatted_messages[i]], sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+    futures = [executor.submit(sampling_client.generate, text=[formatted_messages[i]], sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
     for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
         outputs = future.result()
 print(f"Time taken: {time.time() - start_time} seconds")
-
-print("Multithreaded request to generate run # 2...")
-start_time = time.time()
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [executor.submit(sampling_client.generate, prompts=[formatted_messages[i]], sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
-    for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
-        outputs = future.result()
-print("Outputs: ", outputs)
-print(f"Time taken: {time.time() - start_time} seconds")
-print("=" * 70)
 
 print("=" * 70)
 print("Sequential request to generate...")
 start_time = time.time()
 for i in tqdm(range(len(messages)), desc="Sequential requests"):
     outputs = sampling_client.generate(
-        prompts=[formatted_messages[i]],
+        text=[formatted_messages[i]],
         sampling_params={
-            "max_new_tokens": 100,
+            "max_new_tokens": 512,
             "temperature": 0.7,
         },
     )
+print(f"Time taken: {time.time() - start_time} seconds")
+
+print("Multithreaded request to generate run # 2...")
+start_time = time.time()
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    futures = [executor.submit(sampling_client.generate, text=[formatted_messages[i]], sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+    for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
+        outputs = future.result()
+print("Outputs: ", outputs)
+print(f"Time taken: {time.time() - start_time} seconds")
+print("=" * 70)
 
 print("Sequential request to generate run # 2...")
 for i in tqdm(range(len(messages)), desc="Sequential requests"):
     outputs = sampling_client.generate(
-        prompts=[formatted_messages[i]],
+        text=[formatted_messages[i]],
         sampling_params={
             "max_new_tokens": 100,
             "temperature": 0.7,

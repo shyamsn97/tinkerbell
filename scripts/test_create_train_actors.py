@@ -2,6 +2,8 @@ import httpx
 import torch
 from transformers import AutoTokenizer
 from tinkerbell.types.data import TensorData
+from tinkerbell.types.datum import Datum
+from tinkerbell.types.model_input import ModelInput
 
 WORLD_SIZE = 2
 MASTER_ADDR = "127.0.0.1"
@@ -89,8 +91,27 @@ def forward_backward_example(client: httpx.Client, model_id: str):
     tokenized_inputs = tokenize_input(["The quick brown fox jumps over the lazy dog.", "Machine learning is transforming the world."], tokenizer)
 
     print(f"Tokenized inputs: {tokenized_inputs['input_ids'].model_dump()}")
-    inputs1 = {k:v.slice(0).model_dump() for k,v in tokenized_inputs.items()}
-    inputs2 = {k:v.slice(1).model_dump() for k,v in tokenized_inputs.items()}
+    
+    # Create Datum objects for each input
+    datum1 = Datum(
+        model_input=ModelInput(
+            tokens=tokenized_inputs['input_ids'].slice(0),
+            attention_mask=tokenized_inputs['attention_mask'].slice(0)
+        ),
+        loss_fn_inputs={
+            "labels": tokenized_inputs['labels'].slice(0)
+        }
+    )
+    
+    datum2 = Datum(
+        model_input=ModelInput(
+            tokens=tokenized_inputs['input_ids'].slice(1),
+            attention_mask=tokenized_inputs['attention_mask'].slice(1)
+        ),
+        loss_fn_inputs={
+            "labels": tokenized_inputs['labels'].slice(1)
+        }
+    )
 
     print("Zeroing gradients...")
     response = client.post("/zero_grad", json={
@@ -98,20 +119,17 @@ def forward_backward_example(client: httpx.Client, model_id: str):
     })
     print("Zero grad response:", response.json())
     print("================================================")
-    # Send forward-backward request
-    targets1 = inputs1.pop("labels")
-    targets2 = inputs2.pop("labels")
+    
+    # Send forward-backward requests with Datum objects
     response1 = client.post("/forward_backward", json={
         "model_id": model_id,
-        "inputs": inputs1,
-        "targets": targets1,
+        "data": [datum1.model_dump()],
         "forward_kwargs": {},
     })
     
     response2 = client.post("/forward_backward", json={
         "model_id": model_id,
-        "inputs": inputs2,
-        "targets": targets2,
+        "data": [datum2.model_dump()],
         "forward_kwargs": {},
     })
 
@@ -142,15 +160,13 @@ def forward_backward_example(client: httpx.Client, model_id: str):
 
     response1 = client.post("/forward_backward", json={
         "model_id": model_id,
-        "inputs": inputs1,
-        "targets": targets1,
+        "data": [datum1.model_dump()],
         "forward_kwargs": {},
     })
 
     response2 = client.post("/forward_backward", json={
         "model_id": model_id,
-        "inputs": inputs2,
-        "targets": targets2,
+        "data": [datum2.model_dump()],
         "forward_kwargs": {},
     })
 

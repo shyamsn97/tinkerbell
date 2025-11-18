@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 
 from tinkerbell.client.inference import InferenceClient
 from tinkerbell.types.data import TensorData
+from tinkerbell.types.datum import Datum
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     CreateInferenceActorRequest,
@@ -189,8 +190,7 @@ class TrainingClient:
 
     def forward_backward(
         self,
-        inputs: dict[str, TensorData | Any],
-        targets: Optional[TensorData | Any] = None,
+        data: list[Datum],
         forward_kwargs: Optional[dict[str, Any]] = None,
         return_logprobs: bool = False,
     ) -> ForwardBackwardResponse:
@@ -198,24 +198,19 @@ class TrainingClient:
         Perform forward and backward pass.
 
         Args:
-            inputs: Input tensors (should NOT include labels)
-            targets: Target tensors for loss calculation
+            data: List of Datum objects containing model inputs and loss function inputs
             forward_kwargs: Additional forward pass kwargs
             return_logprobs: If True, returns log probabilities
-            request_id: Optional request ID for async requests
 
         Returns:
             ForwardBackwardResponse with request_id for async retrieval
         """
         request_data = {
             "model_id": self.model_id,
-            "inputs": inputs,
+            "data": [datum.model_dump() for datum in data],
             "forward_kwargs": forward_kwargs or {},
             "return_logprobs": return_logprobs,
         }
-
-        if targets is not None:
-            request_data["targets"] = targets
 
         response = self.client.post(
             "/forward_backward",
@@ -224,7 +219,7 @@ class TrainingClient:
         response.raise_for_status()
         return ForwardBackwardResponse(**response.json())
 
-    def get_result(self, request_id: str) -> ForwardBackwardResponse:
+    def get_result(self, request_id: str) -> dict[str, Any]:
         """
         Get the result of an async forward/backward request.
 
@@ -232,14 +227,14 @@ class TrainingClient:
             request_id: Request ID from forward_backward call
 
         Returns:
-            ForwardBackwardResponse with loss and outputs
+            Dictionary with loss and other outputs (e.g., {'loss': [0.5, 0.6, ...]})
         """
         response = self.client.post(
             "/get_result",
             json={"request_id": request_id},
         )
         response.raise_for_status()
-        return ForwardBackwardResponse(**response.json())
+        return response.json()
 
     def optim_step(
         self,

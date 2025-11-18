@@ -1,6 +1,6 @@
 import os
 import traceback
-from typing import Any
+from typing import Any, Dict
 
 import ray
 import torch
@@ -17,7 +17,8 @@ from torch.distributed.tensor.parallel import (
 )
 
 from tinkerbell.training.loss import ForCausalLMLoss
-from tinkerbell.types.data import TensorData
+from tinkerbell.types.datum import Datum
+from tinkerbell.types.loss_fn_type import LossFnType
 from tinkerbell.utils import get_submodules_with_wildcard
 
 
@@ -115,28 +116,98 @@ class TrainingActor:
         model = model.cuda()
         return model
 
-    def _prepare_inputs(
+    def stack_inputs(
         self,
-        inputs: list[dict[str, TensorData]],
-        targets: dict[str, TensorData] | None = None,
-    ) -> dict[str, Any]:
+        data: list[Datum],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Stack a list of Datum objects into batched tensors.
+
+        Args:
+            data: List of Datum objects to stack
+
+        Returns:
+            Tuple of (model_inputs, loss_fn_inputs) where each is a dict of stacked tensors
+        """
         try:
-            for input in inputs:
-                for key in input:
-                    input[key] = input[key].to_torch()
-                    input[key] = input[key].cuda()
-            if targets is not None:
-                targets = torch.stack([t.to_torch() for t in targets])
-                targets = targets.cuda()
-            batch_inputs = {}
-            for key in inputs[0]:
-                batch_inputs[key] = torch.stack(
-                    [input[key] for input in inputs]
-                ).squeeze(0)
-            return batch_inputs, targets
+            print(f"[stack_inputs] Processing {len(data)} Datum objects")
+
+            # Debug: Check types
+            for i, datum in enumerate(data):
+                print(f"[stack_inputs] Datum {i}: type={type(datum)}")
+                print(
+                    f"[stack_inputs] Datum {i}.model_input: type={type(datum.model_input)}"
+                )
+                print(
+                    f"[stack_inputs] Datum {i}.model_input.tokens: type={type(datum.model_input.tokens)}"
+                )
+                if hasattr(datum.model_input.tokens, "data"):
+                    print(
+                        f"[stack_inputs] Datum {i}.model_input.tokens.data: {datum.model_input.tokens.data[:5]}..."
+                    )
+                else:
+                    print(
+                        f"[stack_inputs] Datum {i}.model_input.tokens: {datum.model_input.tokens}"
+                    )
+
+            # Convert all data to torch tensors on CUDA
+            device = torch.cuda.current_device()
+            print(f"[stack_inputs] Using device: {device}")
+
+            # Stack model inputs
+            model_inputs = {}
+
+            # Stack tokens (input_ids for the model)
+            print("[stack_inputs] Stacking tokens...")
+            tokens_list = [
+                datum.model_input.tokens.to_torch(device=device) for datum in data
+            ]
+            model_inputs["input_ids"] = torch.stack(tokens_list)
+            print(
+                f"[stack_inputs] Stacked tokens shape: {model_inputs['input_ids'].shape}"
+            )
+
+            # Stack attention masks if present
+            if data[0].model_input.attention_mask is not None:
+                print("[stack_inputs] Stacking attention masks...")
+                attention_mask_list = [
+                    datum.model_input.attention_mask.to_torch(device=device)
+                    for datum in data
+                ]
+                model_inputs["attention_mask"] = torch.stack(attention_mask_list)
+                print(
+                    f"[stack_inputs] Stacked attention_mask shape: {model_inputs['attention_mask'].shape}"
+                )
+
+            # Stack additional inputs if present
+            if data[0].model_input.additional_inputs is not None:
+                print("[stack_inputs] Stacking additional inputs...")
+                for key in data[0].model_input.additional_inputs.keys():
+                    additional_list = [
+                        datum.model_input.additional_inputs[key].to_torch(device=device)
+                        for datum in data
+                    ]
+                    model_inputs[key] = torch.stack(additional_list)
+
+            # Stack loss function inputs
+            print("[stack_inputs] Stacking loss function inputs...")
+            loss_fn_inputs = {}
+            if len(data) > 0 and data[0].loss_fn_inputs:
+                for key in data[0].loss_fn_inputs.keys():
+                    print(f"[stack_inputs] Stacking loss input key: {key}")
+                    loss_inputs_list = [
+                        datum.loss_fn_inputs[key].to_torch(device=device)
+                        for datum in data
+                    ]
+                    loss_fn_inputs[key] = torch.stack(loss_inputs_list)
+                    print(
+                        f"[stack_inputs] Stacked {key} shape: {loss_fn_inputs[key].shape}"
+                    )
+
+            print("[stack_inputs] Successfully stacked all inputs")
+            return model_inputs, loss_fn_inputs
         except Exception as e:
             tb_str = traceback.format_exc()
-            print(f"Error in _prepare_inputs: {e}\n{tb_str}")
+            print(f"[stack_inputs] ERROR: {e}\n{tb_str}")
             raise e
 
     def setup(self):
@@ -164,21 +235,22 @@ class TrainingActor:
 
     async def forward(
         self,
-        batch_inputs: dict[str, torch.Tensor],
+        data: list[Datum],
         with_grad: bool = True,
         forward_kwargs: dict[str, Any] = {},
         **kwargs,
     ) -> torch.Tensor:
-        """Forward pass with automatic tensor conversion from lists/arrays."""
-        # Convert inputs to tensors if they're not already
+        """Forward pass with automatic tensor conversion from list of Datum objects."""
         try:
+            # Stack inputs from list of Datum objects
+            model_inputs, _ = self.stack_inputs(data)
             if with_grad:
                 self.model.train()
-                outputs = self.model(**batch_inputs, **forward_kwargs)
+                outputs = self.model(**model_inputs, **forward_kwargs)
             else:
                 self.model.eval()
                 with torch.no_grad():
-                    outputs = self.model(**batch_inputs, **forward_kwargs)
+                    outputs = self.model(**model_inputs, **forward_kwargs)
             return outputs
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -187,26 +259,42 @@ class TrainingActor:
 
     async def forward_backward(
         self,
-        inputs: list[dict[str, TensorData]],
-        targets: Any,
+        data: list[Datum],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
-        **kwargs,
+        loss_fn: LossFnType = "cross_entropy",
+        loss_fn_config: Dict[str, float] | None = None,
     ):
-        """Execute a single training step (accepts tensors or lists from JSON)."""
-        batch_inputs, targets = self._prepare_inputs(inputs, targets)
-        outputs = await self.forward(
-            batch_inputs=batch_inputs,
-            with_grad=True,
-            forward_kwargs=forward_kwargs,
+        """Execute a single training step using list of Datum objects."""
+        print(f"[Rank {self.rank}] forward_backward called with {len(data)} data items")
+        print(f"[Rank {self.rank}] data type: {type(data)}")
+        print(
+            f"[Rank {self.rank}] first datum type: {type(data[0]) if data else 'empty'}"
         )
         try:
-            per_batch_losses = ForCausalLMLoss(
-                logits=outputs.logits,
-                labels=targets,
-            )
-            loss = per_batch_losses.mean()
-            loss.backward()
+            # Stack inputs from list of Datum objects
+            print(f"[Rank {self.rank}] Starting stack_inputs...")
+            model_inputs, loss_fn_inputs = self.stack_inputs(data)
+            print(f"[Rank {self.rank}] Stacked inputs!")
+            # Forward pass
+            self.model.train()
+            print(f"[Rank {self.rank}] Starting forward pass...")
+            outputs = self.model(**model_inputs, **forward_kwargs)
+            print(f"[Rank {self.rank}] Forward pass complete!")
+            # Compute loss
+            if loss_fn == "cross_entropy":
+                # Expect 'labels' in loss_fn_inputs
+                labels = loss_fn_inputs.get("labels")
+                per_batch_losses = ForCausalLMLoss(
+                    logits=outputs.logits,
+                    labels=labels,
+                )
+                loss = per_batch_losses.mean()
+                print("Loss computed!")
+                loss.backward()
+            else:
+                raise ValueError(f"Unknown loss function: {loss_fn}")
+
         except Exception as e:
             tb_str = traceback.format_exc()
             print(f"Error in forward_backward: {e}\n{tb_str}")
