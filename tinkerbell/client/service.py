@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any, Optional
 
@@ -10,6 +11,8 @@ from tinkerbell.types import (
     GetRayActorsResponse,
     HealthResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceClient:
@@ -72,10 +75,10 @@ class ServiceClient:
             self.server_url = deploy_config.deploy()
 
         # Wait for server to be ready
-        print("Waiting for server to be ready...")
+        logger.info("Waiting for server to be ready...")
         while not self.is_deployed():
             time.sleep(1)
-        print("Server is ready!")
+        logger.info("Server is ready!")
         return self.server_url
 
     def create_training_client(
@@ -129,8 +132,19 @@ class ServiceClient:
                 json=request.model_dump(),
             )
             response.raise_for_status()
+
+            # Convert LoraConfig to dict if needed
+            lora_config_dict = None
+            if lora_config:
+                if hasattr(lora_config, "model_dump"):
+                    lora_config_dict = lora_config.model_dump()
+                else:
+                    lora_config_dict = lora_config
+
             return TrainingClient(
                 server_url=self.server_url,
                 model_id=model_id,
                 timeout=self.timeout,
+                lora_enabled=True,
+                lora_config=lora_config_dict,
             )

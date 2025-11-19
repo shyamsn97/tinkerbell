@@ -1,9 +1,12 @@
+import logging
 from enum import Enum
 from typing import Any, Dict, Optional
 
 import ray
 
 from tinkerbell.sampling.actor import SGLangSamplingActor
+
+logger = logging.getLogger(__name__)
 
 
 class SamplingActorStatus(Enum):
@@ -34,8 +37,12 @@ class SamplingManager:
         engine_kwargs: dict[str, Any] = {},
     ) -> str:
         if model_id in self.sampling_actors:
-            print(f"Sampling actor for model {model_id} already exists...")
+            logger.info(f"Sampling actor for {model_id} already exists")
             return model_id
+
+        actor_name = self._get_actor_name(model_id)
+        logger.info(f"Creating sampling actor: {actor_name} (tp_size={tp_size})")
+        logger.info(f"Check logs: ray logs {actor_name}")
 
         actor = self._create_actor_with_options(model_id, tp_size, engine_kwargs)
         self.sampling_actors[model_id] = actor
@@ -56,14 +63,18 @@ class SamplingManager:
     def get_sampling_actor(self, model_id: str) -> Optional[SGLangSamplingActor]:
         return self.sampling_actors.get(model_id)
 
-    async def load_checkpoint(self, model_id: str, checkpoint_path: str) -> bool:
+    async def load_checkpoint(
+        self, model_id: str, checkpoint_path: str, pin_lora: bool = False
+    ) -> bool:
         """Start loading a checkpoint in the background (fire-and-forget)."""
         sampling_actor = self._get_actor_or_raise(model_id)
+        logger.info(f"Loading checkpoint for {model_id} from {checkpoint_path}")
 
         self.statuses[model_id] = SamplingActorStatus.LOADING
         self.loading_refs[model_id] = sampling_actor.update_weights_from_disk.remote(
             checkpoint_path=checkpoint_path,
             load_format=None,
+            pin_lora=pin_lora,
         )
         return True
 
@@ -94,107 +105,67 @@ class SamplingManager:
 
     def _check_initializing_status(self, model_id: str) -> None:
         """Check if initialization is complete and update status."""
+        if self._is_actor_dead(model_id):
+            self._handle_actor_failure(model_id, "initialization")
+            return
+
         try:
             ready, _ = ray.wait([self.ready_refs[model_id]], num_returns=1, timeout=0)
             if ready:
                 ray.get(self.ready_refs[model_id])
                 self.statuses[model_id] = SamplingActorStatus.READY
         except ray.exceptions.RayActorError as e:
-            print("=" * 80)
-            print(f"ERROR: Sampling actor {model_id} crashed during initialization!")
-            print(f"RayActorError: {e}")
-            print("=" * 80)
-            print("The actor likely crashed due to one of these reasons:")
-            print("  1. Out of memory (OOM) during model loading")
-            print("  2. Model not found or inaccessible")
-            print("  3. GPU out of memory")
-            print("  4. SGLang server failed to start")
-            print("=" * 80)
-            print(
-                f"To debug, check Ray logs with: ray logs {self._get_actor_name(model_id)}"
-            )
-            print("Or check all Ray logs at: /tmp/ray/session_latest/logs/")
-            print("=" * 80)
-            # Clean up the failed actor
+            logger.error(f"Actor {model_id} crashed during initialization: {e}")
+            logger.error(f"Check logs: ray logs {self._get_actor_name(model_id)}")
             self._cleanup_actor_state(model_id)
             self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
         except Exception as e:
-            print("=" * 80)
-            print(f"ERROR: Unexpected error during actor initialization for {model_id}")
-            print(f"Exception type: {type(e).__name__}")
-            print(f"Exception message: {e}")
-            print("=" * 80)
-            import traceback
-
-            traceback.print_exc()
-            print("=" * 80)
-            # Clean up the failed actor
+            logger.error(f"Unexpected error for {model_id}: {type(e).__name__}: {e}")
             self._cleanup_actor_state(model_id)
             self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
 
     def _check_loading_status(self, model_id: str) -> None:
         """Check if checkpoint loading is complete and update status."""
-        # First check if actor is still alive
-        actor = self.sampling_actors.get(model_id)
-        if actor is not None:
-            try:
-                # Check if actor is still alive using ray's internal state
-                actor_state = ray._private.state.actors(actor._actor_id.hex())
-                if actor_state and actor_state.get("State") == "DEAD":
-                    print("=" * 80)
-                    print(
-                        f"ERROR: Sampling actor {model_id} DIED during checkpoint loading"
-                    )
-                    print(f"Actor state: {actor_state}")
-                    print("=" * 80)
-                    self._cleanup_actor_state(model_id)
-                    self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
-                    return
-            except Exception:
-                # If we can't check state, continue with normal flow
-                pass
+        if self._is_actor_dead(model_id):
+            self._handle_actor_failure(model_id, "checkpoint loading")
+            return
 
         try:
             ready, _ = ray.wait([self.loading_refs[model_id]], num_returns=1, timeout=0)
             if ready:
                 result = ray.get(self.loading_refs[model_id])
-                print(f"Checkpoint loading completed for {model_id}: {result}")
+                logger.info(f"✓ Checkpoint loaded for {model_id}: {result}")
                 self.statuses[model_id] = SamplingActorStatus.READY
                 del self.loading_refs[model_id]
         except ray.exceptions.RayActorError as e:
-            print("=" * 80)
-            print(
-                f"ERROR: Sampling actor {model_id} crashed during checkpoint loading!"
-            )
-            print(f"RayActorError: {e}")
-            print("=" * 80)
-            print("The actor likely crashed due to one of these reasons:")
-            print("  1. Out of memory (OOM) during checkpoint loading")
-            print("  2. Checkpoint file corruption or incompatibility")
-            print("  3. Model architecture mismatch")
-            print("  4. GPU out of memory")
-            print("=" * 80)
-            print(
-                f"To debug, check Ray logs with: ray logs {self._get_actor_name(model_id)}"
-            )
-            print("Or check all Ray logs at: /tmp/ray/session_latest/logs/")
-            print("=" * 80)
-            # Clean up the failed actor
+            logger.error(f"Actor {model_id} crashed during checkpoint loading: {e}")
+            logger.error(f"Check logs: ray logs {self._get_actor_name(model_id)}")
             self._cleanup_actor_state(model_id)
             self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
         except Exception as e:
-            print("=" * 80)
-            print(f"ERROR: Checkpoint loading failed for {model_id}")
-            print(f"Exception type: {type(e).__name__}")
-            print(f"Exception message: {e}")
-            print("=" * 80)
-            import traceback
-
-            traceback.print_exc()
-            print("=" * 80)
-            # Clean up the failed actor
+            logger.error(
+                f"Checkpoint loading failed for {model_id}: {type(e).__name__}: {e}"
+            )
             self._cleanup_actor_state(model_id)
             self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
+
+    def _is_actor_dead(self, model_id: str) -> bool:
+        """Check if actor is in DEAD state."""
+        actor = self.sampling_actors.get(model_id)
+        if actor is None:
+            return False
+        try:
+            actor_state = ray._private.state.actors(actor._actor_id.hex())
+            return actor_state and actor_state.get("State") == "DEAD"
+        except Exception:
+            return False
+
+    def _handle_actor_failure(self, model_id: str, phase: str) -> None:
+        """Handle actor failure during initialization or loading."""
+        logger.error(f"Actor {model_id} DIED during {phase}")
+        logger.error(f"Check logs: ray logs {self._get_actor_name(model_id)}")
+        self._cleanup_actor_state(model_id)
+        self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
 
     def _get_actor_or_raise(self, model_id: str) -> SGLangSamplingActor:
         """Get actor or raise ValueError if not found."""

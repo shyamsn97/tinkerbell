@@ -161,6 +161,7 @@ class SampleRequest(StrictBase):
 class LoadCheckpointRequest(StrictBase):
     model_id: ModelID
     checkpoint_path: str
+    pin_lora: bool = False
 
 
 class ShutdownSamplingActorRequest(StrictBase):

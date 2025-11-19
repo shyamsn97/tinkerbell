@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any, Optional
 
@@ -20,6 +21,8 @@ from tinkerbell.types.responses import (
     ForwardResponse,
     SaveCheckpointResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class HuggingFaceTokenizer:
@@ -52,6 +55,8 @@ class TrainingClient:
         server_url: str,
         model_id: str,
         timeout: float = 600.0,
+        lora_enabled: bool = False,
+        lora_config: Optional[dict[str, Any]] = None,
     ):
         """
         Initialize the training client.
@@ -59,10 +64,14 @@ class TrainingClient:
         Args:
             server_url: Server URL of the training service
             timeout: Request timeout in seconds
+            lora_enabled: Whether LoRA was enabled for training
+            lora_config: LoRA configuration dict
             tokenizer: Optional pre-loaded tokenizer
         """
         self.server_url = server_url
         self.timeout = timeout
+        self.lora_enabled = lora_enabled
+        self.lora_config = lora_config
 
         # Configure timeout with separate values for connect and read
         # This helps with VPN/proxy environments
@@ -125,11 +134,11 @@ class TrainingClient:
         while True:
             status = self.get_actor_status()
             if verbose:
-                print(f"Actor status: {status.status}")
+                logger.info(f"Actor status: {status.status}")
 
             if status.status == "ready":
                 if verbose:
-                    print("Actors are ready!")
+                    logger.info("Actors are ready!")
                 break
 
             time.sleep(poll_interval)
@@ -312,7 +321,7 @@ class TrainingClient:
         # Step 1: Save the checkpoint
         self.save_checkpoint(checkpoint_path)
 
-        # Step 2: Create sampling actor
+        # Step 2: Create sampling actor (LoRA defaults handled by SamplingActor)
         request = CreateSamplingActorRequest(
             model_id=self.model_id,
             tp_size=tp_size or 1,
@@ -335,11 +344,13 @@ class TrainingClient:
             model_id=self.model_id,
             timeout=self.timeout,
         )
-        _ = sampling_client.load_checkpoint(checkpoint_path)
 
-        # Step 4: Wait until ready if requested
+        # Step 4: Wait until model is loaded
         if wait_until_ready:
             sampling_client.wait_until_ready()
+
+        # Step 5: Load the checkpoint AFTER the model is initialized
+        _ = sampling_client.load_checkpoint(checkpoint_path)
 
         return sampling_client
 

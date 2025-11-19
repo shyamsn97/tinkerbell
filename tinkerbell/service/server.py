@@ -51,7 +51,7 @@ class TinkerbellServiceDeployment:
         clock_cycle: float = 10.0,
     ):
         self.server_url = server_url
-        print(
+        logger.info(
             f"initializing training manager with max_wait_time: {max_wait_time} and clock_cycle: {clock_cycle}"
         )
         self.training_manager = TrainingManager(
@@ -126,10 +126,10 @@ class TinkerbellServiceDeployment:
     ) -> ForwardBackwardResponse:
         if not self.training_manager.running:
             await self.training_manager.start()
-        print(f"Request: {request}")
-        print(f"Request data: {request.data}, type: {type(request.data)}")
-        print(f"Request forward_kwargs: {request.forward_kwargs}")
-        print(f"Request return_logprobs: {request.return_logprobs}")
+        logger.debug(f"Request: {request}")
+        logger.debug(f"Request data: {request.data}, type: {type(request.data)}")
+        logger.debug(f"Request forward_kwargs: {request.forward_kwargs}")
+        logger.debug(f"Request return_logprobs: {request.return_logprobs}")
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
             model_id=request.model_id,
             data=request.data,
@@ -245,6 +245,7 @@ class TinkerbellServiceDeployment:
             _ = await self.sampling_manager.load_checkpoint(
                 model_id=request.model_id,
                 checkpoint_path=request.checkpoint_path,
+                pin_lora=request.pin_lora,
             )
             return LoadCheckpointResponse(
                 model_id=request.model_id,
@@ -350,10 +351,10 @@ def deploy_on_modal(
             "tinkerbell-service", "deploy_on_modal.<locals>.serve"
         )
         existing_url = existing_function.web_url
-        print(f"Server already exists at: {existing_url}")
+        logger.info(f"Server already exists at: {existing_url}")
         return existing_url
     except (modal.exception.NotFoundError, Exception):
-        print("No existing server found, deploying new one...")
+        logger.info("No existing server found, deploying new one...")
 
     app = modal.App(name="tinkerbell-service")
 
@@ -400,6 +401,7 @@ def deploy_on_modal(
             "hf_transfer",
             "ray",
             "ray[serve]",
+            "peft",
         )
         .env(env_variables)
     )

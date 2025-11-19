@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from enum import Enum
@@ -15,6 +16,8 @@ from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import get_free_port
+
+logger = logging.getLogger(__name__)
 
 
 class ActorStatus(Enum):
@@ -39,7 +42,7 @@ class ActorGroup:
 
     async def get_status(self) -> ActorStatus:
         if self.status == ActorStatus.INITIALIZING:
-            self._check_initialization_complete()
+            await self._check_initialization_complete()
         return self.status
 
     async def wait_until_ready(self) -> bool:
@@ -87,14 +90,15 @@ class ActorGroup:
         await asyncio.gather(*refs)
 
     # Private helper methods
-    def _check_initialization_complete(self) -> None:
+    async def _check_initialization_complete(self) -> None:
         """Check if all workers have completed initialization."""
         ready, _ = ray.wait(
             self.setup_refs, num_returns=len(self.setup_refs), timeout=0
         )
         if len(ready) == len(self.setup_refs):
+            # Await the setup refs to check for any exceptions during initialization
+            await asyncio.gather(*[ref for ref in self.setup_refs])
             self.status = ActorStatus.READY
-            ray.get(self.setup_refs)
 
     async def _ensure_ready(self) -> None:
         """Ensure actors are ready, raise HTTPException if not."""
@@ -228,7 +232,7 @@ class ActorGroup:
                 worker = ray.get_actor(actor_info["name"], namespace="tinkerbell")
                 workers.append(worker)
 
-            print(
+            logger.info(
                 f"Reconnected to {len(workers)} existing training actors for model {model_id}"
             )
             return cls(
@@ -238,7 +242,7 @@ class ActorGroup:
                 max_wait_time=max_wait_time,
             )
         except Exception as e:
-            print(f"Failed to reconnect to existing actors: {e}")
+            logger.error(f"Failed to reconnect to existing actors: {e}")
             import traceback
 
             traceback.print_exc()

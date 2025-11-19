@@ -1,3 +1,4 @@
+import logging
 import time
 
 import httpx
@@ -14,6 +15,8 @@ from tinkerbell.types.responses import (
     SampleResponse,
     ShutdownSamplingActorResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SamplingClient:
@@ -83,14 +86,35 @@ class SamplingClient:
         last_status = None
         last_print_time = start_time
 
+        # Compute actor name for debugging
+        actor_name = self.model_id.replace("/", "_").replace(":", "_").lower()
+        actor_name = f"sampling_actor_{actor_name}"
+
+        if verbose:
+            logger.info("=" * 80)
+            logger.info("Waiting for sampling actor to be ready...")
+            logger.info(f"  Model: {self.model_id}")
+            logger.info(f"  Actor name: {actor_name}")
+            logger.info(f"  Timeout: {timeout}s")
+            logger.info(f"To check actor logs: ray logs {actor_name}")
+            logger.info("=" * 80)
+
         while True:
             elapsed = time.time() - start_time
 
             if elapsed > timeout:
-                raise TimeoutError(
+                error_msg = (
                     f"Sampling actor did not become ready within {timeout}s. "
-                    f"Last status: {last_status}"
+                    f"Last status: {last_status}\n"
+                    f"Actor name: {actor_name}\n"
+                    f"Check Ray logs with: ray logs {actor_name}\n"
+                    f"Or check all Ray logs at: /tmp/ray/session_latest/logs/"
                 )
+                logger.error("=" * 80)
+                logger.error("TIMEOUT ERROR:")
+                logger.error(error_msg)
+                logger.error("=" * 80)
+                raise TimeoutError(error_msg)
 
             status = self.get_status()
 
@@ -99,21 +123,28 @@ class SamplingClient:
             should_print_interval = (time.time() - last_print_time) >= 30
 
             if verbose and (status_changed or should_print_interval):
-                print(f"[{elapsed:.1f}s] Sampling actor status: {status.status}")
+                logger.info(f"[{elapsed:.1f}s] Sampling actor status: {status.status}")
                 last_print_time = time.time()
 
             last_status = status.status
 
             if status.status == "ready":
                 if verbose:
-                    print(f"✓ Sampling actor is ready! (took {elapsed:.1f}s)")
+                    logger.info(f"✓ Sampling actor is ready! (took {elapsed:.1f}s)")
                 break
             elif status.status == "not_present":
-                raise RuntimeError(
+                error_msg = (
                     f"Sampling actor became 'not_present' after {elapsed:.1f}s. "
-                    f"This usually means the actor crashed during initialization or checkpoint loading. "
-                    f"Check the Ray logs with: ray logs <actor_name>"
+                    f"This usually means the actor crashed during initialization or checkpoint loading.\n"
+                    f"Actor name: {actor_name}\n"
+                    f"Check Ray logs with: ray logs {actor_name}\n"
+                    f"Or check all Ray logs at: /tmp/ray/session_latest/logs/"
                 )
+                logger.error("=" * 80)
+                logger.error("ACTOR CRASHED:")
+                logger.error(error_msg)
+                logger.error("=" * 80)
+                raise RuntimeError(error_msg)
 
             time.sleep(poll_interval)
 
@@ -167,6 +198,7 @@ class SamplingClient:
     def load_checkpoint(
         self,
         checkpoint_path: str,
+        pin_lora: bool = False,
     ) -> LoadCheckpointResponse:
         """
         Start loading a checkpoint from a directory (async operation).
@@ -183,6 +215,7 @@ class SamplingClient:
         request = LoadCheckpointRequest(
             model_id=self.model_id,
             checkpoint_path=checkpoint_path,
+            pin_lora=pin_lora,
         )
 
         response = self.client.post(

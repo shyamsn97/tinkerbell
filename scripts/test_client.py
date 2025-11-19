@@ -1,5 +1,19 @@
+"""
+Test client for Tinkerbell training and inference with LoRA.
+
+This script demonstrates:
+1. Deploying a Modal server with tensor parallelism
+2. Creating training actors with LoRA (Low-Rank Adaptation) configuration
+3. Training with LoRA adapters for parameter-efficient fine-tuning
+4. Saving LoRA-adapted weights and transitioning to inference
+5. Running multithreaded and sequential inference tests
+
+LoRA significantly reduces memory usage and training time by only training
+low-rank adapter matrices while keeping the base model weights frozen.
+"""
+
 from tinkerbell.client import TrainingClient, ServiceClient
-from tinkerbell.types import ModalDeployConfig
+from tinkerbell.types import ModalDeployConfig, LoraConfig
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.model_input import ModelInput
 from tqdm import tqdm
@@ -42,12 +56,29 @@ for actor_name in ray_actors_response.actor_names:
     print(f"  - {actor_name}")
 print()
 
+# ============================================================================
+# LoRA CONFIGURATION
+# ============================================================================
+print("\nConfiguring LoRA (Low-Rank Adaptation) for efficient fine-tuning...")
+lora_config = LoraConfig(
+    rank=8,  # LoRA rank - higher = more parameters, better quality
+    seed=42,  # For reproducible initialization
+    train_unembed=False,  # Apply LoRA to the output embedding layer
+    train_mlp=True,  # Apply LoRA to MLP/FFN layers
+    train_attn=True,  # Apply LoRA to attention layers (Q, K, V, O projections)
+)
+
+print(f"LoRA Config: rank={lora_config.rank}, "
+      f"train_attn={lora_config.train_attn}, "
+      f"train_mlp={lora_config.train_mlp}, "
+      f"train_unembed={lora_config.train_unembed}")
 
 training_client = service_client.create_training_client(
     model_id="Qwen/Qwen3-0.6B",
     tp_size=2,
     parallelize_plan=parallelize_plan,
     initialize_random_weights=False,
+    lora_config=lora_config.model_dump(),  # Enable LoRA training (convert to dict)
 )
 training_client.wait_until_ready()
 
@@ -137,45 +168,48 @@ for i in range(len(formatted_messages)):
     )
     training_data.append(datum)
 
-# Training loop: Run multiple iterations with gradient descent
+# Training loop: Run multiple iterations with gradient descent using LoRA!
+# Note: Only LoRA adapter parameters are trained, base model weights are frozen
 num_training_steps = 5
-print(f"\nRunning {num_training_steps} training steps...")
+print(f"\nRunning {num_training_steps} training steps with LoRA adapters...")
 
-# bar = tqdm(range(num_training_steps), desc="Training steps")
-# for step in bar:
+bar = tqdm(range(num_training_steps), desc="Training steps")
+for step in bar:
 
-#     # Zero gradients
-#     training_client.zero_grad()
+    # Zero gradients (only for LoRA parameters)
+    training_client.zero_grad()
 
-#     # Forward-backward pass
-#     response = training_client.forward_backward(
-#         data=training_data,
-#         forward_kwargs={},
-#     )
+    # Forward-backward pass (only LoRA parameters will accumulate gradients!)
+    response = training_client.forward_backward(
+        data=training_data,
+        forward_kwargs={},
+    )
 
-#     # Get the result
-#     result = training_client.get_result(response.request_id)
-#     losses = result.get("loss", [])
+    # Get the result
+    result = training_client.get_result(response.request_id)
+    losses = result.get("loss", [])
 
-#     if losses:
-#         avg_loss = sum(losses) / len(losses)
-#         bar.set_description(f"Loss: {avg_loss:.4f}")
+    if losses:
+        avg_loss = sum(losses) / len(losses)
+        bar.set_description(f"LoRA Training - Step {step+1}/{num_training_steps} - Loss: {avg_loss:.4f}")
     
-#     # Optimizer step with AdamW
-#     training_client.optim_step(
-#         optimizer_params={
-#             "name": "adamw",
-#             "lr": 1e-4,
-#             "weight_decay": 0.01,
-#         }
-#     )
+    # Optimizer step with AdamW (only updates LoRA adapter parameters!)
+    training_client.optim_step(
+        optimizer_params={
+            "name": "adamw",
+            "lr": 1e-4,
+            "weight_decay": 0.01,
+        }
+    )
 
 print("\n" + "=" * 70)
-print("Training complete! Loss should have decreased over iterations.")
+print("LoRA Training complete! Loss should have decreased over iterations.")
+print("Only LoRA adapter parameters were trained (base model frozen).")
 print("=" * 70 + "\n")
 
 # After training, save weights and get inference client
-print("Saving trained model weights...")
+print("Saving LoRA-adapted model weights...")
+# Note: LoRA support is automatically enabled because training was done with LoRA
 sampling_client = training_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/saved-qwen",
     tp_size=1,
