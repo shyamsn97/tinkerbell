@@ -49,30 +49,30 @@ from tinkerbell.types.request_id import RequestID
 # Requests
 from tinkerbell.types.requests import (
     ActorStatusRequest,
-    CreateInferenceActorRequest,
+    CreateSamplingActorRequest,
     CreateTrainingActorsRequest,
     ForwardBackwardRequest,
     ForwardRequest,
-    GenerateRequest,
     LoadCheckpointRequest,
+    SampleRequest,
     SaveCheckpointRequest,
-    ShutdownInferenceActorRequest,
+    ShutdownSamplingActorRequest,
 )
 
 # Responses
 from tinkerbell.types.responses import (
     ActorStatusResponse,
-    CreateInferenceActorResponse,
+    CreateSamplingActorResponse,
     CreateTrainingActorsResponse,
     ForwardBackwardResponse,
     ForwardResponse,
-    GenerateResponse,
     GetRayActorsResponse,
     HealthResponse,
     LoadCheckpointResponse,
     RemoteFuture,
+    SampleResponse,
     SaveCheckpointResponse,
-    ShutdownInferenceActorResponse,
+    ShutdownSamplingActorResponse,
 )
 from tinkerbell.types.save_weights_request import SaveWeightsRequest
 from tinkerbell.types.save_weights_response import SaveWeightsResponse
@@ -121,25 +121,25 @@ __all__ = [
     "ZeroGradResponse",
     # Requests
     "ActorStatusRequest",
-    "CreateInferenceActorRequest",
+    "CreateSamplingActorRequest",
     "CreateTrainingActorsRequest",
     "ForwardBackwardRequest",
     "ForwardRequest",
-    "GenerateRequest",
+    "SampleRequest",
     "LoadCheckpointRequest",
     "SaveCheckpointRequest",
-    "ShutdownInferenceActorRequest",
+    "ShutdownSamplingActorRequest",
     # Responses
     "ActorStatusResponse",
-    "CreateInferenceActorResponse",
+    "CreateSamplingActorResponse",
     "CreateTrainingActorsResponse",
     "ForwardBackwardResponse",
     "ForwardResponse",
-    "GenerateResponse",
+    "SampleResponse",
     "GetRayActorsResponse",
     "HealthResponse",
     "LoadCheckpointResponse",
     "RemoteFuture",
     "SaveCheckpointResponse",
-    "ShutdownInferenceActorResponse",
+    "ShutdownSamplingActorResponse",
 ]

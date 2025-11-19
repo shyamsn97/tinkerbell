@@ -4,20 +4,20 @@ import httpx
 
 from tinkerbell.types.requests import (
     ActorStatusRequest,
-    GenerateRequest,
     LoadCheckpointRequest,
-    ShutdownInferenceActorRequest,
+    SampleRequest,
+    ShutdownSamplingActorRequest,
 )
 from tinkerbell.types.responses import (
     ActorStatusResponse,
-    GenerateResponse,
     LoadCheckpointResponse,
-    ShutdownInferenceActorResponse,
+    SampleResponse,
+    ShutdownSamplingActorResponse,
 )
 
 
-class InferenceClient:
-    """Client for interacting with the Tinkerbell inference service."""
+class SamplingClient:
+    """Client for interacting with the Tinkerbell sampling service."""
 
     def __init__(
         self,
@@ -26,10 +26,10 @@ class InferenceClient:
         timeout: float = 600.0,
     ):
         """
-        Initialize the inference client.
+        Initialize the sampling client.
 
         Args:
-            server_url: Server URL of the inference service
+            server_url: Server URL of the sampling service
             model_id: ID of the model
             timeout: Request timeout in seconds
         """
@@ -72,7 +72,7 @@ class InferenceClient:
         timeout: float = 900.0,
     ) -> None:
         """
-        Poll the server until the inference actor is ready.
+        Poll the server until the sampling actor is ready.
 
         Args:
             poll_interval: Time between status checks in seconds
@@ -88,7 +88,7 @@ class InferenceClient:
 
             if elapsed > timeout:
                 raise TimeoutError(
-                    f"Inference actor did not become ready within {timeout}s. "
+                    f"Sampling actor did not become ready within {timeout}s. "
                     f"Last status: {last_status}"
                 )
 
@@ -99,18 +99,18 @@ class InferenceClient:
             should_print_interval = (time.time() - last_print_time) >= 30
 
             if verbose and (status_changed or should_print_interval):
-                print(f"[{elapsed:.1f}s] Inference actor status: {status.status}")
+                print(f"[{elapsed:.1f}s] Sampling actor status: {status.status}")
                 last_print_time = time.time()
 
             last_status = status.status
 
             if status.status == "ready":
                 if verbose:
-                    print(f"✓ Inference actor is ready! (took {elapsed:.1f}s)")
+                    print(f"✓ Sampling actor is ready! (took {elapsed:.1f}s)")
                 break
             elif status.status == "not_present":
                 raise RuntimeError(
-                    f"Inference actor became 'not_present' after {elapsed:.1f}s. "
+                    f"Sampling actor became 'not_present' after {elapsed:.1f}s. "
                     f"This usually means the actor crashed during initialization or checkpoint loading. "
                     f"Check the Ray logs with: ray logs <actor_name>"
                 )
@@ -119,50 +119,50 @@ class InferenceClient:
 
     def get_status(self) -> ActorStatusResponse:
         """
-        Get the status of the inference actor.
+        Get the status of the sampling actor.
 
         Returns:
             ActorStatusResponse with current status
         """
         request = ActorStatusRequest(model_id=self.model_id)
         response = self.client.post(
-            "/get_inference_actor_status",
+            "/get_sampling_actor_status",
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
         return ActorStatusResponse(**response.json())
 
-    def generate(
+    def sample(
         self,
         *args,
         **kwargs,
-    ) -> list[str]:
+    ) -> SampleResponse:
         """
-        Generate text from the request.
+        Sample text from the request.
 
         Args:
-            *args: Positional arguments to pass to the GenerateRequest
-            **kwargs: Keyword arguments to pass to the GenerateRequest
+            *args: Positional arguments to pass to the SampleRequest
+            **kwargs: Keyword arguments to pass to the SampleRequest
 
         Returns:
-            List of generated text strings
+            SampleResponse with outputs, logprobs, and other metadata
         """
         # Always include model_id from the client
         if "model_id" not in kwargs:
             kwargs["model_id"] = self.model_id
 
-        request = GenerateRequest(
+        request = SampleRequest(
             *args,
             **kwargs,
         )
 
         response = self.client.post(
-            "/generate",
+            "/sample",
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
-        result = GenerateResponse(**response.json())
-        return result.outputs
+        result = SampleResponse(**response.json())
+        return result
 
     def load_checkpoint(
         self,
@@ -193,21 +193,21 @@ class InferenceClient:
         response.raise_for_status()
         return LoadCheckpointResponse(**response.json())
 
-    def shutdown(self) -> ShutdownInferenceActorResponse:
+    def shutdown(self) -> ShutdownSamplingActorResponse:
         """
-        Shutdown the inference actor.
+        Shutdown the sampling actor.
 
         Returns:
-            ShutdownInferenceActorResponse with success status and message
+            ShutdownSamplingActorResponse with success status and message
         """
-        request = ShutdownInferenceActorRequest(model_id=self.model_id)
+        request = ShutdownSamplingActorRequest(model_id=self.model_id)
 
         response = self.client.post(
-            "/shutdown_inference_actor",
+            "/shutdown_sampling_actor",
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
-        return ShutdownInferenceActorResponse(**response.json())
+        return ShutdownSamplingActorResponse(**response.json())
 
     def close(self):
         """Close the HTTP client."""

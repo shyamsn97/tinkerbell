@@ -1,5 +1,5 @@
-from tinkerbell.client.inference import InferenceClient
+from tinkerbell.client.sampling import SamplingClient
 from tinkerbell.client.service import ServiceClient
 from tinkerbell.client.training import TrainingClient
 
-__all__ = ["InferenceClient", "TrainingClient", "ServiceClient"]
+__all__ = ["SamplingClient", "TrainingClient", "ServiceClient"]

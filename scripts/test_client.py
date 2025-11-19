@@ -194,7 +194,7 @@ print("=" * 70)
 print("Multithreaded request to generate...")
 start_time = time.time()
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [executor.submit(sampling_client.generate, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+    futures = [executor.submit(sampling_client.sample, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
     for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
         outputs = future.result()
 print(f"Time taken: {time.time() - start_time} seconds")
@@ -203,7 +203,7 @@ print("=" * 70)
 print("Sequential request to generate...")
 start_time = time.time()
 for i in tqdm(range(len(messages)), desc="Sequential requests"):
-    outputs = sampling_client.generate(
+    outputs = sampling_client.sample(
         input_ids=encoded["input_ids"].slice(i),
         sampling_params={
             "max_new_tokens": 512,
@@ -215,7 +215,7 @@ print(f"Time taken: {time.time() - start_time} seconds")
 print("Multithreaded request to generate run # 2...")
 start_time = time.time()
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [executor.submit(sampling_client.generate, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+    futures = [executor.submit(sampling_client.sample, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
     for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
         outputs = future.result()
 print("Outputs: ", outputs)
@@ -224,7 +224,7 @@ print("=" * 70)
 
 print("Sequential request to generate run # 2...")
 for i in tqdm(range(len(messages)), desc="Sequential requests"):
-    outputs = sampling_client.generate(
+    outputs = sampling_client.sample(
         input_ids=encoded["input_ids"].slice(i),
         sampling_params={
             "max_new_tokens": 100,

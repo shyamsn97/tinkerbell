@@ -6,28 +6,28 @@ import ray
 from fastapi import FastAPI
 from ray import serve
 
-from tinkerbell.inference.manager import InferenceManager
+from tinkerbell.sampling.manager import SamplingManager
 from tinkerbell.training.manager import TrainingManager
 from tinkerbell.types import (
     ActorStatusRequest,
     ActorStatusResponse,
-    CreateInferenceActorRequest,
-    CreateInferenceActorResponse,
+    CreateSamplingActorRequest,
+    CreateSamplingActorResponse,
     CreateTrainingActorsRequest,
     CreateTrainingActorsResponse,
     ForwardBackwardRequest,
     ForwardBackwardResponse,
-    GenerateRequest,
-    GenerateResponse,
     GetRayActorsResponse,
     HealthResponse,
     LoadCheckpointRequest,
     LoadCheckpointResponse,
     RemoteFuture,
+    SampleRequest,
+    SampleResponse,
     SaveCheckpointRequest,
     SaveCheckpointResponse,
-    ShutdownInferenceActorRequest,
-    ShutdownInferenceActorResponse,
+    ShutdownSamplingActorRequest,
+    ShutdownSamplingActorResponse,
 )
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.optimizer import (
@@ -58,7 +58,7 @@ class TinkerbellServiceDeployment:
             max_wait_time=max_wait_time,
             clock_cycle=clock_cycle,
         )
-        self.inference_manager = InferenceManager()
+        self.sampling_manager = SamplingManager()
 
     @APP.post("/zero_grad")
     async def zero_grad(self, request: ZeroGradRequest) -> ZeroGradResponse:
@@ -179,42 +179,40 @@ class TinkerbellServiceDeployment:
             actor_names=actor_names,
         )
 
-    @APP.post("/create_inference_actor")
-    async def create_inference_actor(
+    @APP.post("/create_sampling_actor")
+    async def create_sampling_actor(
         self,
-        request: CreateInferenceActorRequest,
-    ) -> CreateInferenceActorResponse:
-        _ = self.inference_manager.create_inference_actor(
+        request: CreateSamplingActorRequest,
+    ) -> CreateSamplingActorResponse:
+        _ = self.sampling_manager.create_sampling_actor(
             model_id=request.model_id,
             tp_size=request.tp_size,
             engine_kwargs=request.engine_kwargs,
         )
-        return CreateInferenceActorResponse(
+        return CreateSamplingActorResponse(
             success=True,
-            message=f"Inference actor for model {request.model_id} created...",
+            message=f"Sampling actor for model {request.model_id} created...",
         )
 
-    @APP.post("/get_inference_actor_status")
-    async def get_inference_actor_status(
+    @APP.post("/get_sampling_actor_status")
+    async def get_sampling_actor_status(
         self,
         request: ActorStatusRequest,
     ) -> ActorStatusResponse:
-        status = await self.inference_manager.get_inference_actor_status(
-            request.model_id
-        )
+        status = await self.sampling_manager.get_sampling_actor_status(request.model_id)
         return ActorStatusResponse(
             status=status.value,
-            message=f"Inference actor status for model {request.model_id} is {status.value}",
+            message=f"Sampling actor status for model {request.model_id} is {status.value}",
         )
 
-    @APP.post("/generate")
-    async def generate(
+    @APP.post("/sample")
+    async def sample(
         self,
-        request: GenerateRequest,
-    ) -> GenerateResponse:
-        inference_actor = self.inference_manager.get_inference_actor(request.model_id)
-        if inference_actor is None:
-            raise ValueError(f"Inference actor for model {request.model_id} not found")
+        request: SampleRequest,
+    ) -> SampleResponse:
+        sampling_actor = self.sampling_manager.get_sampling_actor(request.model_id)
+        if sampling_actor is None:
+            raise ValueError(f"Sampling actor for model {request.model_id} not found")
 
         request_dict = model_to_dict(request, exclude=["model_id"], exclude_none=True)
 
@@ -226,10 +224,15 @@ class TinkerbellServiceDeployment:
         if isinstance(request.input_embeds, TensorData):
             request_dict["input_embeds"] = request.input_embeds.tolist()
 
-        ref = inference_actor.generate.remote(request_dict)
-        outputs = await ref
-        return GenerateResponse(
-            outputs=outputs,
+        ref = sampling_actor.sample.remote(request_dict)
+        result = await ref
+        return SampleResponse(
+            outputs=result.get("outputs", []),
+            logprobs=result.get("logprobs"),
+            top_logprobs=result.get("top_logprobs"),
+            output_token_ids=result.get("output_token_ids"),
+            finish_reasons=result.get("finish_reasons"),
+            meta_info=result.get("meta_info"),
         )
 
     @APP.post("/load_checkpoint")
@@ -238,14 +241,14 @@ class TinkerbellServiceDeployment:
         request: LoadCheckpointRequest,
     ) -> LoadCheckpointResponse:
         try:
-            _ = await self.inference_manager.load_checkpoint(
+            _ = await self.sampling_manager.load_checkpoint(
                 model_id=request.model_id,
                 checkpoint_path=request.checkpoint_path,
             )
             return LoadCheckpointResponse(
                 model_id=request.model_id,
                 success=True,
-                message=f"Checkpoint loading started from {request.checkpoint_path}. Use get_inference_actor_status to check when ready.",
+                message=f"Checkpoint loading started from {request.checkpoint_path}. Use get_sampling_actor_status to check when ready.",
             )
         except Exception as e:
             return LoadCheckpointResponse(
@@ -254,23 +257,23 @@ class TinkerbellServiceDeployment:
                 message=f"Failed to start checkpoint loading: {str(e)}",
             )
 
-    @APP.post("/shutdown_inference_actor")
-    async def shutdown_inference_actor(
+    @APP.post("/shutdown_sampling_actor")
+    async def shutdown_sampling_actor(
         self,
-        request: ShutdownInferenceActorRequest,
-    ) -> ShutdownInferenceActorResponse:
+        request: ShutdownSamplingActorRequest,
+    ) -> ShutdownSamplingActorResponse:
         try:
-            _ = await self.inference_manager.shutdown(model_id=request.model_id)
-            return ShutdownInferenceActorResponse(
+            _ = await self.sampling_manager.shutdown(model_id=request.model_id)
+            return ShutdownSamplingActorResponse(
                 model_id=request.model_id,
                 success=True,
-                message=f"Inference actor for model {request.model_id} shut down successfully",
+                message=f"Sampling actor for model {request.model_id} shut down successfully",
             )
         except Exception as e:
-            return ShutdownInferenceActorResponse(
+            return ShutdownSamplingActorResponse(
                 model_id=request.model_id,
                 success=False,
-                message=f"Failed to shutdown inference actor: {str(e)}",
+                message=f"Failed to shutdown sampling actor: {str(e)}",
             )
 
 

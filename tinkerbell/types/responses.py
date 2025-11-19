@@ -54,14 +54,24 @@ class SaveCheckpointResponse(BaseModel):
     path: Optional[str] = None
 
 
-class CreateInferenceActorResponse(BaseModel):
+class CreateSamplingActorResponse(BaseModel):
     success: bool
     message: str | None = None
 
 
-class GenerateResponse(BaseModel):
+class SampleResponse(BaseModel):
     outputs: list[str]
     tokens_generated: int | None = None
+    # Logprobs for each token in the output. Can be logits if logprobs not available from backend
+    logprobs: list[list[float]] | None = None
+    # Top k logprobs for each position (if requested)
+    top_logprobs: list[dict[str, float]] | None = None
+    # Token IDs for the generated text
+    output_token_ids: list[list[int]] | None = None
+    # Finish reasons for each sequence
+    finish_reasons: list[str] | None = None
+    # Metadata about the sampling process
+    meta_info: dict[str, Any] | None = None
 
 
 class LoadCheckpointResponse(BaseModel):
@@ -70,7 +80,7 @@ class LoadCheckpointResponse(BaseModel):
     message: str | None = None
 
 
-class ShutdownInferenceActorResponse(BaseModel):
+class ShutdownSamplingActorResponse(BaseModel):
     model_id: ModelID
     success: bool
     message: str | None = None

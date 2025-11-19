@@ -59,13 +59,13 @@ class ActorStatusRequest(StrictBase):
     model_id: ModelID
 
 
-class CreateInferenceActorRequest(StrictBase):
+class CreateSamplingActorRequest(StrictBase):
     model_id: ModelID
     tp_size: int
     engine_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 
 
-class GenerateRequest(StrictBase):
+class SampleRequest(StrictBase):
     model_id: Optional[ModelID] = None
     # The input prompt. It can be a single prompt or a batch of prompts.
     text: Optional[Union[List[str], str]] = None
@@ -101,7 +101,7 @@ class GenerateRequest(StrictBase):
     return_text_in_logprobs: bool = False
     # Whether to stream output.
     stream: bool = False
-    # Whether to log metrics for this request (e.g. health_generate calls do not log metrics)
+    # Whether to log metrics for this request (e.g. health_sample calls do not log metrics)
     log_metrics: bool = True
     # Whether to return hidden states
     return_hidden_states: Union[List[bool], bool] = False
@@ -121,7 +121,7 @@ class GenerateRequest(StrictBase):
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[Union[List[Optional[str]], str]] = None
 
-    # For disaggregated inference
+    # For disaggregated sampling
     bootstrap_host: Optional[Union[List[str], str]] = None
     bootstrap_port: Optional[Union[List[Optional[int]], int]] = None
     bootstrap_room: Optional[Union[List[int], int]] = None
@@ -163,5 +163,5 @@ class LoadCheckpointRequest(StrictBase):
     checkpoint_path: str
 
 
-class ShutdownInferenceActorRequest(StrictBase):
+class ShutdownSamplingActorRequest(StrictBase):
     model_id: ModelID

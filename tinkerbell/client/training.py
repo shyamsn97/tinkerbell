@@ -4,18 +4,18 @@ from typing import Any, Optional
 import httpx
 from transformers import AutoTokenizer
 
-from tinkerbell.client.inference import InferenceClient
+from tinkerbell.client.sampling import SamplingClient
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.requests import (
     ActorStatusRequest,
-    CreateInferenceActorRequest,
+    CreateSamplingActorRequest,
     ForwardRequest,
     SaveCheckpointRequest,
 )
 from tinkerbell.types.responses import (
     ActorStatusResponse,
-    CreateInferenceActorResponse,
+    CreateSamplingActorResponse,
     ForwardBackwardResponse,
     ForwardResponse,
     SaveCheckpointResponse,
@@ -294,54 +294,54 @@ class TrainingClient:
         tp_size: Optional[int] = None,
         engine_kwargs: Optional[dict[str, Any]] = None,
         wait_until_ready: bool = True,
-    ) -> "InferenceClient":
+    ) -> "SamplingClient":
         """
-        Save model weights and return a loaded inference client for generation.
+        Save model weights and return a loaded sampling client for generation.
 
         Args:
             checkpoint_path: Path where checkpoint should be saved
-            tp_size: Tensor parallel size for inference (defaults to 1)
+            tp_size: Tensor parallel size for sampling (defaults to 1)
             engine_kwargs: SGLang engine configuration parameters
-            wait_until_ready: Whether to block until inference actor is ready
+            wait_until_ready: Whether to block until sampling actor is ready
 
         Returns:
-            InferenceClient instance ready for generation
+            SamplingClient instance ready for sampling
         """
-        from tinkerbell.client.inference import InferenceClient
+        from tinkerbell.client.sampling import SamplingClient
 
         # Step 1: Save the checkpoint
         self.save_checkpoint(checkpoint_path)
 
-        # Step 2: Create inference actor
-        request = CreateInferenceActorRequest(
+        # Step 2: Create sampling actor
+        request = CreateSamplingActorRequest(
             model_id=self.model_id,
             tp_size=tp_size or 1,
             engine_kwargs=engine_kwargs or {},
         )
 
         response = self.client.post(
-            "/create_inference_actor",
+            "/create_sampling_actor",
             json=request.model_dump(),
         )
         response.raise_for_status()
-        result = CreateInferenceActorResponse(**response.json())
+        result = CreateSamplingActorResponse(**response.json())
 
         if not result.success:
-            raise RuntimeError(f"Failed to create inference actor: {result.message}")
+            raise RuntimeError(f"Failed to create sampling actor: {result.message}")
 
-        # Step 3: Create InferenceClient
-        inference_client = InferenceClient(
+        # Step 3: Create SamplingClient
+        sampling_client = SamplingClient(
             server_url=self.server_url,
             model_id=self.model_id,
             timeout=self.timeout,
         )
-        _ = inference_client.load_checkpoint(checkpoint_path)
+        _ = sampling_client.load_checkpoint(checkpoint_path)
 
         # Step 4: Wait until ready if requested
         if wait_until_ready:
-            inference_client.wait_until_ready()
+            sampling_client.wait_until_ready()
 
-        return inference_client
+        return sampling_client
 
     def close(self):
         """Close the HTTP client."""
