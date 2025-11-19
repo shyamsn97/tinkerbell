@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
+from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import get_free_port
@@ -142,6 +143,7 @@ class ActorGroup:
         parallelize_plan: dict[str, str],
         scheduler_params: dict[str, Any],
         ray_worker_options: dict[str, Any] = {},
+        lora_config: Optional[dict[str, Any]] = None,
         initialize_random_weights: bool = False,
         max_wait_time: float = 600.0,
     ) -> ActorGroup:
@@ -168,6 +170,7 @@ class ActorGroup:
                 model_kwargs=model_kwargs,
                 parallelize_plan=parallelize_plan,
                 scheduler_params=scheduler_params,
+                lora_config=lora_config,
                 initialize_random_weights=initialize_random_weights,
             )
             workers.append(worker)
@@ -349,6 +352,7 @@ class TrainingManager:
         parallelize_plan: dict[str, str],
         scheduler_params: dict[str, Any],
         ray_worker_options: dict[str, Any] = {},
+        lora_config: Optional[LoraConfig | dict[str, Any]] = None,
         initialize_random_weights: bool = False,
     ) -> str:
         """Create a training worker for the given model id."""
@@ -364,6 +368,14 @@ class TrainingManager:
         except Exception:
             pass
 
+        # Parse LoRA config if provided as dict
+        lora_config_dict = None
+        if lora_config is not None:
+            if isinstance(lora_config, dict):
+                lora_config_dict = lora_config
+            else:
+                lora_config_dict = lora_config.model_dump()
+
         # Create new actors if reconnection failed
         self.actor_groups[model_id] = ActorGroup.create_actor_group(
             world_size=world_size,
@@ -372,6 +384,7 @@ class TrainingManager:
             parallelize_plan=parallelize_plan,
             scheduler_params=scheduler_params,
             ray_worker_options=ray_worker_options,
+            lora_config=lora_config_dict,
             initialize_random_weights=initialize_random_weights,
             max_wait_time=self.max_wait_time,
         )

@@ -1,6 +1,6 @@
 import os
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import ray
 import torch
@@ -18,6 +18,7 @@ from torch.distributed.tensor.parallel import (
 
 from tinkerbell.training.loss import ForCausalLMLoss
 from tinkerbell.types.datum import Datum
+from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.types.loss_fn_type import LossFnType
 from tinkerbell.utils import get_submodules_with_wildcard
 
@@ -34,6 +35,7 @@ class TrainingActor:
         model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
         scheduler_params: dict[str, Any] = {},
+        lora_config: Optional[LoraConfig | dict[str, Any]] = None,
         initialize_random_weights: bool = False,
     ):
         self.rank = rank
@@ -48,6 +50,15 @@ class TrainingActor:
         self.model = None
         self.optimizer = None
         self.ready = False
+        
+        # Parse LoRA config
+        if lora_config is not None:
+            if isinstance(lora_config, dict):
+                self.lora_config = LoraConfig(**lora_config)
+            else:
+                self.lora_config = lora_config
+        else:
+            self.lora_config = None
 
     def _get_optimizer(
         self, model: torch.nn.Module, optimizer_config: dict[str, Any]
@@ -62,8 +73,11 @@ class TrainingActor:
             "adadelta": torch.optim.Adadelta,
         }
         optimizer_config["foreach"] = False
+        
+        # Only optimize parameters that require gradients (important for LoRA)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = optimizer_dict[optimizer_name](
-            model.parameters(), **optimizer_config
+            trainable_params, **optimizer_config
         )
         return optimizer
 
@@ -82,6 +96,71 @@ class TrainingActor:
         # Set CUDA device - Ray manages GPU assignment via CUDA_VISIBLE_DEVICES
         # Each actor sees only one GPU as device 0
         torch.cuda.set_device(0)
+
+    def _setup_lora(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Apply LoRA to the model using PEFT."""
+        if self.lora_config is None:
+            return model
+        
+        try:
+            from peft import LoraConfig as PeftLoraConfig, get_peft_model
+        except ImportError:
+            raise ImportError(
+                "PEFT library is required for LoRA support. "
+                "Install it with: pip install peft"
+            )
+        
+        print(f"[Rank {self.rank}] Applying LoRA with config: {self.lora_config}")
+        
+        # Build target modules list based on config
+        target_modules = []
+        
+        if self.lora_config.train_attn:
+            # Standard attention module names across different architectures
+            target_modules.extend([
+                "q_proj", "k_proj", "v_proj", "o_proj",  # LLaMA, Mistral, etc.
+                "qkv_proj",  # Some architectures use combined QKV
+                "query", "key", "value", "dense",  # BERT-style
+                "c_attn", "c_proj",  # GPT-2 style
+            ])
+        
+        if self.lora_config.train_mlp:
+            # Standard MLP module names
+            target_modules.extend([
+                "gate_proj", "up_proj", "down_proj",  # LLaMA, Mistral
+                "fc1", "fc2",  # Generic MLP
+                "mlp.c_fc", "mlp.c_proj",  # GPT-2 style
+                "dense_h_to_4h", "dense_4h_to_h",  # Some architectures
+            ])
+        
+        if self.lora_config.train_unembed:
+            target_modules.extend([
+                "lm_head",  # Standard language model head
+                "embed_out",  # Alternative naming
+            ])
+        
+        # Create PEFT LoRA config
+        peft_config = PeftLoraConfig(
+            r=self.lora_config.rank,
+            lora_alpha=self.lora_config.rank * 2,  # Common default: 2x rank
+            target_modules=target_modules,
+            lora_dropout=0.0,  # Can be made configurable if needed
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        
+        # Apply LoRA
+        model = get_peft_model(model, peft_config)
+        
+        # Print trainable parameters info
+        if self.rank == 0:
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in model.parameters())
+            print(f"[Rank {self.rank}] LoRA applied successfully!")
+            print(f"[Rank {self.rank}] Trainable params: {trainable_params:,} / {total_params:,} "
+                  f"({100 * trainable_params / total_params:.2f}%)")
+        
+        return model
 
     def _setup_tensor_parallel(self, model: torch.nn.Module) -> torch.nn.Module:
         # Define parallelization strategies
@@ -227,6 +306,11 @@ class TrainingActor:
             model = AutoModelForCausalLM.from_pretrained(
                 self.model_id, **self.model_kwargs
             )
+        
+        # Apply LoRA if configured (before tensor parallelism)
+        model = self._setup_lora(model)
+        
+        # Apply tensor parallelism
         self.model = self._setup_tensor_parallel(model)
 
         print(f"[Rank {self.rank}] Setup complete")
@@ -316,10 +400,29 @@ class TrainingActor:
     def save_model(self, save_dir: str):
         from transformers import AutoTokenizer
 
-        state_dict = self.get_model_state_dict(full_state_dict=True)
         if self.rank == 0:
             print(f"[Rank {self.rank}] Saving model to {save_dir}")
-            self.model.save_pretrained(save_dir, state_dict=state_dict)
+            
+            # Check if this is a PEFT model
+            if self.lora_config is not None:
+                # For LoRA models, save the adapter weights
+                # The base model is not saved, only the LoRA adapters
+                print(f"[Rank {self.rank}] Saving LoRA adapter weights")
+                self.model.save_pretrained(save_dir)
+                
+                # Also save a config file to indicate this is a LoRA checkpoint
+                import json
+                lora_info = {
+                    "is_lora": True,
+                    "base_model_id": self.model_id,
+                    "lora_config": self.lora_config.model_dump(),
+                }
+                with open(os.path.join(save_dir, "tinkerbell_lora_info.json"), "w") as f:
+                    json.dump(lora_info, f, indent=2)
+            else:
+                # For full fine-tuning, save the full model
+                state_dict = self.get_model_state_dict(full_state_dict=True)
+                self.model.save_pretrained(save_dir, state_dict=state_dict)
 
             # Also save the tokenizer - SGLang needs it to load the model
             print(f"[Rank {self.rank}] Saving tokenizer to {save_dir}")
