@@ -197,13 +197,24 @@ class ActorGroup:
             prefix = f"training_actor_{cleaned_name}_"
 
             # Find all actors with matching name pattern
-            all_actors = ray.util.list_named_actors(all_namespaces=False)
-            matching_actors = [
-                actor
-                for actor in all_actors
-                if actor["name"].startswith(prefix)
-                and actor["namespace"] == "tinkerbell"
-            ]
+            all_actors = ray.util.list_named_actors(all_namespaces=True)
+
+            # Handle different return formats from ray.util.list_named_actors()
+            matching_actors = []
+            for actor in all_actors:
+                # If actor is a string, it's just the actor name
+                if isinstance(actor, str):
+                    if actor.startswith(prefix):
+                        matching_actors.append(
+                            {"name": actor, "namespace": "tinkerbell"}
+                        )
+                # If actor is a dict, use it directly
+                elif isinstance(actor, dict):
+                    if (
+                        actor.get("name", "").startswith(prefix)
+                        and actor.get("namespace") == "tinkerbell"
+                    ):
+                        matching_actors.append(actor)
 
             if not matching_actors:
                 return None
@@ -225,6 +236,9 @@ class ActorGroup:
             )
         except Exception as e:
             print(f"Failed to reconnect to existing actors: {e}")
+            import traceback
+
+            traceback.print_exc()
             return None
 
 

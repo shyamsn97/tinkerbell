@@ -120,18 +120,46 @@ class SGLangInferenceActor:
         self, checkpoint_path: str, load_format: Optional[str] = None
     ) -> Dict[str, Any]:
         """Load model checkpoint from disk."""
-        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        import os
 
-        # Use SGLang server's update weights endpoint
-        response = self.client.post(
-            "/update_weights_from_disk",
-            json={
-                "model_path": checkpoint_path,
-                "load_format": load_format,
-            },
-        )
-        response.raise_for_status()
-        return response.json()
+        print("=" * 80)
+        print(f"Loading checkpoint from: {checkpoint_path}")
+        print(f"Checkpoint path exists: {os.path.exists(checkpoint_path)}")
+
+        if os.path.exists(checkpoint_path):
+            files_in_checkpoint = os.listdir(checkpoint_path)
+            print(f"Files in checkpoint directory: {files_in_checkpoint}")
+        else:
+            raise FileNotFoundError(
+                f"Checkpoint path does not exist: {checkpoint_path}"
+            )
+
+        print("=" * 80)
+
+        try:
+            # Use SGLang server's update weights endpoint
+            response = self.client.post(
+                "/update_weights_from_disk",
+                json={
+                    "model_path": checkpoint_path,
+                    "load_format": load_format,
+                },
+                timeout=600.0,
+            )
+            response.raise_for_status()
+            result = response.json()
+            print(f"✓ Checkpoint loaded successfully from {checkpoint_path}")
+            return result
+        except Exception as e:
+            print(f"✗ Failed to load checkpoint from {checkpoint_path}")
+            print(f"Error: {type(e).__name__}: {str(e)}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response text: {e.response.text}")
+            import traceback
+
+            traceback.print_exc()
+            raise
 
     def generate(
         self,
@@ -151,8 +179,33 @@ class SGLangInferenceActor:
         response.raise_for_status()
         result = response.json()
 
-        # Extract text from response
-        return [output["text"] for output in result]
+        # Handle different SGLang response formats
+        # SGLang can return:
+        # 1. A dictionary with "text" field: {"text": "..."}
+        # 2. A list of strings: ["text1", "text2"]
+        # 3. A list of dicts: [{"text": "..."}, {"text": "..."}]
+
+        if isinstance(result, dict):
+            # Single response as dictionary
+            if "text" in result:
+                return [result["text"]]
+            else:
+                logger.warning(f"Unexpected dict format from SGLang: {result}")
+                return [str(result)]
+        elif isinstance(result, list):
+            # List of responses
+            if len(result) > 0 and isinstance(result[0], dict):
+                # List of dicts with "text" field
+                return [output.get("text", str(output)) for output in result]
+            else:
+                # List of strings
+                return result
+        else:
+            # Fallback for unexpected format
+            logger.warning(
+                f"Unexpected response format from SGLang: {type(result)}, {result}"
+            )
+            return [str(result)]
 
     def shutdown(self):
         """Shutdown the SGLang server."""

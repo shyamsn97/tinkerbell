@@ -26,8 +26,12 @@ class HuggingFaceTokenizer:
     def __init__(self, model_id: str):
         self.hf_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    def apply_chat_template(self, messages: list[dict[str, str]]) -> str:
-        return self.hf_tokenizer.apply_chat_template(messages, tokenize=False)
+    def apply_chat_template(
+        self, messages: list[dict[str, str]], *args, **kwargs
+    ) -> list[str]:
+        return self.hf_tokenizer.apply_chat_template(
+            messages, tokenize=False, *args, **kwargs
+        )
 
     def encode(self, *args, **kwargs) -> dict[str, TensorData]:
         kwargs["return_tensors"] = "pt"

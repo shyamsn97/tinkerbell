@@ -1,3 +1,4 @@
+import time
 from typing import Any, Optional
 
 import httpx
@@ -62,13 +63,19 @@ class ServiceClient:
     def get_ray_actors(self) -> GetRayActorsResponse:
         """Get list of all Ray actors from the server."""
         with self._create_client() as client:
-            response = client.post("/get_ray_actors")
+            response = client.post("/get_ray_actors", json={})
             response.raise_for_status()
             return GetRayActorsResponse(**response.json())
 
     def deploy(self, deploy_config: DeployConfig) -> str:
         if self.server_url is None:
             self.server_url = deploy_config.deploy()
+
+        # Wait for server to be ready
+        print("Waiting for server to be ready...")
+        while not self.is_deployed():
+            time.sleep(1)
+        print("Server is ready!")
         return self.server_url
 
     def create_training_client(

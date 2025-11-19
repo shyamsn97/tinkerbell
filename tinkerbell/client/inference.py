@@ -108,6 +108,12 @@ class InferenceClient:
                 if verbose:
                     print(f"✓ Inference actor is ready! (took {elapsed:.1f}s)")
                 break
+            elif status.status == "not_present":
+                raise RuntimeError(
+                    f"Inference actor became 'not_present' after {elapsed:.1f}s. "
+                    f"This usually means the actor crashed during initialization or checkpoint loading. "
+                    f"Check the Ray logs with: ray logs <actor_name>"
+                )
 
             time.sleep(poll_interval)
 

@@ -314,10 +314,24 @@ class TrainingActor:
         return state_dict
 
     def save_model(self, save_dir: str):
+        from transformers import AutoTokenizer
 
         state_dict = self.get_model_state_dict(full_state_dict=True)
         if self.rank == 0:
+            print(f"[Rank {self.rank}] Saving model to {save_dir}")
             self.model.save_pretrained(save_dir, state_dict=state_dict)
+
+            # Also save the tokenizer - SGLang needs it to load the model
+            print(f"[Rank {self.rank}] Saving tokenizer to {save_dir}")
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+                tokenizer.save_pretrained(save_dir)
+                print(f"[Rank {self.rank}] Tokenizer saved successfully")
+            except Exception as e:
+                print(f"[Rank {self.rank}] Warning: Failed to save tokenizer: {e}")
+                print(
+                    f"[Rank {self.rank}] The checkpoint may not be loadable by SGLang"
+                )
 
         dist.barrier()
 

@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import Field
 
 from ._models import StrictBase
-from .data import MultimodalDataInputFormat
+from .data import MultimodalDataInputFormat, TensorData
 from .datum import Datum
 from .lora_config import LoraConfig
 from .model_id import ModelID
@@ -70,9 +70,11 @@ class GenerateRequest(StrictBase):
     # The input prompt. It can be a single prompt or a batch of prompts.
     text: Optional[Union[List[str], str]] = None
     # The token ids for text; one can specify either text or input_ids
-    input_ids: Optional[Union[List[List[int]], List[int]]] = None
+    input_ids: Optional[Union[List[List[int]], List[int], TensorData]] = None
     # The embeddings for input_ids; one can specify either text or input_ids or input_embeds.
-    input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+    input_embeds: Optional[
+        Union[List[List[List[float]]], List[List[float]], TensorData]
+    ] = None
     # The image input. It can be an image instance, file name, URL, or base64 encoded string.
     # Can be formatted as:
     # - Single image for a single request

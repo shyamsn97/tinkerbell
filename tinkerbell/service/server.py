@@ -29,6 +29,7 @@ from tinkerbell.types import (
     ShutdownInferenceActorRequest,
     ShutdownInferenceActorResponse,
 )
+from tinkerbell.types.data import TensorData
 from tinkerbell.types.optimizer import (
     OptimStepRequest,
     OptimStepResponse,
@@ -165,7 +166,15 @@ class TinkerbellServiceDeployment:
         self,
     ) -> GetRayActorsResponse:
         actors = ray.util.list_named_actors(all_namespaces=True)
-        actor_names = [actor["name"] for actor in actors]
+        # Handle both string and dict return formats from ray.util.list_named_actors()
+        actor_names = []
+        for actor in actors:
+            if isinstance(actor, str):
+                actor_names.append(actor)
+            elif isinstance(actor, dict):
+                actor_names.append(actor.get("name", str(actor)))
+            else:
+                actor_names.append(str(actor))
         return GetRayActorsResponse(
             actor_names=actor_names,
         )
@@ -206,7 +215,17 @@ class TinkerbellServiceDeployment:
         inference_actor = self.inference_manager.get_inference_actor(request.model_id)
         if inference_actor is None:
             raise ValueError(f"Inference actor for model {request.model_id} not found")
+
         request_dict = model_to_dict(request, exclude=["model_id"], exclude_none=True)
+
+        # Convert TensorData to list format after model_to_dict
+        # Check if the original request had TensorData and convert the dict values
+        if isinstance(request.input_ids, TensorData):
+            request_dict["input_ids"] = request.input_ids.tolist()
+
+        if isinstance(request.input_embeds, TensorData):
+            request_dict["input_embeds"] = request.input_embeds.tolist()
+
         ref = inference_actor.generate.remote(request_dict)
         outputs = await ref
         return GenerateResponse(

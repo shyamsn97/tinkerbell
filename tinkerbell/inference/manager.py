@@ -101,11 +101,26 @@ class InferenceManager:
 
     def _check_loading_status(self, model_id: str) -> None:
         """Check if checkpoint loading is complete and update status."""
-        ready, _ = ray.wait([self.loading_refs[model_id]], num_returns=1, timeout=0)
-        if ready:
-            ray.get(self.loading_refs[model_id])
-            self.statuses[model_id] = InferenceActorStatus.READY
-            del self.loading_refs[model_id]
+        try:
+            ready, _ = ray.wait([self.loading_refs[model_id]], num_returns=1, timeout=0)
+            if ready:
+                result = ray.get(self.loading_refs[model_id])
+                print(f"Checkpoint loading completed for {model_id}: {result}")
+                self.statuses[model_id] = InferenceActorStatus.READY
+                del self.loading_refs[model_id]
+        except Exception as e:
+            print("=" * 80)
+            print(f"ERROR: Checkpoint loading failed for {model_id}")
+            print(f"Exception type: {type(e).__name__}")
+            print(f"Exception message: {e}")
+            print("=" * 80)
+            import traceback
+
+            traceback.print_exc()
+            print("=" * 80)
+            # Clean up the failed actor
+            self._cleanup_actor_state(model_id)
+            self.statuses[model_id] = InferenceActorStatus.NOT_SETUP
 
     def _get_actor_or_raise(self, model_id: str) -> SGLangInferenceActor:
         """Get actor or raise ValueError if not found."""
