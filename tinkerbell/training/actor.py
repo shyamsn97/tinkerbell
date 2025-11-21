@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import traceback
 from typing import Any, Dict, Optional
 
@@ -53,6 +54,13 @@ class TrainingActor:
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
         initialize_random_weights: bool = False,
     ):
+        # Configure logging for Ray actor - logs will go to stdout
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            force=True,  # Override any existing configuration
+        )
+
         self.rank = rank
         self.world_size = world_size
         self.master_addr = master_addr
@@ -65,6 +73,9 @@ class TrainingActor:
         self.model = None
         self.optimizer = None
         self.ready = False
+        self.should_merge_lora = (
+            False  # Flag to track if LoRA should be merged before saving
+        )
 
         # Parse LoRA config
         if lora_config is not None:
@@ -113,6 +124,7 @@ class TrainingActor:
     def _setup_lora(self, model: torch.nn.Module) -> torch.nn.Module:
         """Apply LoRA to the model using PEFT."""
         if self.lora_config is None:
+            logger.info(f"[Rank {self.rank}] No LoRA config provided, skipping LoRA")
             return model
 
         try:
@@ -172,6 +184,26 @@ class TrainingActor:
 
         # Apply LoRA
         model = get_peft_model(model, peft_config)
+
+        # Check if target modules match supported patterns
+        # PEFT uses pattern matching internally (e.g., "q_proj" matches modules ending with "q_proj")
+        # We check if all target_modules are in the supported list
+        # If any target_module doesn't match supported patterns, we'll merge and save as full model
+        all_supported = all(
+            target_module in SUPPORTED_LORA_TARGET_MODULES
+            for target_module in target_modules
+        )
+
+        if not all_supported:
+            unsupported = [
+                tm for tm in target_modules if tm not in SUPPORTED_LORA_TARGET_MODULES
+            ]
+            logger.warning(
+                f"[Rank {self.rank}] LoRA target modules {unsupported} do not match "
+                f"supported patterns {SUPPORTED_LORA_TARGET_MODULES}. "
+                f"Will merge and save as full model."
+            )
+            self.should_merge_lora = True
 
         # Print trainable parameters info
         if self.rank == 0:
@@ -233,58 +265,58 @@ class TrainingActor:
             Tuple of (model_inputs, loss_fn_inputs) where each is a dict of stacked tensors
         """
         try:
-            logger.debug(f"[stack_inputs] Processing {len(data)} Datum objects")
+            logger.info(f"[stack_inputs] Processing {len(data)} Datum objects")
 
             # Debug: Check types
             for i, datum in enumerate(data):
-                logger.debug(f"[stack_inputs] Datum {i}: type={type(datum)}")
-                logger.debug(
+                logger.info(f"[stack_inputs] Datum {i}: type={type(datum)}")
+                logger.info(
                     f"[stack_inputs] Datum {i}.model_input: type={type(datum.model_input)}"
                 )
-                logger.debug(
+                logger.info(
                     f"[stack_inputs] Datum {i}.model_input.tokens: type={type(datum.model_input.tokens)}"
                 )
                 if hasattr(datum.model_input.tokens, "data"):
-                    logger.debug(
+                    logger.info(
                         f"[stack_inputs] Datum {i}.model_input.tokens.data: {datum.model_input.tokens.data[:5]}..."
                     )
                 else:
-                    logger.debug(
+                    logger.info(
                         f"[stack_inputs] Datum {i}.model_input.tokens: {datum.model_input.tokens}"
                     )
 
             # Convert all data to torch tensors on CUDA
             device = torch.cuda.current_device()
-            logger.debug(f"[stack_inputs] Using device: {device}")
+            logger.info(f"[stack_inputs] Using device: {device}")
 
             # Stack model inputs
             model_inputs = {}
 
             # Stack tokens (input_ids for the model)
-            logger.debug("[stack_inputs] Stacking tokens...")
+            logger.info("[stack_inputs] Stacking tokens...")
             tokens_list = [
                 datum.model_input.tokens.to_torch(device=device) for datum in data
             ]
             model_inputs["input_ids"] = torch.stack(tokens_list)
-            logger.debug(
+            logger.info(
                 f"[stack_inputs] Stacked tokens shape: {model_inputs['input_ids'].shape}"
             )
 
             # Stack attention masks if present
             if data[0].model_input.attention_mask is not None:
-                logger.debug("[stack_inputs] Stacking attention masks...")
+                logger.info("[stack_inputs] Stacking attention masks...")
                 attention_mask_list = [
                     datum.model_input.attention_mask.to_torch(device=device)
                     for datum in data
                 ]
                 model_inputs["attention_mask"] = torch.stack(attention_mask_list)
-                logger.debug(
+                logger.info(
                     f"[stack_inputs] Stacked attention_mask shape: {model_inputs['attention_mask'].shape}"
                 )
 
             # Stack additional inputs if present
             if data[0].model_input.additional_inputs is not None:
-                logger.debug("[stack_inputs] Stacking additional inputs...")
+                logger.info("[stack_inputs] Stacking additional inputs...")
                 for key in data[0].model_input.additional_inputs.keys():
                     additional_list = [
                         datum.model_input.additional_inputs[key].to_torch(device=device)
@@ -293,21 +325,21 @@ class TrainingActor:
                     model_inputs[key] = torch.stack(additional_list)
 
             # Stack loss function inputs
-            logger.debug("[stack_inputs] Stacking loss function inputs...")
+            logger.info("[stack_inputs] Stacking loss function inputs...")
             loss_fn_inputs = {}
             if len(data) > 0 and data[0].loss_fn_inputs:
                 for key in data[0].loss_fn_inputs.keys():
-                    logger.debug(f"[stack_inputs] Stacking loss input key: {key}")
+                    logger.info(f"[stack_inputs] Stacking loss input key: {key}")
                     loss_inputs_list = [
                         datum.loss_fn_inputs[key].to_torch(device=device)
                         for datum in data
                     ]
                     loss_fn_inputs[key] = torch.stack(loss_inputs_list)
-                    logger.debug(
+                    logger.info(
                         f"[stack_inputs] Stacked {key} shape: {loss_fn_inputs[key].shape}"
                     )
 
-            logger.debug("[stack_inputs] Successfully stacked all inputs")
+            logger.info("[stack_inputs] Successfully stacked all inputs")
             return model_inputs, loss_fn_inputs
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -432,22 +464,29 @@ class TrainingActor:
 
             # Check if this is a PEFT model
             if self.lora_config is not None:
-                # For LoRA models, save ONLY the adapter weights (lightweight!)
-                logger.info(f"[Rank {self.rank}] Saving LoRA adapter weights")
-                self.model.save_pretrained(save_dir)
-
-                # Save config to indicate this is a LoRA adapter
-                # import json
-
-                # lora_info = {
-                #     "is_lora_adapter": True,
-                #     "base_model_id": self.model_id,
-                #     "lora_config": self.lora_config.model_dump(),
-                # }
-                # with open(
-                #     os.path.join(save_dir, "tinkerbell_lora_info.json"), "w"
-                # ) as f:
-                #     json.dump(lora_info, f, indent=2)
+                # Check if we need to merge LoRA weights due to unsupported target modules
+                if self.should_merge_lora:
+                    logger.info(
+                        f"[Rank {self.rank}] Merging LoRA weights into full model before saving"
+                    )
+                    try:
+                        # Merge LoRA weights into the base model
+                        self.model = self.model.merge_and_unload()
+                        logger.info(
+                            f"[Rank {self.rank}] LoRA weights merged successfully"
+                        )
+                        # Save as full model
+                        state_dict = self.get_model_state_dict(full_state_dict=True)
+                        self.model.save_pretrained(save_dir, state_dict=state_dict)
+                    except Exception as e:
+                        logger.error(
+                            f"[Rank {self.rank}] Failed to merge LoRA weights: {e}"
+                        )
+                        raise
+                else:
+                    # For LoRA models with supported target modules, save ONLY the adapter weights (lightweight!)
+                    logger.info(f"[Rank {self.rank}] Saving LoRA adapter weights")
+                    self.model.save_pretrained(save_dir)
             else:
                 # For full fine-tuning, save the full model
                 state_dict = self.get_model_state_dict(full_state_dict=True)

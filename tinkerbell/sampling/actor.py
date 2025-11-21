@@ -12,6 +12,19 @@ from tinkerbell.utils import kill_process_tree
 logger = logging.getLogger(__name__)
 
 
+SUPPORTED_LORA_TARGET_MODULES = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    "qkv_proj",
+    "gate_up_proj",
+]
+
+
 def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Process:
     """Launch SGLang server in a separate process.
 
@@ -61,19 +74,11 @@ class SGLangSamplingActor:
         engine_kwargs["port"] = self.port
         engine_kwargs["host"] = "127.0.0.1"
         engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_loras_per_batch"] = 2
-        engine_kwargs["max_lora_rank"] = 256
-        engine_kwargs["lora_target_modules"] = [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",  # Attention
-            "gate_proj",
-            "up_proj",
-            "down_proj",  # MLP
-            "qkv_proj",
-            "gate_up_proj",  # Fused variants
-        ]
+        if "max_loras_per_batch" not in engine_kwargs:
+            engine_kwargs["max_loras_per_batch"] = 2
+        if "max_lora_rank" not in engine_kwargs:
+            engine_kwargs["max_lora_rank"] = 256
+        engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
 
         start_msg = "🔧 Starting SGLang server process..."
         logger.info(start_msg)
