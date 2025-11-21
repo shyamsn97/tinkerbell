@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import httpx
 
+from tinkerbell.client.base import BaseClient, TinkerbellFuture
 from tinkerbell.client.training import TrainingClient
 from tinkerbell.types import (
     CreateTrainingActorsRequest,
@@ -15,46 +16,15 @@ from tinkerbell.types import (
 logger = logging.getLogger(__name__)
 
 
-class ServiceClient:
+class ServiceClient(BaseClient):
     def __init__(self, server_url: str | None = None, timeout: float = 600.0):
-        self.server_url = server_url
-        self.timeout = timeout
-
-    def _create_client(self) -> httpx.Client:
-        """Create an httpx client with robust timeout and transport settings."""
-        # Configure timeout with separate values for connect and read
-        # This helps with VPN/proxy environments
-        timeout_config = httpx.Timeout(
-            connect=30.0,  # Connection timeout
-            read=self.timeout,  # Read timeout
-            write=30.0,  # Write timeout
-            pool=30.0,  # Pool timeout
-        )
-
-        # Configure transport with retries and connection limits
-        # Set higher limits to support concurrent requests from multiple threads
-        limits = httpx.Limits(
-            max_connections=200,  # Total connection pool size
-            max_keepalive_connections=100,  # Keep-alive connections
-        )
-
-        transport = httpx.HTTPTransport(
-            retries=3,  # Retry failed connections
-            limits=limits,
-        )
-
-        return httpx.Client(
-            base_url=self.server_url,
-            timeout=timeout_config,
-            transport=transport,
-            follow_redirects=True,
-        )
+        super().__init__(server_url, timeout)
 
     def get_health(self) -> HealthResponse:
-        with self._create_client() as client:
-            response = client.get("/health")
-            response.raise_for_status()
-            return HealthResponse(**response.json())
+        """Get health synchronously (no async on server for this endpoint)."""
+        response = self.client.get("/health")
+        response.raise_for_status()
+        return HealthResponse(**response.json())
 
     def is_deployed(self) -> bool:
         try:
@@ -63,12 +33,25 @@ class ServiceClient:
         except Exception:
             return False
 
-    def get_ray_actors(self) -> GetRayActorsResponse:
+    def get_ray_actors(self) -> TinkerbellFuture[GetRayActorsResponse]:
         """Get list of all Ray actors from the server."""
-        with self._create_client() as client:
-            response = client.post("/get_ray_actors", json={})
-            response.raise_for_status()
-            return GetRayActorsResponse(**response.json())
+        # Send request immediately
+        response = self.client.post("/get_ray_actors", json={})
+        response.raise_for_status()
+        remote_future = response.json()
+        
+        # Parse result
+        def _parse_result(result: dict[str, Any]) -> GetRayActorsResponse:
+            return GetRayActorsResponse(**result)
+        
+        return TinkerbellFuture(
+            request_id=remote_future["request_id"],
+            server_url=self.server_url,
+            poll_endpoint="/poll_result",
+            result_parser=_parse_result,
+            poll_interval=0.1,
+            timeout=self.timeout,
+        )
 
     def deploy(self, deploy_config: DeployConfig) -> str:
         if self.server_url is None:
@@ -126,25 +109,24 @@ class ServiceClient:
             initialize_random_weights=initialize_random_weights,
         )
 
-        with self._create_client() as client:
-            response = client.post(
-                "/create_training_actors",
-                json=request.model_dump(),
-            )
-            response.raise_for_status()
+        response = self.client.post(
+            "/create_training_actors",
+            json=request.model_dump(),
+        )
+        response.raise_for_status()
 
-            # Convert LoraConfig to dict if needed
-            lora_config_dict = None
-            if lora_config:
-                if hasattr(lora_config, "model_dump"):
-                    lora_config_dict = lora_config.model_dump()
-                else:
-                    lora_config_dict = lora_config
+        # Convert LoraConfig to dict if needed
+        lora_config_dict = None
+        if lora_config:
+            if hasattr(lora_config, "model_dump"):
+                lora_config_dict = lora_config.model_dump()
+            else:
+                lora_config_dict = lora_config
 
-            return TrainingClient(
-                server_url=self.server_url,
-                model_id=model_id,
-                timeout=self.timeout,
-                lora_enabled=True,
-                lora_config=lora_config_dict,
-            )
+        return TrainingClient(
+            server_url=self.server_url,
+            model_id=model_id,
+            timeout=self.timeout,
+            lora_enabled=True,
+            lora_config=lora_config_dict,
+        )

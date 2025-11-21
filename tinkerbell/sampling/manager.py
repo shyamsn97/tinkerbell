@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import ray
 
 from tinkerbell.sampling.actor import SGLangSamplingActor
+from tinkerbell.store import GlobalStore
 
 logger = logging.getLogger(__name__)
 
@@ -17,18 +18,12 @@ class SamplingActorStatus(Enum):
 
 
 class SamplingManager:
-    def __init__(self):
+    def __init__(self, global_store: GlobalStore):
         self.sampling_actors: Dict[str, SGLangSamplingActor] = {}
         self.statuses: Dict[str, SamplingActorStatus] = {}
         self.ready_refs: Dict[str, Any] = {}
         self.loading_refs: Dict[str, Any] = {}
-
-        if not ray.is_initialized():
-            ray.init(
-                address="auto",
-                ignore_reinit_error=True,
-                namespace="tinkerbell",
-            )
+        self.global_store = global_store
 
     def create_sampling_actor(
         self,
@@ -54,9 +49,9 @@ class SamplingManager:
         current_status = self.statuses.get(model_id, SamplingActorStatus.NOT_SETUP)
 
         if current_status == SamplingActorStatus.INITIALIZING:
-            self._check_initializing_status(model_id)
+            await self._check_initializing_status(model_id)
         elif current_status == SamplingActorStatus.LOADING:
-            self._check_loading_status(model_id)
+            await self._check_loading_status(model_id)
 
         return self.statuses.get(model_id, SamplingActorStatus.NOT_SETUP)
 
@@ -103,7 +98,7 @@ class SamplingManager:
             engine_kwargs=engine_kwargs,
         )
 
-    def _check_initializing_status(self, model_id: str) -> None:
+    async def _check_initializing_status(self, model_id: str) -> None:
         """Check if initialization is complete and update status."""
         if self._is_actor_dead(model_id):
             self._handle_actor_failure(model_id, "initialization")
@@ -112,7 +107,7 @@ class SamplingManager:
         try:
             ready, _ = ray.wait([self.ready_refs[model_id]], num_returns=1, timeout=0)
             if ready:
-                ray.get(self.ready_refs[model_id])
+                await self.ready_refs[model_id]
                 self.statuses[model_id] = SamplingActorStatus.READY
         except ray.exceptions.RayActorError as e:
             logger.error(f"Actor {model_id} crashed during initialization: {e}")
@@ -124,16 +119,15 @@ class SamplingManager:
             self._cleanup_actor_state(model_id)
             self.statuses[model_id] = SamplingActorStatus.NOT_SETUP
 
-    def _check_loading_status(self, model_id: str) -> None:
+    async def _check_loading_status(self, model_id: str) -> None:
         """Check if checkpoint loading is complete and update status."""
         if self._is_actor_dead(model_id):
             self._handle_actor_failure(model_id, "checkpoint loading")
             return
-
         try:
             ready, _ = ray.wait([self.loading_refs[model_id]], num_returns=1, timeout=0)
             if ready:
-                result = ray.get(self.loading_refs[model_id])
+                result = await self.loading_refs[model_id]
                 logger.info(f"✓ Checkpoint loaded for {model_id}: {result}")
                 self.statuses[model_id] = SamplingActorStatus.READY
                 del self.loading_refs[model_id]

@@ -1,5 +1,8 @@
 # import asyncio
+import time
 import logging
+import asyncio
+import uuid
 from typing import Any, Dict
 
 import ray
@@ -36,6 +39,7 @@ from tinkerbell.types.optimizer import (
     ZeroGradRequest,
     ZeroGradResponse,
 )
+from tinkerbell.store import GlobalStore
 from tinkerbell.utils import get_host_and_port, model_to_dict
 
 logger = logging.getLogger(__name__)
@@ -54,29 +58,111 @@ class TinkerbellServiceDeployment:
         logger.info(
             f"initializing training manager with max_wait_time: {max_wait_time} and clock_cycle: {clock_cycle}"
         )
+        self.global_store = self._create_global_store()
         self.training_manager = TrainingManager(
             max_wait_time=max_wait_time,
             clock_cycle=clock_cycle,
+            global_store=self.global_store,
         )
-        self.sampling_manager = SamplingManager()
+        self.sampling_manager = SamplingManager(
+            global_store=self.global_store,
+        )
+
+    def _create_global_store(self) -> Any:
+        """Create the global store Ray actor."""
+        return GlobalStore.options(
+            num_gpus=0,
+            get_if_exists=True,
+            lifetime="detached",
+            name="tinkerbell_global_state_manager",
+            namespace="tinkerbell",
+        ).remote()
+
+    async def _wait_for_result(self, request_id: str, max_wait_time: float) -> bool:
+        """Poll for result availability. Returns True if found, False on timeout."""
+        start_time = time.time()
+        while time.time() - start_time < max_wait_time:
+            results = await self.global_store.get_results.remote()
+            if request_id in results:
+                return True
+            await asyncio.sleep(1.0)
+        return False
+
+    async def _get_result(
+        self, request_id: str, max_wait_time: float = 300.0
+    ) -> Dict[str, Any]:
+        """Get the result of a forward-backward request."""
+        if not await self._wait_for_result(request_id, max_wait_time):
+            raise TimeoutError(
+                f"Result for request {request_id} not available after {max_wait_time} seconds"
+            )
+        return await self.global_store.get_result.remote(request_id=request_id)
+
+    @APP.post("/poll_result")
+    async def poll_result(
+        self,
+        request: RemoteFuture,
+    ) -> Dict[str, Any]:
+        """
+        Poll for result without blocking.
+        Returns status: "pending", "completed", or "error"
+        """
+        request_id = request.request_id
+        results = await self.global_store.get_results.remote()
+        
+        if request_id in results:
+            result = results[request_id]
+            return {
+                "status": "completed",
+                "request_id": request_id,
+                "result": result,
+            }
+        else:
+            return {
+                "status": "pending",
+                "request_id": request_id,
+            }
+    
+    @APP.post("/get_result")
+    async def get_result(
+        self,
+        request: RemoteFuture,
+    ) -> Dict[str, Any]:
+        return await self._get_result(request.request_id)
 
     @APP.post("/zero_grad")
-    async def zero_grad(self, request: ZeroGradRequest) -> ZeroGradResponse:
-        await self.training_manager.zero_grad(model_id=request.model_id)
-        return ZeroGradResponse(
-            model_id=request.model_id,
-            message=f"Gradients zeroed for model {request.model_id}",
-        )
+    async def zero_grad(self, request: ZeroGradRequest) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        
+        # Execute async in background
+        async def _execute():
+            await self.training_manager.zero_grad(model_id=request.model_id)
+            result = {
+                "model_id": request.model_id,
+                "message": f"Gradients zeroed for model {request.model_id}",
+            }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+        
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
     @APP.post("/optim_step")
-    async def optim_step(self, request: OptimStepRequest) -> OptimStepResponse:
-        await self.training_manager.optim_step(
-            model_id=request.model_id, optimizer_params=request.optimizer_params
-        )
-        return OptimStepResponse(
-            model_id=request.model_id,
-            message=f"Optimizer stepped for model {request.model_id}",
-        )
+    async def optim_step(self, request: OptimStepRequest) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        
+        # Execute async in background
+        async def _execute():
+            await self.training_manager.optim_step(
+                model_id=request.model_id, optimizer_params=request.optimizer_params
+            )
+            result = {
+                "model_id": request.model_id,
+                "message": f"Optimizer stepped for model {request.model_id}",
+            }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
     @APP.get("/health")
     async def health(self) -> HealthResponse:
@@ -109,14 +195,25 @@ class TinkerbellServiceDeployment:
     @APP.post("/save_checkpoint")
     async def save_checkpoint(
         self, request: SaveCheckpointRequest
-    ) -> SaveCheckpointResponse:
-        await self.training_manager.save_checkpoint(
-            model_id=request.model_id, checkpoint_path=request.checkpoint_path
-        )
-        return SaveCheckpointResponse(
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        # Execute async in background
+        async def _execute():
+            await self.training_manager.save_checkpoint(
+                model_id=request.model_id, checkpoint_path=request.checkpoint_path
+            )
+            result = {
+                "model_id": request.model_id,
+                "success": True,
+                "message": f"Checkpoint saved for model {request.model_id}",
+                "path": request.checkpoint_path,
+            }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+
+        asyncio.create_task(_execute())
+        return RemoteFuture(
+            request_id=request_id,
             model_id=request.model_id,
-            success=True,
-            message=f"Checkpoint saved for model {request.model_id}",
         )
 
     @APP.post("/forward_backward")
@@ -136,49 +233,51 @@ class TinkerbellServiceDeployment:
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
         )
-        return ForwardBackwardResponse(
-            model_id=request.model_id,
-            request_id=remote_future.request_id,
-            loss=None,
-            logprobs=None,
-            outputs=None,
-        )
+        return remote_future
 
     @APP.post("/get_actor_status")
     async def get_actor_status(
         self,
         request: ActorStatusRequest,
-    ) -> ActorStatusResponse:
-        status = await self.training_manager.get_actor_status(request.model_id)
-        return ActorStatusResponse(
-            status=status.value,
-            message=f"Actor status for model {request.model_id} is {status.value}",
-        )
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
 
-    @APP.post("/get_result")
-    async def get_result(
-        self,
-        request: RemoteFuture,
-    ) -> Dict[str, Any]:
-        return await self.training_manager.get_result(request.request_id)
+        # Execute async in background
+        async def _execute():
+            status = await self.training_manager.get_actor_status(request.model_id)
+            result = {
+                "status": status.value,
+                "message": f"Actor status for model {request.model_id} is {status.value}",
+            }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
     @APP.post("/get_ray_actors")
     async def get_ray_actors(
         self,
-    ) -> GetRayActorsResponse:
-        actors = ray.util.list_named_actors(all_namespaces=True)
-        # Handle both string and dict return formats from ray.util.list_named_actors()
-        actor_names = []
-        for actor in actors:
-            if isinstance(actor, str):
-                actor_names.append(actor)
-            elif isinstance(actor, dict):
-                actor_names.append(actor.get("name", str(actor)))
-            else:
-                actor_names.append(str(actor))
-        return GetRayActorsResponse(
-            actor_names=actor_names,
-        )
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        
+        # Execute async in background
+        async def _execute():
+            actors = ray.util.list_named_actors(all_namespaces=True)
+            # Handle both string and dict return formats from ray.util.list_named_actors()
+            actor_names = []
+            for actor in actors:
+                if isinstance(actor, str):
+                    actor_names.append(actor)
+                elif isinstance(actor, dict):
+                    actor_names.append(actor.get("name", str(actor)))
+                else:
+                    actor_names.append(str(actor))
+            result = {"actor_names": actor_names}
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+        
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
+
 
     @APP.post("/create_sampling_actor")
     async def create_sampling_actor(
@@ -199,84 +298,113 @@ class TinkerbellServiceDeployment:
     async def get_sampling_actor_status(
         self,
         request: ActorStatusRequest,
-    ) -> ActorStatusResponse:
-        status = await self.sampling_manager.get_sampling_actor_status(request.model_id)
-        return ActorStatusResponse(
-            status=status.value,
-            message=f"Sampling actor status for model {request.model_id} is {status.value}",
-        )
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        # Execute async in background
+        async def _execute():
+            status = await self.sampling_manager.get_sampling_actor_status(request.model_id)
+            result = {
+                "status": status.value,
+                "message": f"Sampling actor status for model {request.model_id} is {status.value}",
+            }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
     @APP.post("/sample")
     async def sample(
         self,
         request: SampleRequest,
-    ) -> SampleResponse:
-        sampling_actor = self.sampling_manager.get_sampling_actor(request.model_id)
-        if sampling_actor is None:
-            raise ValueError(f"Sampling actor for model {request.model_id} not found")
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        
+        # Execute async in background
+        async def _execute():
+            sampling_actor = self.sampling_manager.get_sampling_actor(request.model_id)
+            if sampling_actor is None:
+                raise ValueError(f"Sampling actor for model {request.model_id} not found")
 
-        request_dict = model_to_dict(request, exclude=["model_id"], exclude_none=True)
+            request_dict = model_to_dict(request, exclude=["model_id"], exclude_none=True)
 
-        # Convert TensorData to list format after model_to_dict
-        # Check if the original request had TensorData and convert the dict values
-        if isinstance(request.input_ids, TensorData):
-            request_dict["input_ids"] = request.input_ids.tolist()
+            # Convert TensorData to list format after model_to_dict
+            if isinstance(request.input_ids, TensorData):
+                request_dict["input_ids"] = request.input_ids.tolist()
 
-        if isinstance(request.input_embeds, TensorData):
-            request_dict["input_embeds"] = request.input_embeds.tolist()
+            if isinstance(request.input_embeds, TensorData):
+                request_dict["input_embeds"] = request.input_embeds.tolist()
 
-        ref = sampling_actor.sample.remote(request_dict)
-        result = await ref
-        return SampleResponse(
-            outputs=result.get("outputs", []),
-            logprobs=result.get("logprobs"),
-            top_logprobs=result.get("top_logprobs"),
-            output_token_ids=result.get("output_token_ids"),
-            finish_reasons=result.get("finish_reasons"),
-            meta_info=result.get("meta_info"),
-        )
+            ref = sampling_actor.sample.remote(request_dict)
+            sample_result = await ref
+            result = {
+                "outputs": sample_result.get("outputs", []),
+                "logprobs": sample_result.get("logprobs"),
+                "top_logprobs": sample_result.get("top_logprobs"),
+                "output_token_ids": sample_result.get("output_token_ids"),
+                "finish_reasons": sample_result.get("finish_reasons"),
+                "meta_info": sample_result.get("meta_info"),
+            }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+        
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
     @APP.post("/load_checkpoint")
     async def load_checkpoint(
         self,
         request: LoadCheckpointRequest,
-    ) -> LoadCheckpointResponse:
-        try:
-            _ = await self.sampling_manager.load_checkpoint(
-                model_id=request.model_id,
-                checkpoint_path=request.checkpoint_path,
-                pin_lora=request.pin_lora,
-            )
-            return LoadCheckpointResponse(
-                model_id=request.model_id,
-                success=True,
-                message=f"Checkpoint loading started from {request.checkpoint_path}. Use get_sampling_actor_status to check when ready.",
-            )
-        except Exception as e:
-            return LoadCheckpointResponse(
-                model_id=request.model_id,
-                success=False,
-                message=f"Failed to start checkpoint loading: {str(e)}",
-            )
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        
+        # Execute async in background
+        async def _execute():
+            try:
+                _ = await self.sampling_manager.load_checkpoint(
+                    model_id=request.model_id,
+                    checkpoint_path=request.checkpoint_path,
+                    pin_lora=request.pin_lora,
+                )
+                result = {
+                    "model_id": request.model_id,
+                    "success": True,
+                    "message": f"Checkpoint loading started from {request.checkpoint_path}. Use get_sampling_actor_status to check when ready.",
+                }
+            except Exception as e:
+                result = {
+                    "model_id": request.model_id,
+                    "success": False,
+                    "message": f"Failed to start checkpoint loading: {str(e)}",
+                }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+        
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
     @APP.post("/shutdown_sampling_actor")
     async def shutdown_sampling_actor(
         self,
         request: ShutdownSamplingActorRequest,
-    ) -> ShutdownSamplingActorResponse:
-        try:
-            _ = await self.sampling_manager.shutdown(model_id=request.model_id)
-            return ShutdownSamplingActorResponse(
-                model_id=request.model_id,
-                success=True,
-                message=f"Sampling actor for model {request.model_id} shut down successfully",
-            )
-        except Exception as e:
-            return ShutdownSamplingActorResponse(
-                model_id=request.model_id,
-                success=False,
-                message=f"Failed to shutdown sampling actor: {str(e)}",
-            )
+    ) -> RemoteFuture:
+        request_id = str(uuid.uuid4())
+        
+        # Execute async in background
+        async def _execute():
+            try:
+                _ = await self.sampling_manager.shutdown(model_id=request.model_id)
+                result = {
+                    "model_id": request.model_id,
+                    "success": True,
+                    "message": f"Sampling actor for model {request.model_id} shut down successfully",
+                }
+            except Exception as e:
+                result = {
+                    "model_id": request.model_id,
+                    "success": False,
+                    "message": f"Failed to shutdown sampling actor: {str(e)}",
+                }
+            await self.global_store.set_result.remote(request_id=request_id, result=result)
+        
+        asyncio.create_task(_execute())
+        return RemoteFuture(request_id=request_id)
 
 
 def deploy_service(

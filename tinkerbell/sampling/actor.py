@@ -3,7 +3,7 @@ import multiprocessing
 import socket
 import time
 from typing import Any, Dict, Optional
-
+import sys
 import httpx
 import ray
 
@@ -39,8 +39,6 @@ def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Proc
 @ray.remote
 class SGLangSamplingActor:
     def __init__(self, model_id: str, tp_size: int, engine_kwargs: dict = {}):
-        import sys
-
         from sglang.srt.entrypoints.http_server import launch_server
         from sglang.srt.server_args import ServerArgs
 

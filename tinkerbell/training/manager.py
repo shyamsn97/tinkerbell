@@ -60,6 +60,17 @@ class ActorGroup:
         refs = [worker.zero_grad.remote() for worker in self.workers]
         await asyncio.gather(*refs)
 
+    def _restructure_outputs(
+        self, outputs: list[dict[str, Any]], batch_size: int
+    ) -> list[dict[str, Any]]:
+        """Restructure outputs from workers to per-sample format."""
+        rank_0_output = [output for output in outputs if output is not None][0]
+        batched_output = [{} for _ in range(batch_size)]
+        for i in range(batch_size):
+            for key in rank_0_output:
+                batched_output[i][key] = rank_0_output[key][i]
+        return batched_output
+
     async def forward_backward(
         self,
         data: list[Any],
@@ -126,18 +137,6 @@ class ActorGroup:
         ]
         return await asyncio.gather(*refs)
 
-    @staticmethod
-    def _restructure_outputs(
-        outputs: list[dict[str, Any]], batch_size: int
-    ) -> list[dict[str, Any]]:
-        """Restructure outputs from workers to per-sample format."""
-        rank_0_output = [output for output in outputs if output is not None][0]
-        batched_output = [{} for _ in range(batch_size)]
-        for i in range(batch_size):
-            for key in rank_0_output:
-                batched_output[i][key] = rank_0_output[key][i]
-        return batched_output
-
     @classmethod
     def create_actor_group(
         cls,
@@ -154,7 +153,7 @@ class ActorGroup:
         """Create all training actors for the group."""
         master_addr = "127.0.0.1"
         master_port = str(get_free_port())
-        cleaned_name = cls._clean_actor_name(model_id)
+        cleaned_name = model_id.replace("/", "_").replace(":", "_").lower()
 
         workers = []
         for rank in range(world_size):
@@ -186,11 +185,6 @@ class ActorGroup:
             max_wait_time=max_wait_time,
         )
 
-    @staticmethod
-    def _clean_actor_name(model_id: str) -> str:
-        """Generate a clean actor name from model_id."""
-        return model_id.replace("/", "_").replace(":", "_").lower()
-
     @classmethod
     def _try_reconnect_to_existing_actors(
         cls, model_id: str, max_wait_time: float = 600.0
@@ -200,7 +194,7 @@ class ActorGroup:
         Returns ActorGroup if successfully reconnected, None otherwise.
         """
         try:
-            cleaned_name = cls._clean_actor_name(model_id)
+            cleaned_name = model_id.replace("/", "_").replace(":", "_").lower()
             prefix = f"training_actor_{cleaned_name}_"
 
             # Find all actors with matching name pattern
@@ -254,11 +248,12 @@ class TrainingManager:
         self,
         max_wait_time: float = 600.0,
         clock_cycle: float = 5.0,
+        global_store: GlobalStore = None,
     ):
         self.actor_groups: Dict[str, ActorGroup] = {}
         self.max_wait_time = max_wait_time
         self.clock_cycle = clock_cycle
-        self.global_store = self._create_global_store()
+        self.global_store = global_store
         self.batch_processor_task: Optional[asyncio.Task] = None
         self.running = False
 
@@ -281,16 +276,6 @@ class TrainingManager:
                 await self.batch_processor_task
             except asyncio.CancelledError:
                 pass
-
-    async def get_result(
-        self, request_id: str, max_wait_time: float = 300.0
-    ) -> Dict[str, Any]:
-        """Get the result of a forward-backward request."""
-        if not await self._wait_for_result(request_id, max_wait_time):
-            raise TimeoutError(
-                f"Result for request {request_id} not available after {max_wait_time} seconds"
-            )
-        return ray.get(self.global_store.get_result.remote(request_id=request_id))
 
     async def get_actor_status(self, model_id: str) -> ActorStatus:
         """Check if training actors are ready."""
@@ -396,7 +381,6 @@ class TrainingManager:
         return model_id
 
     # Private helper methods
-
     def _get_actor_group_or_raise(self, model_id: str) -> ActorGroup:
         """Get actor group or raise ValueError if not found."""
         if model_id not in self.actor_groups:
@@ -415,35 +399,17 @@ class TrainingManager:
             )
         return self.actor_groups[model_id]
 
-    @staticmethod
-    def _create_global_store() -> Any:
-        """Create the global store Ray actor."""
-        return GlobalStore.options(
-            num_gpus=0,
-            get_if_exists=True,
-            lifetime="detached",
-            name="tinkerbell_global_state_manager",
-            namespace="tinkerbell",
-        ).remote()
-
-    async def _wait_for_result(self, request_id: str, max_wait_time: float) -> bool:
-        """Poll for result availability. Returns True if found, False on timeout."""
-        start_time = time.time()
-        while time.time() - start_time < max_wait_time:
-            results = ray.get(self.global_store.get_results.remote())
-            if request_id in results:
-                return True
-            await asyncio.sleep(1.0)
-        return False
-
     async def _queue_and_process(
         self, request: ForwardRequest | ForwardBackwardRequest, model_id: str
     ) -> RemoteFuture:
         """Queue a request and optionally process immediately."""
-        ray.get(self.global_store.add_request_to_queue.remote(request=request))
+        await self.global_store.add_request_to_queue.remote(request=request)
         if self.clock_cycle <= 0.0:
             await self._process_batch(model_id)
-        return RemoteFuture(request_id=request.request_id)
+        return RemoteFuture(
+            request_id=request.request_id,
+            model_id=model_id,
+        )
 
     async def _batch_processor_loop(self) -> None:
         """Background task that processes batches at regular intervals."""
@@ -459,18 +425,27 @@ class TrainingManager:
 
     async def _process_all_batches(self) -> None:
         """Process all pending batches across all model groups."""
-        request_queue = ray.get(self.global_store.get_request_queue.remote())
+        request_queue = await self.global_store.get_request_queue.remote()
         for model_id in list(request_queue.keys()):
             if len(request_queue[model_id]) > 0:
                 await self._process_batch(model_id)
 
+    def _prepare_batch_data(self,requests: list[Any]) -> tuple[list[Any], list[int]]:
+        """Flatten request data into a single batch and track sizes."""
+        batch_data = []
+        request_sizes = []
+        for req in requests:
+            request_sizes.append(len(req.data))
+            batch_data.extend(req.data)
+        return batch_data, request_sizes
+
     async def _process_batch(self, model_id: str) -> None:
         """Process a batch of requests for a specific model."""
-        requests = self._get_pending_requests(model_id)
+        requests = await self._get_pending_requests(model_id)
         if not requests:
             return
 
-        self.global_store.clear_request_queue.remote(model_id=model_id)
+        await self.global_store.clear_request_queue.remote(model_id=model_id)
 
         if await self.get_actor_status(model_id) != ActorStatus.READY:
             return
@@ -479,20 +454,10 @@ class TrainingManager:
         output = await self._execute_batch(model_id, requests[0], batch_data)
         self._distribute_results(requests, output, request_sizes)
 
-    def _get_pending_requests(self, model_id: str) -> list[Any]:
+    async def _get_pending_requests(self, model_id: str) -> list[Any]:
         """Get all pending requests for a model."""
-        request_queue = ray.get(self.global_store.get_request_queue.remote())
+        request_queue = await self.global_store.get_request_queue.remote()
         return request_queue.get(model_id, [])
-
-    @staticmethod
-    def _prepare_batch_data(requests: list[Any]) -> tuple[list[Any], list[int]]:
-        """Flatten request data into a single batch and track sizes."""
-        batch_data = []
-        request_sizes = []
-        for req in requests:
-            request_sizes.append(len(req.data))
-            batch_data.extend(req.data)
-        return batch_data, request_sizes
 
     async def _execute_batch(
         self, model_id: str, sample_request: Any, batch_data: list[Any]
@@ -505,7 +470,16 @@ class TrainingManager:
             return_logprobs=getattr(sample_request, "return_logprobs", False),
         )
 
-    def _distribute_results(
+    def _combine_request_outputs(
+        self, req_outputs: list[dict[str, Any]],
+    ) -> dict[str, list[Any]]:
+        """Combine outputs for a single request into a dict of lists."""
+        combined_output = {}
+        for key in req_outputs[0].keys():
+            combined_output[key] = [out[key] for out in req_outputs]
+        return combined_output
+
+    async def _distribute_results(
         self,
         requests: list[Any],
         output: list[dict[str, Any]],
@@ -519,16 +493,7 @@ class TrainingManager:
 
             if req_outputs:
                 combined_output = self._combine_request_outputs(req_outputs)
-                self.global_store.set_result.remote(
+                await self.global_store.set_result.remote(
                     request_id=req.request_id, result=combined_output
                 )
 
-    @staticmethod
-    def _combine_request_outputs(
-        req_outputs: list[dict[str, Any]],
-    ) -> dict[str, list[Any]]:
-        """Combine outputs for a single request into a dict of lists."""
-        combined_output = {}
-        for key in req_outputs[0].keys():
-            combined_output[key] = [out[key] for out in req_outputs]
-        return combined_output

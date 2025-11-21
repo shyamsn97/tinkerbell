@@ -41,6 +41,7 @@ class ActorStatusResponse(BaseModel):
 
 class RemoteFuture(BaseModel):
     request_id: RequestID
+    model_id: ModelID | None = None
 
 
 class GetRayActorsResponse(BaseModel):

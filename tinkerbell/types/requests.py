@@ -35,6 +35,8 @@ class SaveCheckpointRequest(StrictBase):
 class ActorRequest(StrictBase):
     request_id: RequestID
 
+class ZeroGradRequest(StrictBase):
+    model_id: ModelID
 
 class ForwardRequest(StrictBase):
     model_id: ModelID
