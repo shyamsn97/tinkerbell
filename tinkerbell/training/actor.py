@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import traceback
 from typing import Any, Dict, Optional
 
@@ -17,7 +16,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
-
+import re
 from tinkerbell.training.loss import ForCausalLMLoss
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
@@ -185,18 +184,23 @@ class TrainingActor:
         # Apply LoRA
         model = get_peft_model(model, peft_config)
 
-        # Check if target modules match supported patterns
-        # PEFT uses pattern matching internally (e.g., "q_proj" matches modules ending with "q_proj")
-        # We check if all target_modules are in the supported list
-        # If any target_module doesn't match supported patterns, we'll merge and save as full model
+        def matches_supported_pattern(target_module: str) -> bool:
+            """Check if target_module contains any supported pattern."""
+            for supported in SUPPORTED_LORA_TARGET_MODULES:
+                # Use regex to check if supported pattern appears in target_module
+                # This handles cases like "attention1.*.gate_proj.0" matching "gate_proj"
+                pattern = re.escape(supported)
+                if re.search(pattern, target_module):
+                    return True
+            return False
+
         all_supported = all(
-            target_module in SUPPORTED_LORA_TARGET_MODULES
-            for target_module in target_modules
+            matches_supported_pattern(target_module) for target_module in target_modules
         )
 
         if not all_supported:
             unsupported = [
-                tm for tm in target_modules if tm not in SUPPORTED_LORA_TARGET_MODULES
+                tm for tm in target_modules if not matches_supported_pattern(tm)
             ]
             logger.warning(
                 f"[Rank {self.rank}] LoRA target modules {unsupported} do not match "
