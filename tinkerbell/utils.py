@@ -14,6 +14,15 @@ import dill
 import psutil
 
 
+def get_actor_names_by_prefix(prefix: str, actors: list[dict[str, Any]]) -> list[str]:
+    return [
+        actor["name"]
+        for actor in actors
+        if actor["name"].startswith(prefix)
+        if actor["namespace"] == "tinkerbell"
+    ]
+
+
 def get_free_port() -> int:
     """
     Get a free port on the local machine.

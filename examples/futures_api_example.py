@@ -1,11 +1,11 @@
 """
 Example demonstrating the future-based API in Tinkerbell.
 
-All client methods now return future objects (TinkerbellFuture or SyncTinkerbellFuture)
-that allow for non-blocking API calls.
+Most client methods return TinkerbellFuture objects that allow for non-blocking API calls.
+Some simple operations (like get_actor_status) execute synchronously and return results directly.
 
 TinkerbellFuture: For async operations that poll the server (e.g., forward_backward)
-SyncTinkerbellFuture: For operations that execute immediately when .result() is called
+The request is sent immediately and you can poll for the result using .result()
 """
 
 from tinkerbell.client.service import ServiceClient
@@ -70,19 +70,15 @@ results = [f.result() for f in futures]
 print(f"All results received! Losses: {[r.loss for r in results]}")
 
 print("\n" + "=" * 80)
-print("Example 3: Synchronous operations with SyncTinkerbellFuture")
+print("Example 3: Synchronous operations")
 print("=" * 80)
 
-# Operations like get_actor_status return SyncTinkerbellFuture
-# These execute when you call .result() (not immediately)
-print("Calling get_actor_status() - returns immediately with future")
-status_future = training_client.get_actor_status()
-print(f"Future is done? {status_future.done()}")
-
-print("Calling .result() - this executes the HTTP request")
-status = status_future.result()
+# Some operations like get_actor_status are synchronous and return results directly
+# (no future object, executes immediately)
+print("Calling get_actor_status() - executes synchronously")
+status = training_client.get_actor_status()
 print(f"Status: {status.status}")
-print(f"Future is done? {status_future.done()}")
+print("Result received immediately (no polling needed)")
 
 print("\n" + "=" * 80)
 print("Example 4: Timeout handling")
@@ -162,6 +158,6 @@ print(f"Got cached result: {result2 == result}")  # True
 print("\n✅ All examples completed successfully!")
 print("\nKey Takeaways:")
 print("1. TinkerbellFuture: Sends request immediately, polls server on .result()")
-print("2. SyncTinkerbellFuture: Executes HTTP request when .result() is called")
-print("3. Both provide .done() to check completion and .result() to get values")
-print("4. Can batch multiple operations before calling .result() for concurrency")
+print("2. Futures provide .done() to check completion and .result() to get values")
+print("3. Can batch multiple operations before calling .result() for concurrency")
+print("4. Some simple operations (like get_actor_status) are synchronous")

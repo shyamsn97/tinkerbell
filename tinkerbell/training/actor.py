@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import traceback
 from typing import Any, Dict, Optional
 
@@ -16,7 +17,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
-import re
+
 from tinkerbell.training.loss import ForCausalLMLoss
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig

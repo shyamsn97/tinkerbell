@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -15,7 +14,7 @@ from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
-from tinkerbell.utils import get_free_port
+from tinkerbell.utils import get_actor_names_by_prefix, get_free_port
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +137,28 @@ class ActorGroup:
         return await asyncio.gather(*refs)
 
     @classmethod
+    def try_reconnect_to_existing_actors(
+        cls, model_id: str, max_wait_time: float = 600.0
+    ) -> ActorGroup:
+        """Get all workers for a model.
+        Raises:
+            ValueError: If any actor cannot be retrieved or if no actors are found.
+        """
+        actor_names = get_actor_names_by_prefix(
+            f"training_actor_{model_id}",
+            ray.util.list_named_actors(namespace="tinkerbell"),
+        )
+        workers = [
+            ray.get_actor(name=name, namespace="tinkerbell") for name in actor_names
+        ]
+        return cls(
+            workers=workers,
+            model_id=model_id,
+            status=ActorStatus.INITIALIZING,
+            max_wait_time=max_wait_time,
+        )
+
+    @classmethod
     def create_actor_group(
         cls,
         world_size: int,
@@ -159,7 +180,6 @@ class ActorGroup:
         for rank in range(world_size):
             worker = TrainingActor.options(
                 num_gpus=1,
-                get_if_exists=True,
                 lifetime="detached",
                 name=f"training_actor_{cleaned_name}_{rank}",
                 namespace="tinkerbell",
@@ -184,63 +204,6 @@ class ActorGroup:
             status=ActorStatus.INITIALIZING,
             max_wait_time=max_wait_time,
         )
-
-    @classmethod
-    def _try_reconnect_to_existing_actors(
-        cls, model_id: str, max_wait_time: float = 600.0
-    ) -> Optional[ActorGroup]:
-        """Try to reconnect to existing detached training actors by searching Ray.
-
-        Returns ActorGroup if successfully reconnected, None otherwise.
-        """
-        try:
-            cleaned_name = model_id.replace("/", "_").replace(":", "_").lower()
-            prefix = f"training_actor_{cleaned_name}_"
-
-            # Find all actors with matching name pattern
-            all_actors = ray.util.list_named_actors(all_namespaces=True)
-
-            # Handle different return formats from ray.util.list_named_actors()
-            matching_actors = []
-            for actor in all_actors:
-                # If actor is a string, it's just the actor name
-                if isinstance(actor, str):
-                    if actor.startswith(prefix):
-                        matching_actors.append(
-                            {"name": actor, "namespace": "tinkerbell"}
-                        )
-                # If actor is a dict, use it directly
-                elif isinstance(actor, dict):
-                    if (
-                        actor.get("name", "").startswith(prefix)
-                        and actor.get("namespace") == "tinkerbell"
-                    ):
-                        matching_actors.append(actor)
-
-            if not matching_actors:
-                return None
-
-            # Reconnect to actors sorted by rank
-            workers = []
-            for actor_info in sorted(matching_actors, key=lambda x: x["name"]):
-                worker = ray.get_actor(actor_info["name"], namespace="tinkerbell")
-                workers.append(worker)
-
-            logger.info(
-                f"Reconnected to {len(workers)} existing training actors for model {model_id}"
-            )
-            return cls(
-                workers=workers,
-                model_id=model_id,
-                status=ActorStatus.READY,
-                max_wait_time=max_wait_time,
-            )
-        except Exception as e:
-            logger.error(f"Failed to reconnect to existing actors: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return None
 
 
 class TrainingManager:
@@ -351,8 +314,7 @@ class TrainingManager:
 
         # Try to reconnect to existing actors first
         try:
-            existing_group = self._get_actor_group_or_raise(model_id)
-            self.actor_groups[model_id] = existing_group
+            _ = self._get_actor_group_or_raise(model_id)
             return model_id
         except Exception:
             pass
@@ -385,18 +347,8 @@ class TrainingManager:
         """Get actor group or raise ValueError if not found."""
         if model_id not in self.actor_groups:
             # Try to reconnect to existing actors before raising
-            existing_group = ActorGroup._try_reconnect_to_existing_actors(
-                model_id, max_wait_time=self.max_wait_time
-            )
-            if existing_group:
-                self.actor_groups[model_id] = existing_group
-                return existing_group
-
-            raise ValueError(
-                f"Training actors for model '{model_id}' not found. "
-                f"Please create training actors first using create_training_actors(). "
-                f"Available models: {list(self.actor_groups.keys())}"
-            )
+            existing_group = ActorGroup.try_reconnect_to_existing_actors(model_id)
+            self.actor_groups[model_id] = existing_group
         return self.actor_groups[model_id]
 
     async def _queue_and_process(
@@ -413,13 +365,22 @@ class TrainingManager:
 
     async def _batch_processor_loop(self) -> None:
         """Background task that processes batches at regular intervals."""
+        logger.info("[_batch_processor_loop] Batch processor loop started")
         while self.running:
             try:
                 await asyncio.sleep(self.clock_cycle)
+                logger.info(
+                    "[_batch_processor_loop] Woke up, processing all batches..."
+                )
                 await self._process_all_batches()
             except asyncio.CancelledError:
+                logger.info("[_batch_processor_loop] Batch processor cancelled")
                 break
             except Exception as e:
+                logger.error(
+                    f"[_batch_processor_loop] Error in batch processor: {e}",
+                    exc_info=True,
+                )
                 await self.stop()
                 raise e
 
@@ -430,7 +391,7 @@ class TrainingManager:
             if len(request_queue[model_id]) > 0:
                 await self._process_batch(model_id)
 
-    def _prepare_batch_data(self,requests: list[Any]) -> tuple[list[Any], list[int]]:
+    def _prepare_batch_data(self, requests: list[Any]) -> tuple[list[Any], list[int]]:
         """Flatten request data into a single batch and track sizes."""
         batch_data = []
         request_sizes = []
@@ -441,18 +402,49 @@ class TrainingManager:
 
     async def _process_batch(self, model_id: str) -> None:
         """Process a batch of requests for a specific model."""
-        requests = await self._get_pending_requests(model_id)
-        if not requests:
-            return
+        try:
+            print(
+                f"[_process_batch] Processing batch for model_id: {model_id}",
+                flush=True,
+            )
+            logger.info(f"[_process_batch] Processing batch for model_id: {model_id}")
+            requests = await self._get_pending_requests(model_id)
+            print(
+                f"[_process_batch] Found {len(requests)} pending requests", flush=True
+            )
+            logger.info(f"[_process_batch] Found {len(requests)} pending requests")
+            if not requests:
+                return
 
-        await self.global_store.clear_request_queue.remote(model_id=model_id)
+            await self.global_store.clear_request_queue.remote(model_id=model_id)
 
-        if await self.get_actor_status(model_id) != ActorStatus.READY:
-            return
+            status = await self.get_actor_status(model_id)
+            logger.info(f"[_process_batch] Actor status: {status}")
+            if status != ActorStatus.READY:
+                logger.warning(
+                    f"[_process_batch] Actors not ready for model {model_id}, skipping batch"
+                )
+                return
 
-        batch_data, request_sizes = self._prepare_batch_data(requests)
-        output = await self._execute_batch(model_id, requests[0], batch_data)
-        self._distribute_results(requests, output, request_sizes)
+            batch_data, request_sizes = self._prepare_batch_data(requests)
+            logger.info(
+                f"[_process_batch] Executing batch with {len(batch_data)} data items"
+            )
+            output = await self._execute_batch(model_id, requests[0], batch_data)
+            logger.info(
+                f"[_process_batch] Batch execution complete, distributing results"
+            )
+            logger.info(
+                f"[_process_batch] Output type: {type(output)}, length: {len(output) if output else 'None'}"
+            )
+            await self._distribute_results(requests, output, request_sizes)
+            logger.info(f"[_process_batch] Batch processing complete")
+        except Exception as e:
+            logger.error(
+                f"[_process_batch] EXCEPTION in batch processing for {model_id}: {e}",
+                exc_info=True,
+            )
+            raise
 
     async def _get_pending_requests(self, model_id: str) -> list[Any]:
         """Get all pending requests for a model."""
@@ -471,7 +463,8 @@ class TrainingManager:
         )
 
     def _combine_request_outputs(
-        self, req_outputs: list[dict[str, Any]],
+        self,
+        req_outputs: list[dict[str, Any]],
     ) -> dict[str, list[Any]]:
         """Combine outputs for a single request into a dict of lists."""
         combined_output = {}
@@ -486,14 +479,41 @@ class TrainingManager:
         request_sizes: list[int],
     ) -> None:
         """Distribute batch results back to individual requests."""
-        output_idx = 0
-        for req, req_size in zip(requests, request_sizes):
-            req_outputs = output[output_idx : output_idx + req_size]
-            output_idx += req_size
-
-            if req_outputs:
-                combined_output = self._combine_request_outputs(req_outputs)
-                await self.global_store.set_result.remote(
-                    request_id=req.request_id, result=combined_output
+        try:
+            logger.info(
+                f"[_distribute_results] Distributing results for {len(requests)} requests"
+            )
+            logger.info(f"[_distribute_results] Output: {output}")
+            output_idx = 0
+            for req, req_size in zip(requests, request_sizes):
+                logger.info(
+                    f"[_distribute_results] Processing request {req.request_id}, req_size: {req_size}"
                 )
+                req_outputs = output[output_idx : output_idx + req_size]
+                output_idx += req_size
 
+                if req_outputs:
+                    logger.info(f"[_distribute_results] req_outputs: {req_outputs}")
+                    combined_output = self._combine_request_outputs(req_outputs)
+                    logger.info(
+                        f"[_distribute_results] combined_output: {combined_output}"
+                    )
+                    logger.info(
+                        f"[_distribute_results] Storing result for request_id: {req.request_id}"
+                    )
+                    await self.global_store.set_result.remote(
+                        request_id=req.request_id, result=combined_output
+                    )
+                    logger.info(
+                        f"[_distribute_results] Successfully stored result for request_id: {req.request_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"[_distribute_results] No outputs for request {req.request_id}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"[_distribute_results] EXCEPTION distributing results: {e}",
+                exc_info=True,
+            )
+            raise

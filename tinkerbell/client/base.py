@@ -1,22 +1,23 @@
-import time
 from typing import Any, Callable, Generic, TypeVar
 
 import httpx
 
-T = TypeVar('T')
+from tinkerbell.types.responses import RemoteFuture
+
+T = TypeVar("T")
 
 
 class TinkerbellFuture(Generic[T]):
     """
     A future-like object that wraps async operations in Tinkerbell.
-    
+
     This allows for non-blocking API calls where the actual result
     can be retrieved later using the .result() method.
-    
+
     The future polls the server using a request_id to check if the
     operation is complete.
     """
-    
+
     def __init__(
         self,
         request_id: str,
@@ -26,20 +27,22 @@ class TinkerbellFuture(Generic[T]):
         poll_interval: float = 0.1,
         timeout: float | None = None,
         client_timeout: float = 30.0,
+        model_id: str | None = None,
     ):
         """
         Initialize a TinkerbellFuture.
-        
+
         Args:
-            request_id: The request ID to poll for
+            request_id: The request ID string to poll for
             server_url: Base URL of the server
             poll_endpoint: Endpoint to poll for results (e.g., "/get_result")
             result_parser: Function to parse the response into the result type
             poll_interval: Interval between polls in seconds
             timeout: Maximum time to wait for result
             client_timeout: Timeout for individual HTTP requests
+            model_id: Optional model ID
         """
-        self._request_id = request_id
+        self._request_id = RemoteFuture(request_id=request_id, model_id=model_id)
         self._server_url = server_url
         self._poll_endpoint = poll_endpoint
         self._result_parser = result_parser
@@ -48,8 +51,7 @@ class TinkerbellFuture(Generic[T]):
         self._client_timeout = client_timeout
         self._result = None
         self._resolved = False
-        self._exception = None
-    
+
     def _get_client(self) -> httpx.Client:
         """Get or create a light httpx client for polling."""
         timeout_config = httpx.Timeout(
@@ -58,97 +60,90 @@ class TinkerbellFuture(Generic[T]):
             write=10.0,
             pool=10.0,
         )
+        # Force new connection each time by limiting connection pool
+        limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
         return httpx.Client(
             base_url=self._server_url,
             timeout=timeout_config,
+            limits=limits,
         )
-    
-    def result(self, timeout: float | None = None) -> T:
-        """
-        Block and wait for the result by polling the server.
-        
-        Args:
-            timeout: Maximum time to wait (overrides instance timeout)
-            
-        Returns:
-            The result of the operation
-            
-        Raises:
-            TimeoutError: If timeout is exceeded
-            Exception: Any exception raised during execution
-        """
-        if self._resolved:
-            if self._exception:
-                raise self._exception
-            return self._result
-        
-        timeout = timeout or self._timeout
-        start_time = time.time()
-        
-        try:
-            with self._get_client() as client:
-                while True:
-                    # Check timeout
-                    if timeout is not None:
-                        elapsed = time.time() - start_time
-                        if elapsed > timeout:
-                            raise TimeoutError(
-                                f"Future timed out after {elapsed:.1f}s (timeout={timeout}s)"
-                            )
 
-                    # Poll the server
-                    response = client.post(
-                        self._poll_endpoint,
-                        json={"request_id": self._request_id},
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-
-                    # Check if result is ready
-                    if data.get("status") == "completed":
-                        # Parse the result
-                        self._result = self._result_parser(data.get("result"))
-                        self._resolved = True
-                        return self._result
-                    elif data.get("status") == "error":
-                        error_msg = data.get("error", "Unknown error")
-                        raise RuntimeError(f"Operation failed: {error_msg}")
-                    elif data.get("status") == "pending":
-                        # Still processing, wait and retry
-                        time.sleep(self._poll_interval)
-                    else:
-                        # Unknown status
-                        raise RuntimeError(
-                            f"Unknown status: {data.get('status')}"
-                        )
-        except Exception as e:
-            self._exception = e
-            self._resolved = True
-            raise
-
+    @property
     def done(self) -> bool:
         """Check if the future is resolved."""
         return self._resolved
-    
-    def exception(self) -> Exception | None:
-        """Get the exception if one occurred."""
-        return self._exception
-    
+
     @property
     def request_id(self) -> str:
         """Get the request ID for this future."""
         return self._request_id
 
+    def result(self) -> Any:
+        if self._resolved:
+            return self._result
+
+        import time
+
+        start_time = time.time()
+        # Small delay before first poll to let server process the request
+        time.sleep(0.1)
+        # Create fresh client each time to avoid connection issues
+        client = self._get_client()
+        with client:
+            while True:
+                # Check if already resolved (race condition protection)
+                if self._resolved:
+                    return self._result
+
+                # Check timeout
+                if self._timeout and (time.time() - start_time) > self._timeout:
+                    raise TimeoutError(
+                        f"Timeout waiting for result after {self._timeout}s"
+                    )
+                # Make the poll request
+                try:
+                    payload = self._request_id.model_dump(exclude_none=True)
+                    response = client.post(self._poll_endpoint, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                except httpx.HTTPStatusError:
+                    raise
+                status = data.get("status", "pending")
+
+                if status == "completed":
+                    result = self._result_parser(data.get("result"))
+                    self._result = result
+                    self._resolved = True
+                    return result
+                elif status == "error":
+                    error_msg = data.get("error", "Unknown error")
+                    raise RuntimeError(f"Request failed: {error_msg}")
+                elif status == "pending":
+                    # Sleep and retry
+                    time.sleep(self._poll_interval)
+                else:
+                    raise Exception(f"Unknown status: {status}")
+
 
 class BaseClient:
     def __init__(
         self,
-        server_url: str,
+        server_url: str | None = None,
         timeout: float = 600.0,
     ):
         self.server_url = server_url
         self.timeout = timeout
-        self.client = self._create_client()
+        self._client = None
+
+    @property
+    def client(self) -> httpx.Client:
+        if self._client is None:
+            self._client = self._create_client()
+        return self._client
+
+    @client.setter
+    def client(self, client: httpx.Client):
+        self._client = client
 
     def _create_client(self) -> httpx.Client:
         """Create an httpx client with robust timeout and transport settings."""
@@ -191,11 +186,46 @@ class BaseClient:
         )
         response.raise_for_status()
         remote_future = response.json()
+        return self.create_future_from_request_id(
+            request_id=remote_future,
+            parse_result_fn=parse_result_fn,
+        )
+
+    def create_future_from_request_id(
+        self,
+        request_id: str | dict[str, Any] | RemoteFuture,
+        parse_result_fn: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> TinkerbellFuture[Any]:
+        """
+        Create a TinkerbellFuture from an existing request_id.
+
+        Args:
+            request_id: The request ID to poll for (string, dict, or RemoteFuture)
+            parse_result_fn: Optional function to parse the result
+
+        Returns:
+            TinkerbellFuture that polls for the given request_id
+        """
+        if parse_result_fn is None:
+            parse_result_fn = lambda x: x
+
+        # Extract request_id string and model_id from various formats
+        if isinstance(request_id, RemoteFuture):
+            rid = request_id.request_id
+            mid = request_id.model_id
+        elif isinstance(request_id, dict):
+            rid = request_id.get("request_id")
+            mid = request_id.get("model_id")
+        else:
+            rid = request_id
+            mid = None
+
         return TinkerbellFuture(
-            request_id=remote_future["request_id"],
+            request_id=rid,
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=parse_result_fn,
-            poll_interval=0.1,
+            poll_interval=1.0,
             timeout=self.timeout,
+            model_id=mid,
         )

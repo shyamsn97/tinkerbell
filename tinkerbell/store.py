@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any, Dict
 
@@ -5,6 +6,8 @@ import ray
 from pydantic import BaseModel
 
 from tinkerbell.types.requests import ActorRequest
+
+logger = logging.getLogger(__name__)
 
 
 class GlobalStoreRequest(BaseModel):
@@ -21,6 +24,9 @@ class GlobalStore:
     def __init__(self):
         self.request_queue: Dict[str, list[ActorRequest]] = {}
         self.results: Dict[str, Any] = {}
+
+    async def get_keys(self) -> list[str]:
+        return list(self.results.keys())
 
     async def get_request_queue(self) -> Dict[str, list[ActorRequest]]:
         return self.request_queue
@@ -44,9 +50,22 @@ class GlobalStore:
         return self.results
 
     async def get_result(self, request_id: str) -> Any:
-        if request_id not in self.results:
+        has_result = request_id in self.results
+        logger.debug(
+            f"[GlobalStore.get_result] request_id: {request_id}, has_result: {has_result}"
+        )
+        if not has_result:
             return None
         return self.results[request_id]
 
     async def set_result(self, request_id: str, result: Any):
+        logger.info(
+            f"[GlobalStore.set_result] Storing result for request_id: {request_id}"
+        )
+        logger.info(
+            f"[GlobalStore.set_result] Result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}"
+        )
         self.results[request_id] = result
+        logger.info(
+            f"[GlobalStore.set_result] Successfully stored. Total results: {len(self.results)}"
+        )

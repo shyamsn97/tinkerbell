@@ -28,7 +28,7 @@ class ForwardResponse(BaseModel):
 class ForwardBackwardResponse(BaseModel):
     model_id: ModelID
     request_id: RequestID | None = None
-    loss: float | None = None
+    loss: float | list[float] | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, TensorData] | None = None
     metrics: Optional[dict[str, float]] = None
@@ -85,3 +85,10 @@ class ShutdownSamplingActorResponse(BaseModel):
     model_id: ModelID
     success: bool
     message: str | None = None
+
+
+class PollResultResponse(BaseModel):
+    status: Literal["pending", "completed", "error"]
+    request_id: RequestID
+    result: dict[str, Any] | None = None
+    error: str | None = None

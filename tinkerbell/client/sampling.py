@@ -2,8 +2,7 @@ import logging
 import time
 from typing import Any
 
-import httpx
-
+from tinkerbell.client.base import BaseClient, TinkerbellFuture
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,
@@ -16,7 +15,7 @@ from tinkerbell.types.responses import (
     SampleResponse,
     ShutdownSamplingActorResponse,
 )
-from tinkerbell.client.base import BaseClient, TinkerbellFuture
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,7 +41,7 @@ class SamplingClient(BaseClient):
 
     def wait_until_ready(
         self,
-        poll_interval: float = 2.0,
+        poll_interval: float = 1.0,
         verbose: bool = True,
         timeout: float = 900.0,
     ) -> None:
@@ -135,18 +134,19 @@ class SamplingClient(BaseClient):
         )
         response.raise_for_status()
         remote_future = response.json()
-        
+
         # Parse result
         def _parse_result(result: dict[str, Any]) -> ActorStatusResponse:
             return ActorStatusResponse(**result)
-        
+
         return TinkerbellFuture(
             request_id=remote_future["request_id"],
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=_parse_result,
-            poll_interval=0.1,
+            poll_interval=1.0,
             timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
         )
 
     def sample(
@@ -190,8 +190,9 @@ class SamplingClient(BaseClient):
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=_parse_result,
-            poll_interval=0.1,
+            poll_interval=1.0,
             timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
         )
 
     def load_checkpoint(
@@ -229,22 +230,23 @@ class SamplingClient(BaseClient):
         # Parse result
         def _parse_result(result: dict[str, Any]) -> LoadCheckpointResponse:
             return LoadCheckpointResponse(**result)
-        
+
         return TinkerbellFuture(
             request_id=remote_future["request_id"],
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=_parse_result,
-            poll_interval=0.1,
+            poll_interval=1.0,
             timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
         )
 
     def shutdown(self) -> TinkerbellFuture[ShutdownSamplingActorResponse]:
         """
-        Shutdown the sampling actor.
+                Shutdown the sampling actor.
 
-        Returns:
-TinkerbellFuture[ShutdownSamplingActorResponse] - call .result() to poll for the response
+                Returns:
+        TinkerbellFuture[ShutdownSamplingActorResponse] - call .result() to poll for the response
         """
         # Send request immediately
         request = ShutdownSamplingActorRequest(model_id=self.model_id)
@@ -255,18 +257,19 @@ TinkerbellFuture[ShutdownSamplingActorResponse] - call .result() to poll for the
         )
         response.raise_for_status()
         remote_future = response.json()
-        
+
         # Parse result
         def _parse_result(result: dict[str, Any]) -> ShutdownSamplingActorResponse:
             return ShutdownSamplingActorResponse(**result)
-        
+
         return TinkerbellFuture(
             request_id=remote_future["request_id"],
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=_parse_result,
-            poll_interval=0.1,
+            poll_interval=1.0,
             timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
         )
 
     def close(self):

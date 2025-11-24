@@ -2,12 +2,11 @@ import logging
 import time
 from typing import Any, Optional
 
-import httpx
-from transformers import AutoTokenizer
-
+from tinkerbell.client.base import BaseClient, TinkerbellFuture
 from tinkerbell.client.sampling import SamplingClient
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.datum import Datum
+from tinkerbell.types.optimizer import OptimStepRequest
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     CreateSamplingActorRequest,
@@ -22,12 +21,14 @@ from tinkerbell.types.responses import (
     ForwardResponse,
     SaveCheckpointResponse,
 )
-from tinkerbell.client.base import BaseClient, TinkerbellFuture
+
 logger = logging.getLogger(__name__)
 
 
 class HuggingFaceTokenizer:
     def __init__(self, model_id: str):
+        from transformers import AutoTokenizer
+
         self.hf_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     def apply_chat_template(
@@ -88,7 +89,7 @@ class TrainingClient(BaseClient):
             verbose: If True, prints status updates
         """
         while True:
-            status = self.get_actor_status().result()
+            status = self.get_actor_status()
             if verbose:
                 logger.info(f"Actor status: {status.status}")
 
@@ -99,19 +100,21 @@ class TrainingClient(BaseClient):
 
             time.sleep(poll_interval)
 
-    def get_actor_status(self) -> TinkerbellFuture[ActorStatusResponse]:
+    def get_actor_status(self) -> ActorStatusResponse:
         """
         Get the status of training actors.
 
         Returns:
-            TinkerbellFuture[ActorStatusResponse] - call .result() to poll for the status
+            ActorStatusResponse - the status response (synchronous call)
         """
         request = ActorStatusRequest(model_id=self.model_id)
 
-        return self.create_future(
-            request=request,
-            endpoint="/get_actor_status",
+        response = self.client.post(
+            "/get_actor_status",
+            json=request.model_dump(exclude_none=True),
         )
+        response.raise_for_status()
+        return ActorStatusResponse(**response.json())
 
     def get_tokenizer(self) -> HuggingFaceTokenizer:
         """
@@ -178,13 +181,9 @@ class TrainingClient(BaseClient):
                 metrics=result.get("metrics"),
             )
 
-        return TinkerbellFuture(
+        return self.create_future_from_request_id(
             request_id=initial_response.request_id,
-            server_url=self.server_url,
-            poll_endpoint="/poll_result",
-            result_parser=_parse_result,
-            poll_interval=0.1,
-            timeout=self.timeout,
+            parse_result_fn=_parse_result,
         )
 
     def forward_backward(
@@ -218,7 +217,7 @@ class TrainingClient(BaseClient):
         )
         response.raise_for_status()
         initial_response = ForwardBackwardResponse(**response.json())
-        
+
         # Create future with request_id for polling
         def _parse_result(result: dict[str, Any]) -> ForwardBackwardResponse:
             # Merge the initial response data with the polled result
@@ -230,20 +229,16 @@ class TrainingClient(BaseClient):
                 outputs=result.get("outputs"),
                 metrics=result.get("metrics"),
             )
-        
-        return TinkerbellFuture(
+
+        return self.create_future_from_request_id(
             request_id=initial_response.request_id,
-            server_url=self.server_url,
-            poll_endpoint="/poll_result",
-            result_parser=_parse_result,
-            poll_interval=0.1,
-            timeout=self.timeout,
+            parse_result_fn=_parse_result,
         )
 
     def get_result(self, request_id: str) -> TinkerbellFuture[dict[str, Any]]:
         """
         Get the result of an async forward/backward request.
-        
+
         Note: Deprecated - use the TinkerbellFuture returned by forward_backward() instead.
         This creates a future that polls for the given request_id.
 
@@ -253,18 +248,7 @@ class TrainingClient(BaseClient):
         Returns:
             TinkerbellFuture[dict[str, Any]] - call .result() to poll for the response
         """
-        # Parse result
-        def _parse_result(result: dict[str, Any]) -> dict[str, Any]:
-            return result
-        
-        return TinkerbellFuture(
-            request_id=request_id,
-            server_url=self.server_url,
-            poll_endpoint="/poll_result",
-            result_parser=_parse_result,
-            poll_interval=0.1,
-            timeout=self.timeout,
-        )
+        return self.create_future_from_request_id(request_id=request_id)
 
     def optim_step(
         self,
@@ -279,29 +263,12 @@ class TrainingClient(BaseClient):
         Returns:
             TinkerbellFuture[dict[str, Any]] - call .result() to poll for the response
         """
-        # Send request immediately
-        response = self.client.post(
-            "/optim_step",
-            json={
-                "model_id": self.model_id,
-                "optimizer_params": optimizer_params or {},
-            },
+        request = OptimStepRequest(
+            model_id=self.model_id,
+            optimizer_params=optimizer_params or {},
         )
-        response.raise_for_status()
-        remote_future = response.json()
-        
-        # Parse result
-        def _parse_result(result: dict[str, Any]) -> dict[str, Any]:
-            return result
-        
-        return TinkerbellFuture(
-            request_id=remote_future["request_id"],
-            server_url=self.server_url,
-            poll_endpoint="/poll_result",
-            result_parser=_parse_result,
-            poll_interval=0.1,
-            timeout=self.timeout,
-        )
+
+        return self.create_future(request=request, endpoint="/optim_step")
 
     def save_checkpoint(
         self,
@@ -316,30 +283,18 @@ class TrainingClient(BaseClient):
         Returns:
             TinkerbellFuture[SaveCheckpointResponse] - call .result() to poll for the response
         """
-        # Send request immediately
         request = SaveCheckpointRequest(
             model_id=self.model_id,
             checkpoint_path=checkpoint_path,
         )
 
-        response = self.client.post(
-            "/save_checkpoint",
-            json=request.model_dump(),
-        )
-        response.raise_for_status()
-        remote_future = response.json()
-        
-        # Parse result
         def _parse_result(result: dict[str, Any]) -> SaveCheckpointResponse:
             return SaveCheckpointResponse(**result)
-        
-        return TinkerbellFuture(
-            request_id=remote_future["request_id"],
-            server_url=self.server_url,
-            poll_endpoint="/poll_result",
-            result_parser=_parse_result,
-            poll_interval=0.1,
-            timeout=self.timeout,
+
+        return self.create_future(
+            request=request,
+            endpoint="/save_checkpoint",
+            parse_result_fn=_parse_result,
         )
 
     def save_weights_and_get_sampling_client(

@@ -1,8 +1,5 @@
 import logging
-import time
 from typing import Any, Optional
-
-import httpx
 
 from tinkerbell.client.base import BaseClient, TinkerbellFuture
 from tinkerbell.client.training import TrainingClient
@@ -39,28 +36,35 @@ class ServiceClient(BaseClient):
         response = self.client.post("/get_ray_actors", json={})
         response.raise_for_status()
         remote_future = response.json()
-        
-        # Parse result
-        def _parse_result(result: dict[str, Any]) -> GetRayActorsResponse:
-            return GetRayActorsResponse(**result)
-        
+
+        def _parse_result(result: dict[str, Any]):
+            return result["actor_names"]
+
         return TinkerbellFuture(
             request_id=remote_future["request_id"],
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=_parse_result,
-            poll_interval=0.1,
+            poll_interval=1.0,
             timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
         )
 
-    def deploy(self, deploy_config: DeployConfig) -> str:
-        if self.server_url is None:
+    def get_store_keys(self) -> list[str]:
+        """Get list of all keys from the global store."""
+        response = self.client.get("/get_store_keys")
+        response.raise_for_status()
+        result = response.json()
+        return result.get("keys", [])
+
+    def deploy(self, deploy_config: DeployConfig, redeploy: bool = False) -> str:
+        if self.server_url is None or redeploy:
             self.server_url = deploy_config.deploy()
 
         # Wait for server to be ready
         logger.info("Waiting for server to be ready...")
-        while not self.is_deployed():
-            time.sleep(1)
+        # while not self.is_deployed():
+        #     time.sleep(1)
         logger.info("Server is ready!")
         return self.server_url
 

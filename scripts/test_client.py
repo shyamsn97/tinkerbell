@@ -20,6 +20,7 @@ from tqdm import tqdm
 import time
 import concurrent.futures
 from functools import partial
+import httpx
 
 deploy_config = ModalDeployConfig(
     gpu="A100",
@@ -45,16 +46,82 @@ parallelize_plan = {
 }
 
 # Create training client and train
-service_client = ServiceClient(timeout=600.0)
-server_url = service_client.deploy(deploy_config)
-print("Deployed to: ", server_url)
+server_url = "https://jesterlabs--training-service.modal.run"
+service_client = ServiceClient(server_url=server_url, timeout=600.0)
+print("Service client initialized")
+print("Deploying server...")
+server_url = service_client.deploy(deploy_config, redeploy=True)
 
-# List all Ray actors using the server API
-print("\nRay actors:")
+print("Deployed to: ", server_url)
+time.sleep(5.0)
+
+print("Health check:")
+health_response = service_client.get_health()
+print("Health Response: ", health_response)
+
+print("Get Ray Actors:")
 ray_actors_response = service_client.get_ray_actors()
-for actor_name in ray_actors_response.actor_names:
+print("Ray actors response: ", ray_actors_response)
+print("Request ID: ", ray_actors_response._request_id.request_id)
+client = httpx.Client(base_url='https://jesterlabs--training-service.modal.run')
+test_request_id = ray_actors_response._request_id.request_id
+print(f"Testing with request_id: {test_request_id}")
+time.sleep(0.2)  # Small delay before polling
+new_response = client.post('/poll_result', json={'request_id': test_request_id})
+print(f"Poll result response: {new_response.status_code}")
+print(f"Poll result body: {new_response.text}")
+ray_actors = ray_actors_response.result()
+print("Ray actors: ", ray_actors)
+
+print(f"\nRay Actors ({len(ray_actors)} total):")
+for actor_name in ray_actors:
     print(f"  - {actor_name}")
-print()
+
+print("Get Store Keys:")
+store_keys_response = service_client.get_store_keys()
+print("Store keys response: ", store_keys_response)
+
+
+# client = httpx.Client(base_url=server_url, timeout=60.0)
+
+# print("Health check:")
+# health_response = client.get("/health")
+# health_response.raise_for_status()
+# health_data = health_response.json()
+# print("Health: ", health_data)
+
+# # Get store keys
+# store_keys_response = client.get("/get_store_keys")
+# store_keys_response.raise_for_status()
+# print("Store keys response: ", store_keys_response)
+# store_keys_data = store_keys_response.json()
+# store_keys = store_keys_data.get("keys", [])
+# print(f"\nStore keys ({len(store_keys)} total):")
+# for key in store_keys:
+#     print(f"  - {key}")
+
+# # Get ray actors result
+# # List all Ray actors using the server API
+# print("\nGetting Ray actors and store keys...")
+# ray_actors_response = client.post("/get_ray_actors", content=b"")
+# ray_actors_response.raise_for_status()
+# ray_actors_data = ray_actors_response.json()
+# print("Ray actors data: ", ray_actors_data)
+
+# ray_actors_future = client.post("/get_result", json={"request_id": ray_actors_data["request_id"]})
+# ray_actors_future.raise_for_status()
+# ray_actors_future = ray_actors_future.json()
+# ray_actors = ray_actors_future.get("actor_names", [])
+# # ray_actors_response = service_client.get_ray_actors()
+# print(f"\nRay Actors ({len(ray_actors)} total):")
+# for actor_name in ray_actors:
+#     print(f"  - {actor_name}")
+# print()
+# ray_actors = ray_actors_response.result()
+# print(f"\nRay Actors ({len(ray_actors)} total):")
+# for actor_name in ray_actors:
+#     print(f"  - {actor_name}")
+# print()
 
 # ============================================================================
 # LoRA CONFIGURATION
@@ -179,20 +246,22 @@ for step in bar:
     # Zero gradients (only for LoRA parameters)
     training_client.zero_grad()
 
+    print("Forward-backward pass...")
     # Forward-backward pass (only LoRA parameters will accumulate gradients!)
     response = training_client.forward_backward(
         data=training_data,
         forward_kwargs={},
     )
+    result = response.result()
+    print("Result: ", result)
+    print("Forward-backward pass complete")
 
-    # Get the result
-    result = training_client.get_result(response.request_id)
-    losses = result.get("loss", [])
+    losses = result.loss
 
     if losses:
         avg_loss = sum(losses) / len(losses)
         bar.set_description(f"LoRA Training - Step {step+1}/{num_training_steps} - Loss: {avg_loss:.4f}")
-    
+
     # Optimizer step with AdamW (only updates LoRA adapter parameters!)
     training_client.optim_step(
         optimizer_params={
@@ -200,7 +269,7 @@ for step in bar:
             "lr": 1e-4,
             "weight_decay": 0.01,
         }
-    )
+    ).result()
 
 print("\n" + "=" * 70)
 print("LoRA Training complete! Loss should have decreased over iterations.")
@@ -217,54 +286,54 @@ sampling_client = training_client.save_weights_and_get_sampling_client(
 )
 print("Sampling client ready")
 
-# ============================================================================
-# INFERENCE EXAMPLE: Text Generation
-# ============================================================================
-print("\n" + "=" * 70)
-print("INFERENCE EXAMPLE: Generating text with trained model")
-print("=" * 70 + "\n")
+# # ============================================================================
+# # INFERENCE EXAMPLE: Text Generation
+# # ============================================================================
+# print("\n" + "=" * 70)
+# print("INFERENCE EXAMPLE: Generating text with trained model")
+# print("=" * 70 + "\n")
 
-print("=" * 70)
-print("Multithreaded request to generate...")
-start_time = time.time()
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [executor.submit(sampling_client.sample, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
-    for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
-        outputs = future.result()
-print(f"Time taken: {time.time() - start_time} seconds")
+# print("=" * 70)
+# print("Multithreaded request to generate...")
+# start_time = time.time()
+# with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+#     futures = [executor.submit(sampling_client.sample, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+#     for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
+#         outputs = future.result()
+# print(f"Time taken: {time.time() - start_time} seconds")
 
-print("=" * 70)
-print("Sequential request to generate...")
-start_time = time.time()
-for i in tqdm(range(len(messages)), desc="Sequential requests"):
-    outputs = sampling_client.sample(
-        input_ids=encoded["input_ids"].slice(i),
-        sampling_params={
-            "max_new_tokens": 512,
-            "temperature": 0.7,
-        },
-    )
-print(f"Time taken: {time.time() - start_time} seconds")
+# print("=" * 70)
+# print("Sequential request to generate...")
+# start_time = time.time()
+# for i in tqdm(range(len(messages)), desc="Sequential requests"):
+#     outputs = sampling_client.sample(
+#         input_ids=encoded["input_ids"].slice(i),
+#         sampling_params={
+#             "max_new_tokens": 512,
+#             "temperature": 0.7,
+#         },
+#     )
+# print(f"Time taken: {time.time() - start_time} seconds")
 
-print("Multithreaded request to generate run # 2...")
-start_time = time.time()
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [executor.submit(sampling_client.sample, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
-    for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
-        outputs = future.result()
-print("Outputs: ", outputs)
-print(f"Time taken: {time.time() - start_time} seconds")
-print("=" * 70)
+# print("Multithreaded request to generate run # 2...")
+# start_time = time.time()
+# with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+#     futures = [executor.submit(sampling_client.sample, input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+#     for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Multithreaded requests"):
+#         outputs = future.result()
+# print("Outputs: ", outputs)
+# print(f"Time taken: {time.time() - start_time} seconds")
+# print("=" * 70)
 
-print("Sequential request to generate run # 2...")
-for i in tqdm(range(len(messages)), desc="Sequential requests"):
-    outputs = sampling_client.sample(
-        input_ids=encoded["input_ids"].slice(i),
-        sampling_params={
-            "max_new_tokens": 100,
-            "temperature": 0.7,
-        },
-    )
-print("Outputs: ", outputs)
-print(f"Time taken: {time.time() - start_time} seconds")
-print("=" * 70)
+# print("Sequential request to generate run # 2...")
+# for i in tqdm(range(len(messages)), desc="Sequential requests"):
+#     outputs = sampling_client.sample(
+#         input_ids=encoded["input_ids"].slice(i),
+#         sampling_params={
+#             "max_new_tokens": 100,
+#             "temperature": 0.7,
+#         },
+#     )
+# print("Outputs: ", outputs)
+# print(f"Time taken: {time.time() - start_time} seconds")
+# print("=" * 70)
