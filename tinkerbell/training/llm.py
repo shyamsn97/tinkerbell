@@ -17,7 +17,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
-from tinkerbell.training.model import TrainingModel
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.utils import get_submodules_with_wildcard
@@ -37,7 +36,44 @@ SUPPORTED_LORA_TARGET_MODULES = [
 logger = logging.getLogger(__name__)
 
 
-class LLM(TrainingModel):
+class LLM:
+
+    def __init__(
+        self,
+        rank: int,
+        world_size: int,
+        model_id: str,
+        model_kwargs: dict[str, Any],
+        parallelize_plan: dict[str, str],
+        lora_config: LoraConfig | None = None,
+        initialize_random_weights: bool = False,
+    ):
+        self.rank = rank
+        self.world_size = world_size
+        self.model_id = model_id
+        self.model_kwargs = model_kwargs
+        self.parallelize_plan = parallelize_plan
+        self.lora_config = lora_config
+        self.initialize_random_weights = initialize_random_weights
+        self.should_merge_lora = False
+        self.setup()
+
+    def setup(self) -> None:
+        """
+        Setup the model.
+        """
+        self.model = self.create_model(
+            model_id=self.model_id,
+            model_kwargs=self.model_kwargs,
+        )
+        self.model = self.setup_lora(
+            model=self.model,
+            lora_config=self.lora_config,
+        )
+        self.model = self.parallelize(
+            model=self.model,
+            parallelize_plan=self.parallelize_plan,
+        )
 
     def create_model(self, model_id: str, model_kwargs: dict[str, Any]) -> nn.Module:
         from transformers import AutoConfig, AutoModelForCausalLM
@@ -154,111 +190,6 @@ class LLM(TrainingModel):
 
         return model
 
-    def _pad_sequence(
-        self,
-        tensors: list[torch.Tensor],
-        padding_side: str = "right",
-        pad_value: int = 0,
-    ) -> torch.Tensor:
-        """Pad a list of 1D tensors to the same length.
-
-        Args:
-            tensors: List of 1D tensors to pad
-            padding_side: 'left' or 'right' padding
-            pad_value: Value to use for padding
-
-        Returns:
-            Stacked tensor of shape (batch_size, max_length)
-        """
-        max_len = max(len(t) for t in tensors)
-        batch_size = len(tensors)
-        device = tensors[0].device
-        dtype = tensors[0].dtype
-
-        # Create output tensor filled with pad_value
-        padded = torch.full(
-            (batch_size, max_len), pad_value, dtype=dtype, device=device
-        )
-
-        for i, tensor in enumerate(tensors):
-            length = len(tensor)
-            if padding_side == "left":
-                padded[i, max_len - length :] = tensor
-            else:  # right padding
-                padded[i, :length] = tensor
-
-        return padded
-
-    def _stack_or_cat_tensors(
-        self,
-        tensors: list[torch.Tensor],
-        padding_side: str = "left",
-        pad_value: int = 0,
-    ) -> torch.Tensor:
-        """Stack or concatenate tensors, handling already-batched and variable-length cases."""
-        if len(tensors) == 1:
-            # Single tensor - return as-is if already batched (2D+), else add batch dim
-            return tensors[0] if tensors[0].ndim >= 2 else tensors[0].unsqueeze(0)
-
-        # Multiple tensors - check if padding needed
-        lengths = [t.shape[-1] if t.ndim >= 2 else len(t) for t in tensors]
-        if len(set(lengths)) > 1:
-            return self._pad_sequence(
-                tensors, padding_side=padding_side, pad_value=pad_value
-            )
-        return torch.cat(tensors) if tensors[0].ndim >= 2 else torch.stack(tensors)
-
-    def stack_inputs(
-        self,
-        data: list[Datum],
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None, dict[str, torch.Tensor]]:
-        """Stack Datum objects into batched tensors. Handles both individual and pre-batched inputs."""
-        device = torch.cuda.current_device()
-        padding_side = data[0].model_input.padding_side or "left"
-        pad_token_id = data[0].model_input.pad_token_id or 0
-
-        # Helper to extract and stack field from all data
-        def stack_field(field_name: str, pad_value: int = 0) -> torch.Tensor | None:
-            tensors = []
-            for datum in data:
-                val = getattr(datum.model_input, field_name, None)
-                if val is None:
-                    return None
-                tensors.append(val.to_torch(device=device))
-            return self._stack_or_cat_tensors(
-                tensors=tensors, padding_side=padding_side, pad_value=pad_value
-            )
-
-        # Stack model inputs
-        model_inputs = {"input_ids": stack_field("tokens", pad_token_id)}
-
-        mask = stack_field("attention_mask", 0)
-        if mask is not None:
-            model_inputs["attention_mask"] = mask
-
-        labels = stack_field("labels", -100)
-
-        # Stack additional inputs
-        if data[0].model_input.additional_inputs:
-            for key in data[0].model_input.additional_inputs.keys():
-                tensors = [
-                    d.model_input.additional_inputs[key].to_torch(device=device)
-                    for d in data
-                ]
-                model_inputs[key] = self._stack_or_cat_tensors(
-                    tensors=tensors, padding_side=padding_side, pad_value=0
-                )
-
-        # Stack loss function inputs
-        loss_fn_inputs = {}
-        if data[0].loss_fn_inputs:
-            for key in data[0].loss_fn_inputs.keys():
-                tensors = [d.loss_fn_inputs[key].to_torch(device=device) for d in data]
-                loss_fn_inputs[key] = self._stack_or_cat_tensors(
-                    tensors=tensors, padding_side=padding_side, pad_value=0
-                )
-
-        return model_inputs, labels, loss_fn_inputs
 
     def forward(
         self,

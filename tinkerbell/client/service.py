@@ -10,6 +10,7 @@ from tinkerbell.types import (
     GetRayActorsResponse,
     HealthResponse,
 )
+from tinkerbell.types.responses import RemoteFuture
 
 logger = logging.getLogger(__name__)
 
@@ -68,19 +69,14 @@ class ServiceClient(BaseClient):
         # Send request immediately
         response = self.client.post("/get_ray_actors", json={})
         response.raise_for_status()
-        remote_future = response.json()
+        remote_future_dict = response.json()
 
         def _parse_result(result: dict[str, Any]):
             return result["actor_names"]
 
-        return TinkerbellFuture(
-            request_id=remote_future["request_id"],
-            server_url=self.server_url,
-            poll_endpoint="/poll_result",
-            result_parser=_parse_result,
-            poll_interval=1.0,
-            timeout=self.timeout,
-            model_id=remote_future.get("model_id"),
+        return self.create_future_from_request_id(
+            remote_future=RemoteFuture(**remote_future_dict),
+            parse_result_fn=_parse_result,
         )
 
     def get_store_keys(self) -> list[str]:

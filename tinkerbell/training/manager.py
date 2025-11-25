@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types.lora_config import LoraConfig
-from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
+from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest, PaddingStrategy
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import get_actor_names_by_prefix, get_free_port
 
@@ -268,6 +268,7 @@ class TrainingManager:
         data: list[Any],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
+        padding_strategy: dict[str, PaddingStrategy] = {},
     ) -> RemoteFuture:
         """Queue a forward-backward request to be processed in the next batch."""
         request = ForwardBackwardRequest(
@@ -276,6 +277,7 @@ class TrainingManager:
             data=data,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
+            padding_strategy=padding_strategy,
         )
         return await self._queue_and_process(request, model_id)
 

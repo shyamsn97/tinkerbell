@@ -65,6 +65,12 @@ class TensorData(StrictBase):
     shape: List[int]
     """The shape of the tensor (see PyTorch tensor.shape)."""
 
+    padding_side: str | None = None
+    """Padding side: 'left' or 'right'. Used when batching sequences of different lengths."""
+
+    padding_value: int | float | None = None
+    """Token ID to use for padding. Required if padding_side is specified."""
+
     @classmethod
     def from_numpy(cls, array: npt.NDArray[Any]) -> TensorData:
         return cls(
@@ -129,3 +135,21 @@ MultimodalDataInputFormat = Union[
     List[MultimodalDataInputItem],
     MultimodalDataInputItem,
 ]
+
+class PaddingStrategy(StrictBase):
+    padding_side: str = "left"
+    padding_value: int | float = 0
+
+    def pad_sequence(
+        self,
+        data: list[TensorData] | list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Pad a list of 1D tensors to the same length."""
+        from tinkerbell.utils import pad_sequence
+        
+        if isinstance(data[0], TensorData):
+            tensors = [d.to_torch() for d in data]
+        else:
+            tensors = data
+        return pad_sequence(tensors, padding_side=self.padding_side, pad_value=self.padding_value)
+
