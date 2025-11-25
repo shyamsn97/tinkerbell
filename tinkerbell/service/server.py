@@ -267,7 +267,6 @@ class TinkerbellServiceDeployment:
             data=request.data,
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
-            padding_strategy=request.padding_strategy,
         )
         return remote_future
 

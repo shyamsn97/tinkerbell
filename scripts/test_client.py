@@ -23,7 +23,7 @@ from functools import partial
 import httpx
 
 deploy_config = ModalDeployConfig(
-    gpu="H100",
+    gpu="A100",
     num_gpus=4,
     timeout=86400,
     container_idle_timeout=600,

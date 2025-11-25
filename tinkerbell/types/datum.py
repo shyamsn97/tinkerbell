@@ -23,8 +23,8 @@ class Datum(StrictBase):
     @classmethod
     def convert_tensors(cls, data: Any) -> Any:
         """Convert torch.Tensor and numpy arrays to TensorData in loss_fn_inputs during construction."""
-        from tinkerbell.utils import process_dict_values, convert_to_tensor_data
-        
+        from tinkerbell.utils import convert_to_tensor_data, process_dict_values
+
         if isinstance(data, dict):
             if "loss_fn_inputs" in data and isinstance(data["loss_fn_inputs"], dict):
                 data["loss_fn_inputs"] = process_dict_values(

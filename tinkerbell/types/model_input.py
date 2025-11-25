@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import torch
 from pydantic import model_validator
 
 from ._models import StrictBase
@@ -30,7 +31,7 @@ class ModelInput(StrictBase):
     def convert_tensors(cls, data: Any) -> Any:
         """Convert torch.Tensor and lists to TensorData during construction."""
         from tinkerbell.utils import convert_to_tensor_data, process_dict_values
-        
+
         if isinstance(data, dict):
             if "tokens" in data and data["tokens"] is not None:
                 data["tokens"] = convert_to_tensor_data("tokens", data["tokens"])

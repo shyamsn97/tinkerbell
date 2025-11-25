@@ -20,6 +20,7 @@ class SamplingActorStatus(Enum):
 @dataclass
 class ActorState:
     """Consolidated state for a sampling actor."""
+
     actor: SGLangSamplingActor
     status: SamplingActorStatus
     pending_ref: Optional[Any] = None  # Ray ObjectRef for async operations
@@ -60,7 +61,9 @@ class SamplingManager:
         if state.status == SamplingActorStatus.PENDING:
             await self._check_pending_status(model_id)
 
-        return self.actors.get(model_id, ActorState(None, SamplingActorStatus.NOT_PRESENT)).status
+        return self.actors.get(
+            model_id, ActorState(None, SamplingActorStatus.NOT_PRESENT)
+        ).status
 
     def get_sampling_actor(self, model_id: str) -> Optional[SGLangSamplingActor]:
         state = self.actors.get(model_id)

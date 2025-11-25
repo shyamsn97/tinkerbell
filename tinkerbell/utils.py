@@ -20,7 +20,7 @@ def convert_to_tensor_data(key: str, value: Any) -> Any:
     """Convert torch.Tensor, numpy array, dict, or 1-D list to TensorData if needed."""
     from tinkerbell.types.data import TensorData
     from tinkerbell.types.tensor_dtype import _key_to_type
-    
+
     if isinstance(value, TensorData):
         return value
     elif isinstance(value, torch.Tensor):
@@ -67,9 +67,7 @@ def pad_sequence(
     device = tensors[0].device
     dtype = tensors[0].dtype
 
-    padded = torch.full(
-        (batch_size, max_len), pad_value, dtype=dtype, device=device
-    )
+    padded = torch.full((batch_size, max_len), pad_value, dtype=dtype, device=device)
 
     for i, tensor in enumerate(tensors):
         length = len(tensor)
@@ -250,6 +248,93 @@ def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = N
             itself.send_signal(signal.SIGQUIT)
         except psutil.NoSuchProcess:
             pass
+
+
+def get_nested(data: dict, path: str, default: Any = None, separator: str = ".") -> Any:
+    """Get a value from a nested dictionary using dot notation.
+
+    Args:
+        data: The dictionary to traverse
+        path: Dot-separated path (e.g., "outer.inner.key")
+        default: Default value if path not found
+        separator: Path separator (default: ".")
+
+    Returns:
+        The value at the nested path, or default if not found
+
+    Examples:
+        >>> data = {"a": {"b": {"c": 42}}}
+        >>> get_nested(data, "a.b.c")
+        42
+        >>> get_nested(data, "a.b.x", default=0)
+        0
+    """
+    keys = path.split(separator)
+    result = data
+
+    try:
+        for key in keys:
+            result = result[key]
+        return result
+    except (KeyError, TypeError):
+        return default
+
+
+def set_nested(data: dict, path: str, value: Any, separator: str = ".") -> None:
+    """Set a value in a nested dictionary using dot notation.
+
+    Args:
+        data: The dictionary to modify (modified in-place)
+        path: Dot-separated path (e.g., "outer.inner.key")
+        value: Value to set
+        separator: Path separator (default: ".")
+
+    Examples:
+        >>> data = {}
+        >>> set_nested(data, "a.b.c", 42)
+        >>> data
+        {"a": {"b": {"c": 42}}}
+    """
+    keys = path.split(separator)
+    current = data
+
+    for key in keys[:-1]:
+        if key not in current:
+            current[key] = {}
+        current = current[key]
+
+    current[keys[-1]] = value
+
+
+class NestedDict(dict):
+    """Dictionary with elegant nested access using dot notation.
+
+    Examples:
+        >>> nd = NestedDict({"a": {"b": {"c": 42}}})
+        >>> nd.get_nested("a.b.c")
+        42
+        >>> nd.get_nested("a.b.x", default=0)
+        0
+        >>> nd.set_nested("a.b.x", 100)
+        >>> nd["a"]["b"]["x"]
+        100
+    """
+
+    def get_nested(self, path: str, default: Any = None, separator: str = ".") -> Any:
+        """Get value using dot notation path."""
+        return get_nested(self, path, default, separator)
+
+    def set_nested(self, path: str, value: Any, separator: str = ".") -> None:
+        """Set value using dot notation path."""
+        set_nested(self, path, value, separator)
+
+    def has_nested(self, path: str, separator: str = ".") -> bool:
+        """Check if a nested path exists."""
+        try:
+            get_nested(self, path, separator=separator)
+            return True
+        except (KeyError, TypeError):
+            return False
 
 
 def model_to_dict(obj, exclude: list[str] = [], exclude_none: bool = False):

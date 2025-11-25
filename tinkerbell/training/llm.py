@@ -17,7 +17,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
-from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.utils import get_submodules_with_wildcard
 
@@ -190,13 +189,12 @@ class LLM:
 
         return model
 
-
     def forward(
         self,
         model_inputs: dict[str, torch.Tensor],
         with_grad: bool = True,
         forward_kwargs: dict[str, Any] = {},
-    ):
+    ) -> torch.Tensor:
         """Forward pass through the model.
 
         Args:
@@ -215,7 +213,7 @@ class LLM:
                 self.model.eval()
                 with torch.no_grad():
                     outputs = self.model(**model_inputs, **forward_kwargs)
-            return outputs
+            return outputs.logits
         except Exception as e:
             tb_str = traceback.format_exc()
             logger.error(f"Error in forward: {e}\n{tb_str}")

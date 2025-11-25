@@ -2,7 +2,7 @@
 from tinkerbell.types._models import BaseModel, StrictBase
 
 # Data types
-from tinkerbell.types.data import TensorData
+from tinkerbell.types.data import PaddingStrategy, TensorData
 
 # Forward/backward types
 from tinkerbell.types.datum import Datum
@@ -68,6 +68,7 @@ __all__ = [
     "TensorDtype",
     # Data types
     "TensorData",
+    "PaddingStrategy",
     # LoRA and training
     "LoraConfig",
     # Loss function types

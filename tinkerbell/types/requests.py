@@ -4,9 +4,9 @@ from pydantic import Field
 
 from ._models import BaseModel, StrictBase
 from .data import MultimodalDataInputFormat, TensorData
-from .loss_fn_type import LossFnType
 from .datum import Datum
 from .lora_config import LoraConfig
+from .loss_fn_type import LossFnType
 from .optimizer import DEFAULT_SCHEDULER_PARAMS
 
 
@@ -42,6 +42,7 @@ class ForwardRequest(StrictBase):
     request_id: Optional[str] = None
     data: list[Datum] = Field(default_factory=lambda: [])
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
+
 
 class ForwardBackwardRequest(StrictBase):
     model_id: str

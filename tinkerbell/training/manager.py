@@ -12,7 +12,10 @@ from fastapi import HTTPException
 from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types.lora_config import LoraConfig
-from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest, PaddingStrategy
+from tinkerbell.types.requests import (
+    ForwardBackwardRequest,
+    ForwardRequest,
+)
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import get_actor_names_by_prefix, get_free_port
 
@@ -21,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class ActorStatus(Enum):
     READY = "ready"
-    INITIALIZING = "initializing"
+    PENDING = "pending"
     NOT_PRESENT = "not_present"
 
 
@@ -30,7 +33,7 @@ class ActorGroup:
         self,
         workers: list[Any],
         model_id: str,
-        status: ActorStatus = ActorStatus.INITIALIZING,
+        status: ActorStatus = ActorStatus.PENDING,
         max_wait_time: float = 600.0,
     ):
         self.workers = workers
@@ -40,7 +43,7 @@ class ActorGroup:
         self.max_wait_time = max_wait_time
 
     async def get_status(self) -> ActorStatus:
-        if self.status == ActorStatus.INITIALIZING:
+        if self.status == ActorStatus.PENDING:
             await self._check_initialization_complete()
         return self.status
 
@@ -154,7 +157,7 @@ class ActorGroup:
         return cls(
             workers=workers,
             model_id=model_id,
-            status=ActorStatus.INITIALIZING,
+            status=ActorStatus.PENDING,
             max_wait_time=max_wait_time,
         )
 
@@ -201,7 +204,7 @@ class ActorGroup:
         return cls(
             workers=workers,
             model_id=model_id,
-            status=ActorStatus.INITIALIZING,
+            status=ActorStatus.PENDING,
             max_wait_time=max_wait_time,
         )
 
@@ -268,7 +271,6 @@ class TrainingManager:
         data: list[Any],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
-        padding_strategy: dict[str, PaddingStrategy] = {},
     ) -> RemoteFuture:
         """Queue a forward-backward request to be processed in the next batch."""
         request = ForwardBackwardRequest(
@@ -277,7 +279,6 @@ class TrainingManager:
             data=data,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
-            padding_strategy=padding_strategy,
         )
         return await self._queue_and_process(request, model_id)
 
