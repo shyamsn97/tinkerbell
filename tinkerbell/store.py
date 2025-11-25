@@ -56,7 +56,17 @@ class GlobalStore:
         )
         if not has_result:
             return None
-        return self.results[request_id]
+        return self.results.get(request_id)
+
+    async def delete_result(self, request_id: str) -> bool:
+        """Delete a result from the store. Returns True if deleted, False if not found."""
+        if request_id in self.results:
+            del self.results[request_id]
+            logger.debug(
+                f"[GlobalStore.delete_result] Deleted result for request_id: {request_id}"
+            )
+            return True
+        return False
 
     async def set_result(self, request_id: str, result: Any):
         logger.info(

@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any, Optional
 
 from tinkerbell.client.base import BaseClient, TinkerbellFuture
@@ -17,11 +18,43 @@ class ServiceClient(BaseClient):
     def __init__(self, server_url: str | None = None, timeout: float = 600.0):
         super().__init__(server_url, timeout)
 
-    def get_health(self) -> HealthResponse:
-        """Get health synchronously (no async on server for this endpoint)."""
-        response = self.client.get("/health")
-        response.raise_for_status()
-        return HealthResponse(**response.json())
+    def get_health(
+        self, max_retries: int = 5, retry_delay: float = 2.0
+    ) -> HealthResponse:
+        """Get health synchronously with retry logic.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+            retry_delay: Initial delay between retries (doubles each retry)
+        """
+        import httpx
+
+        last_exception = None
+        delay = retry_delay
+
+        for attempt in range(max_retries):
+            try:
+                response = self.client.get("/health")
+                response.raise_for_status()
+                return HealthResponse(**response.json())
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ) as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Health check failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}"
+                    )
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    logger.error(f"Health check failed after {max_retries} attempts")
+                    raise
+
+        # Should not reach here, but just in case
+        raise last_exception if last_exception else Exception("Health check failed")
 
     def is_deployed(self) -> bool:
         try:
@@ -57,15 +90,57 @@ class ServiceClient(BaseClient):
         result = response.json()
         return result.get("keys", [])
 
-    def deploy(self, deploy_config: DeployConfig, redeploy: bool = False) -> str:
+    def wait_until_ready(self, max_retries: int = 30, retry_delay: float = 2.0) -> bool:
+        """Wait until server is ready by polling health endpoint.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            True if server becomes ready, False otherwise
+        """
+        logger.info("Waiting for server to be ready...")
+        for attempt in range(max_retries):
+            try:
+                self.get_health(max_retries=1, retry_delay=0.1)
+                logger.info("Server is ready!")
+                return True
+            except Exception:
+                if attempt < max_retries - 1:
+                    logger.info(
+                        f"Server not ready yet (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(
+                        f"Server did not become ready after {max_retries} attempts"
+                    )
+                    return False
+        return False
+
+    def deploy(
+        self,
+        deploy_config: DeployConfig,
+        redeploy: bool = False,
+        wait_for_ready: bool = True,
+    ) -> str:
+        """Deploy the server.
+
+        Args:
+            deploy_config: Deployment configuration
+            redeploy: If True, redeploy even if server_url is already set
+            wait_for_ready: If True, wait for server to be ready before returning
+
+        Returns:
+            Server URL
+        """
         if self.server_url is None or redeploy:
             self.server_url = deploy_config.deploy()
 
-        # Wait for server to be ready
-        logger.info("Waiting for server to be ready...")
-        # while not self.is_deployed():
-        #     time.sleep(1)
-        logger.info("Server is ready!")
+        if wait_for_ready:
+            self.wait_until_ready()
+
         return self.server_url
 
     def create_training_client(

@@ -56,10 +56,25 @@ def returns_future(func):
         request_id = str(uuid.uuid4())
 
         async def _execute():
-            result = await func(self, *args, **kwargs)
-            await self.global_store.set_result.remote(
-                request_id=request_id, result=result
-            )
+            try:
+                result = await func(self, *args, **kwargs)
+                await self.global_store.set_result.remote(
+                    request_id=request_id, result=result
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error in background task for {func.__name__}: {e}", exc_info=True
+                )
+                # Store the error result so the client can see what went wrong
+                error_result = {
+                    "success": False,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "message": f"Error in {func.__name__}: {str(e)}",
+                }
+                await self.global_store.set_result.remote(
+                    request_id=request_id, result=error_result
+                )
 
         _ = asyncio.create_task(_execute())
         # Small yield to let the task start
@@ -111,11 +126,18 @@ class TinkerbellServiceDeployment:
         """
         Poll for result without blocking.
         Returns status: "pending", "completed", or "error"
+
+        Query parameters:
+            delete_after_retrieval: If true, delete the result after returning it (default: true)
         """
         # Manually parse the request body
         body = await http_request.json()
         logger.info(f"[poll_result] ENDPOINT HIT! Body: {body}")
         request = PollResultRequest(**body)
+
+        # Check if we should delete after retrieval (default: true for backward compatibility)
+        delete_after = body.get("delete_after_retrieval", True)
+
         logger.debug(f"[poll_result] Polling for request_id: {request.request_id}")
         results = await self.global_store.get_result.remote(
             request_id=request.request_id
@@ -129,9 +151,36 @@ class TinkerbellServiceDeployment:
                 request_id=request.request_id,
                 result=None,
             )
+
+        # Check if the result indicates an error
+        if isinstance(results, dict) and results.get("success") is False:
+            logger.error(
+                f"[poll_result] Returning error result for request_id: {request.request_id}, error: {results.get('error')}"
+            )
+            # Clean up the error result from store if requested
+            if delete_after:
+                await self.global_store.delete_result.remote(
+                    request_id=request.request_id
+                )
+                logger.debug(
+                    f"[poll_result] Deleted error result for request_id: {request.request_id}"
+                )
+            return PollResultResponse(
+                status="error",
+                request_id=request.request_id,
+                result=results,
+                error=results.get("error", "Unknown error"),
+            )
+
         logger.info(
             f"[poll_result] Returning completed result for request_id: {request.request_id}"
         )
+        # Clean up the completed result from store if requested
+        if delete_after:
+            await self.global_store.delete_result.remote(request_id=request.request_id)
+            logger.debug(
+                f"[poll_result] Deleted completed result for request_id: {request.request_id}"
+            )
         return PollResultResponse(
             status="completed",
             request_id=request.request_id,
@@ -471,6 +520,15 @@ def deploy_on_modal(
             "torch==2.4.0",
             extra_index_url="https://download.pytorch.org/whl/cu126",
         )
+        # .pip_install(
+        #     "packaging",
+        #     "ninja",
+        #     "wheel",
+        #     "setuptools",
+        # )
+        # .run_commands(
+        #     "pip install flash-attn==2.8.3 --no-build-isolation",
+        # )
         .uv_pip_install(
             "pybase64",
             "zmq",

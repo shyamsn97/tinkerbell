@@ -239,12 +239,36 @@ class SGLangSamplingActor:
 
         # Detect if this is a LoRA adapter
         is_lora = self._is_lora_adapter_path(checkpoint_path)
+        lora_name = None  # Initialize to None for non-LoRA cases
 
         if is_lora:
             logger.info(f"Detected LoRA adapter at {checkpoint_path}")
             endpoint = "/load_lora_adapter"
             # Extract adapter name from path (use last directory name)
             lora_name = os.path.basename(os.path.normpath(checkpoint_path))
+
+            # First, try to unload the adapter if it exists to avoid conflicts
+            # This handles the case where the adapter was already loaded in a previous run
+            try:
+                logger.info(
+                    f"Attempting to unload existing adapter '{lora_name}' if present..."
+                )
+                unload_response = self.client.post(
+                    "/unload_lora_adapter",
+                    json={"lora_name": lora_name},
+                    timeout=60.0,
+                )
+                if unload_response.status_code == 200:
+                    logger.info(f"Successfully unloaded existing adapter '{lora_name}'")
+                else:
+                    logger.info(
+                        f"Adapter '{lora_name}' was not present (status: {unload_response.status_code})"
+                    )
+            except Exception as e:
+                logger.info(
+                    f"Could not unload adapter '{lora_name}' (likely doesn't exist): {e}"
+                )
+
             request_data = {
                 "lora_name": lora_name,  # REQUIRED
                 "lora_path": checkpoint_path,  # REQUIRED
@@ -276,7 +300,7 @@ class SGLangSamplingActor:
                 )
 
             response.raise_for_status()
-            result = response.json()
+            _ = response.json()
 
             if is_lora:
                 msg = f"✓ LoRA adapter loaded successfully from {checkpoint_path}"
@@ -286,32 +310,7 @@ class SGLangSamplingActor:
                 msg = f"✓ Checkpoint loaded successfully from {checkpoint_path}"
                 print(msg, flush=True)
                 logger.info(msg)
-            return result
-        except httpx.HTTPError as e:
-            # Check if server died
-            if not self.is_server_alive():
-                exitcode = self.server_process.exitcode
-                error_msg = (
-                    f"SGLang server process died (exit code {exitcode}) during checkpoint loading. "
-                    f"This is likely due to GPU OOM or incompatible checkpoint format."
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-
-            msg = f"✗ Failed to load checkpoint from {checkpoint_path}"
-            print(msg, flush=True)
-            logger.error(msg)
-            logger.error(f"HTTP Error: {type(e).__name__}: {str(e)}")
-            print(f"HTTP Error: {type(e).__name__}: {str(e)}", flush=True)
-            if hasattr(e, "response") and e.response is not None:
-                print(f"Response status: {e.response.status_code}", flush=True)
-                print(f"Response text: {e.response.text}", flush=True)
-                logger.error(f"Response status: {e.response.status_code}")
-                logger.error(f"Response text: {e.response.text}")
-            import traceback
-
-            traceback.print_exc()
-            raise
+            return {"is_lora": is_lora, "lora_name": lora_name}
         except Exception as e:
             # Check if server died
             if not self.is_server_alive():
