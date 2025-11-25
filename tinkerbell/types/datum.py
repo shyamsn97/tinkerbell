@@ -2,7 +2,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from ._models import StrictBase
 from .data import TensorData
@@ -16,11 +16,11 @@ __all__ = ["Datum"]
 class Datum(StrictBase):
     """Single data point combining model input and loss function inputs."""
 
-    loss_fn_inputs: LossFnInputs
-    """Dictionary mapping field names to tensor data"""
-
     model_input: ModelInput
     """Model input as a ModelInput object or a list of token IDs"""
+
+    loss_fn_inputs: LossFnInputs = Field(default_factory=dict)
+    """Dictionary mapping field names to tensor data. Optional."""
 
     @classmethod
     def _maybe_convert_array(cls, key: str, value: Any) -> Any:

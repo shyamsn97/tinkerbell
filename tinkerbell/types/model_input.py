@@ -22,11 +22,19 @@ class ModelInput(StrictBase):
     tokens: TensorData | List[int] | Any
     """List of input token IDs"""
 
+    labels: TensorData | List[int] | Any | None = None
+
     attention_mask: TensorData | List[int] | Any | None = None
     """Optional attention mask"""
 
     additional_inputs: Dict[str, TensorData | List[int] | Any] | None = None
     """Optional additional inputs as tensors"""
+
+    padding_side: str | None = None
+    """Padding side: 'left' or 'right'. Used when batching sequences of different lengths."""
+
+    pad_token_id: int | None = None
+    """Token ID to use for padding. Required if padding_side is specified."""
 
     @classmethod
     def _maybe_convert_array(cls, key: str, value: Any) -> Any:
@@ -77,19 +85,14 @@ class ModelInput(StrictBase):
                     data["additional_inputs"][inner_key] = cls._maybe_convert_array(
                         inner_key, value
                     )
+
+            # Handle labels
+            if "labels" in data and data["labels"] is not None:
+                data["labels"] = cls._maybe_convert_array("labels", data["labels"])
+
         return data
 
-    @classmethod
-    def from_tokens(cls, tokens: List[int] | torch.Tensor) -> ModelInput:
-        """Create a ModelInput from a list of token IDs."""
-        if isinstance(tokens, torch.Tensor):
-            token_data = TensorData.from_torch(tokens)
-        else:
-            token_data = TensorData(data=tokens, dtype="int64", shape=[len(tokens)])
-        return cls(tokens=token_data)
-
-    @property
-    def length(self) -> int:
+    def __len__(self) -> int:
         """Return the total context length."""
         return len(self.tokens)
 

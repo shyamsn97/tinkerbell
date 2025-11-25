@@ -1,8 +1,8 @@
 import logging
 import time
+from typing import Any
 
-import httpx
-
+from tinkerbell.client.base import BaseClient, TinkerbellFuture
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,
@@ -19,7 +19,7 @@ from tinkerbell.types.responses import (
 logger = logging.getLogger(__name__)
 
 
-class SamplingClient:
+class SamplingClient(BaseClient):
     """Client for interacting with the Tinkerbell sampling service."""
 
     def __init__(
@@ -36,41 +36,12 @@ class SamplingClient:
             model_id: ID of the model
             timeout: Request timeout in seconds
         """
-        self.server_url = server_url
-        self.timeout = timeout
-
-        # Configure timeout with separate values for connect and read
-        # This helps with VPN/proxy environments
-        timeout_config = httpx.Timeout(
-            connect=30.0,  # Connection timeout
-            read=self.timeout,  # Read timeout
-            write=30.0,  # Write timeout
-            pool=30.0,  # Pool timeout
-        )
-
-        # Configure transport with retries and connection limits
-        # Set higher limits to support concurrent requests from multiple threads
-        limits = httpx.Limits(
-            max_connections=200,  # Total connection pool size
-            max_keepalive_connections=100,  # Keep-alive connections
-        )
-
-        transport = httpx.HTTPTransport(
-            retries=3,  # Retry failed connections
-            limits=limits,
-        )
-
-        self.client = httpx.Client(
-            base_url=self.server_url,
-            timeout=timeout_config,
-            transport=transport,
-            follow_redirects=True,
-        )
+        super().__init__(server_url, timeout)
         self.model_id = model_id
 
     def wait_until_ready(
         self,
-        poll_interval: float = 2.0,
+        poll_interval: float = 1.0,
         verbose: bool = True,
         timeout: float = 900.0,
     ) -> None:
@@ -116,7 +87,7 @@ class SamplingClient:
                 logger.error("=" * 80)
                 raise TimeoutError(error_msg)
 
-            status = self.get_status()
+            status = self.get_status().result()
 
             # Print if status changed or every 30 seconds
             status_changed = status.status != last_status
@@ -148,26 +119,41 @@ class SamplingClient:
 
             time.sleep(poll_interval)
 
-    def get_status(self) -> ActorStatusResponse:
+    def get_status(self) -> TinkerbellFuture[ActorStatusResponse]:
         """
         Get the status of the sampling actor.
 
         Returns:
-            ActorStatusResponse with current status
+            TinkerbellFuture[ActorStatusResponse] - call .result() to poll for the status
         """
+        # Send request immediately
         request = ActorStatusRequest(model_id=self.model_id)
         response = self.client.post(
             "/get_sampling_actor_status",
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
-        return ActorStatusResponse(**response.json())
+        remote_future = response.json()
+
+        # Parse result
+        def _parse_result(result: dict[str, Any]) -> ActorStatusResponse:
+            return ActorStatusResponse(**result)
+
+        return TinkerbellFuture(
+            request_id=remote_future["request_id"],
+            server_url=self.server_url,
+            poll_endpoint="/poll_result",
+            result_parser=_parse_result,
+            poll_interval=1.0,
+            timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
+        )
 
     def sample(
         self,
         *args,
         **kwargs,
-    ) -> SampleResponse:
+    ) -> TinkerbellFuture[SampleResponse]:
         """
         Sample text from the request.
 
@@ -176,8 +162,9 @@ class SamplingClient:
             **kwargs: Keyword arguments to pass to the SampleRequest
 
         Returns:
-            SampleResponse with outputs, logprobs, and other metadata
+            TinkerbellFuture[SampleResponse] - call .result() to poll for the response
         """
+        # Send request immediately
         # Always include model_id from the client
         if "model_id" not in kwargs:
             kwargs["model_id"] = self.model_id
@@ -192,26 +179,40 @@ class SamplingClient:
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
-        result = SampleResponse(**response.json())
-        return result
+        remote_future = response.json()
+
+        # Parse result
+        def _parse_result(result: dict[str, Any]) -> SampleResponse:
+            return SampleResponse(**result)
+
+        return TinkerbellFuture(
+            request_id=remote_future["request_id"],
+            server_url=self.server_url,
+            poll_endpoint="/poll_result",
+            result_parser=_parse_result,
+            poll_interval=1.0,
+            timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
+        )
 
     def load_checkpoint(
         self,
         checkpoint_path: str,
         pin_lora: bool = False,
-    ) -> LoadCheckpointResponse:
+    ) -> TinkerbellFuture[LoadCheckpointResponse]:
         """
         Start loading a checkpoint from a directory (async operation).
 
-        This method returns immediately after starting the load operation.
+        This method sends the request immediately and returns a future.
         Use wait_until_ready() to poll until the checkpoint is fully loaded.
 
         Args:
             checkpoint_path: Path to the checkpoint directory
 
         Returns:
-            LoadCheckpointResponse with success status and message
+            TinkerbellFuture[LoadCheckpointResponse] - call .result() to poll for the response
         """
+        # Send request immediately
         request = LoadCheckpointRequest(
             model_id=self.model_id,
             checkpoint_path=checkpoint_path,
@@ -224,15 +225,30 @@ class SamplingClient:
         )
 
         response.raise_for_status()
-        return LoadCheckpointResponse(**response.json())
+        remote_future = response.json()
 
-    def shutdown(self) -> ShutdownSamplingActorResponse:
-        """
-        Shutdown the sampling actor.
+        # Parse result
+        def _parse_result(result: dict[str, Any]) -> LoadCheckpointResponse:
+            return LoadCheckpointResponse(**result)
 
-        Returns:
-            ShutdownSamplingActorResponse with success status and message
+        return TinkerbellFuture(
+            request_id=remote_future["request_id"],
+            server_url=self.server_url,
+            poll_endpoint="/poll_result",
+            result_parser=_parse_result,
+            poll_interval=1.0,
+            timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
+        )
+
+    def shutdown(self) -> TinkerbellFuture[ShutdownSamplingActorResponse]:
         """
+                Shutdown the sampling actor.
+
+                Returns:
+        TinkerbellFuture[ShutdownSamplingActorResponse] - call .result() to poll for the response
+        """
+        # Send request immediately
         request = ShutdownSamplingActorRequest(model_id=self.model_id)
 
         response = self.client.post(
@@ -240,7 +256,21 @@ class SamplingClient:
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
-        return ShutdownSamplingActorResponse(**response.json())
+        remote_future = response.json()
+
+        # Parse result
+        def _parse_result(result: dict[str, Any]) -> ShutdownSamplingActorResponse:
+            return ShutdownSamplingActorResponse(**result)
+
+        return TinkerbellFuture(
+            request_id=remote_future["request_id"],
+            server_url=self.server_url,
+            poll_endpoint="/poll_result",
+            result_parser=_parse_result,
+            poll_interval=1.0,
+            timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
+        )
 
     def close(self):
         """Close the HTTP client."""

@@ -2,8 +2,7 @@ import logging
 import time
 from typing import Any, Optional
 
-import httpx
-
+from tinkerbell.client.base import BaseClient, TinkerbellFuture
 from tinkerbell.client.training import TrainingClient
 from tinkerbell.types import (
     CreateTrainingActorsRequest,
@@ -15,46 +14,47 @@ from tinkerbell.types import (
 logger = logging.getLogger(__name__)
 
 
-class ServiceClient:
+class ServiceClient(BaseClient):
     def __init__(self, server_url: str | None = None, timeout: float = 600.0):
-        self.server_url = server_url
-        self.timeout = timeout
+        super().__init__(server_url, timeout)
 
-    def _create_client(self) -> httpx.Client:
-        """Create an httpx client with robust timeout and transport settings."""
-        # Configure timeout with separate values for connect and read
-        # This helps with VPN/proxy environments
-        timeout_config = httpx.Timeout(
-            connect=30.0,  # Connection timeout
-            read=self.timeout,  # Read timeout
-            write=30.0,  # Write timeout
-            pool=30.0,  # Pool timeout
-        )
+    def get_health(
+        self, max_retries: int = 5, retry_delay: float = 2.0
+    ) -> HealthResponse:
+        """Get health synchronously with retry logic.
 
-        # Configure transport with retries and connection limits
-        # Set higher limits to support concurrent requests from multiple threads
-        limits = httpx.Limits(
-            max_connections=200,  # Total connection pool size
-            max_keepalive_connections=100,  # Keep-alive connections
-        )
+        Args:
+            max_retries: Maximum number of retry attempts
+            retry_delay: Initial delay between retries (doubles each retry)
+        """
+        import httpx
 
-        transport = httpx.HTTPTransport(
-            retries=3,  # Retry failed connections
-            limits=limits,
-        )
+        last_exception = None
+        delay = retry_delay
 
-        return httpx.Client(
-            base_url=self.server_url,
-            timeout=timeout_config,
-            transport=transport,
-            follow_redirects=True,
-        )
+        for attempt in range(max_retries):
+            try:
+                response = self.client.get("/health")
+                response.raise_for_status()
+                return HealthResponse(**response.json())
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ) as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Health check failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}"
+                    )
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    logger.error(f"Health check failed after {max_retries} attempts")
+                    raise
 
-    def get_health(self) -> HealthResponse:
-        with self._create_client() as client:
-            response = client.get("/health")
-            response.raise_for_status()
-            return HealthResponse(**response.json())
+        # Should not reach here, but just in case
+        raise last_exception if last_exception else Exception("Health check failed")
 
     def is_deployed(self) -> bool:
         try:
@@ -63,22 +63,84 @@ class ServiceClient:
         except Exception:
             return False
 
-    def get_ray_actors(self) -> GetRayActorsResponse:
+    def get_ray_actors(self) -> TinkerbellFuture[GetRayActorsResponse]:
         """Get list of all Ray actors from the server."""
-        with self._create_client() as client:
-            response = client.post("/get_ray_actors", json={})
-            response.raise_for_status()
-            return GetRayActorsResponse(**response.json())
+        # Send request immediately
+        response = self.client.post("/get_ray_actors", json={})
+        response.raise_for_status()
+        remote_future = response.json()
 
-    def deploy(self, deploy_config: DeployConfig) -> str:
-        if self.server_url is None:
+        def _parse_result(result: dict[str, Any]):
+            return result["actor_names"]
+
+        return TinkerbellFuture(
+            request_id=remote_future["request_id"],
+            server_url=self.server_url,
+            poll_endpoint="/poll_result",
+            result_parser=_parse_result,
+            poll_interval=1.0,
+            timeout=self.timeout,
+            model_id=remote_future.get("model_id"),
+        )
+
+    def get_store_keys(self) -> list[str]:
+        """Get list of all keys from the global store."""
+        response = self.client.get("/get_store_keys")
+        response.raise_for_status()
+        result = response.json()
+        return result.get("keys", [])
+
+    def wait_until_ready(self, max_retries: int = 30, retry_delay: float = 2.0) -> bool:
+        """Wait until server is ready by polling health endpoint.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            True if server becomes ready, False otherwise
+        """
+        logger.info("Waiting for server to be ready...")
+        for attempt in range(max_retries):
+            try:
+                self.get_health(max_retries=1, retry_delay=0.1)
+                logger.info("Server is ready!")
+                return True
+            except Exception:
+                if attempt < max_retries - 1:
+                    logger.info(
+                        f"Server not ready yet (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(
+                        f"Server did not become ready after {max_retries} attempts"
+                    )
+                    return False
+        return False
+
+    def deploy(
+        self,
+        deploy_config: DeployConfig,
+        redeploy: bool = False,
+        wait_for_ready: bool = True,
+    ) -> str:
+        """Deploy the server.
+
+        Args:
+            deploy_config: Deployment configuration
+            redeploy: If True, redeploy even if server_url is already set
+            wait_for_ready: If True, wait for server to be ready before returning
+
+        Returns:
+            Server URL
+        """
+        if self.server_url is None or redeploy:
             self.server_url = deploy_config.deploy()
 
-        # Wait for server to be ready
-        logger.info("Waiting for server to be ready...")
-        while not self.is_deployed():
-            time.sleep(1)
-        logger.info("Server is ready!")
+        if wait_for_ready:
+            self.wait_until_ready()
+
         return self.server_url
 
     def create_training_client(
@@ -126,25 +188,24 @@ class ServiceClient:
             initialize_random_weights=initialize_random_weights,
         )
 
-        with self._create_client() as client:
-            response = client.post(
-                "/create_training_actors",
-                json=request.model_dump(),
-            )
-            response.raise_for_status()
+        response = self.client.post(
+            "/create_training_actors",
+            json=request.model_dump(),
+        )
+        response.raise_for_status()
 
-            # Convert LoraConfig to dict if needed
-            lora_config_dict = None
-            if lora_config:
-                if hasattr(lora_config, "model_dump"):
-                    lora_config_dict = lora_config.model_dump()
-                else:
-                    lora_config_dict = lora_config
+        # Convert LoraConfig to dict if needed
+        lora_config_dict = None
+        if lora_config:
+            if hasattr(lora_config, "model_dump"):
+                lora_config_dict = lora_config.model_dump()
+            else:
+                lora_config_dict = lora_config
 
-            return TrainingClient(
-                server_url=self.server_url,
-                model_id=model_id,
-                timeout=self.timeout,
-                lora_enabled=True,
-                lora_config=lora_config_dict,
-            )
+        return TrainingClient(
+            server_url=self.server_url,
+            model_id=model_id,
+            timeout=self.timeout,
+            lora_enabled=True,
+            lora_config=lora_config_dict,
+        )
