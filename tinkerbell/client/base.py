@@ -20,29 +20,27 @@ class TinkerbellFuture(Generic[T]):
 
     def __init__(
         self,
-        request_id: str,
+        remote_future: RemoteFuture,
         server_url: str,
         poll_endpoint: str,
         result_parser: Callable[[dict[str, Any]], T],
         poll_interval: float = 0.1,
         timeout: float | None = None,
         client_timeout: float = 30.0,
-        model_id: str | None = None,
     ):
         """
         Initialize a TinkerbellFuture.
 
         Args:
-            request_id: The request ID string to poll for
+            remote_future: RemoteFuture object containing request_id and model_id
             server_url: Base URL of the server
             poll_endpoint: Endpoint to poll for results (e.g., "/get_result")
             result_parser: Function to parse the response into the result type
             poll_interval: Interval between polls in seconds
             timeout: Maximum time to wait for result
             client_timeout: Timeout for individual HTTP requests
-            model_id: Optional model ID
         """
-        self._request_id = RemoteFuture(request_id=request_id, model_id=model_id)
+        self._remote_future = remote_future
         self._server_url = server_url
         self._poll_endpoint = poll_endpoint
         self._result_parser = result_parser
@@ -76,7 +74,7 @@ class TinkerbellFuture(Generic[T]):
     @property
     def request_id(self) -> str:
         """Get the request ID for this future."""
-        return self._request_id
+        return self._remote_future.request_id
 
     def result(self) -> Any:
         if self._resolved:
@@ -102,7 +100,7 @@ class TinkerbellFuture(Generic[T]):
                     )
                 # Make the poll request
                 try:
-                    payload = self._request_id.model_dump(exclude_none=True)
+                    payload = self._remote_future.model_dump(exclude_none=True)
                     response = client.post(self._poll_endpoint, json=payload)
                     response.raise_for_status()
                     data = response.json()
@@ -185,22 +183,22 @@ class BaseClient:
             json=request.model_dump(exclude_none=True),
         )
         response.raise_for_status()
-        remote_future = response.json()
+        remote_future = RemoteFuture(**response.json())
         return self.create_future_from_request_id(
-            request_id=remote_future,
+            remote_future=remote_future,
             parse_result_fn=parse_result_fn,
         )
 
     def create_future_from_request_id(
         self,
-        request_id: str | dict[str, Any] | RemoteFuture,
+        remote_future: RemoteFuture,
         parse_result_fn: Callable[[dict[str, Any]], Any] | None = None,
     ) -> TinkerbellFuture[Any]:
         """
-        Create a TinkerbellFuture from an existing request_id.
+        Create a TinkerbellFuture from an existing RemoteFuture.
 
         Args:
-            request_id: The request ID to poll for (string, dict, or RemoteFuture)
+            remote_future: RemoteFuture object containing request_id and model_id
             parse_result_fn: Optional function to parse the result
 
         Returns:
@@ -209,23 +207,11 @@ class BaseClient:
         if parse_result_fn is None:
             parse_result_fn = lambda x: x
 
-        # Extract request_id string and model_id from various formats
-        if isinstance(request_id, RemoteFuture):
-            rid = request_id.request_id
-            mid = request_id.model_id
-        elif isinstance(request_id, dict):
-            rid = request_id.get("request_id")
-            mid = request_id.get("model_id")
-        else:
-            rid = request_id
-            mid = None
-
         return TinkerbellFuture(
-            request_id=rid,
+            remote_future=remote_future,
             server_url=self.server_url,
             poll_endpoint="/poll_result",
             result_parser=parse_result_fn,
             poll_interval=1.0,
             timeout=self.timeout,
-            model_id=mid,
         )

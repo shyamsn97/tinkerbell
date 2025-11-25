@@ -19,6 +19,7 @@ from tinkerbell.types.responses import (
     CreateSamplingActorResponse,
     ForwardBackwardResponse,
     ForwardResponse,
+    RemoteFuture,
     SaveCheckpointResponse,
 )
 
@@ -182,7 +183,10 @@ class TrainingClient(BaseClient):
             )
 
         return self.create_future_from_request_id(
-            request_id=initial_response.request_id,
+            remote_future=RemoteFuture(
+                request_id=initial_response.request_id,
+                model_id=initial_response.model_id,
+            ),
             parse_result_fn=_parse_result,
         )
 
@@ -231,7 +235,10 @@ class TrainingClient(BaseClient):
             )
 
         return self.create_future_from_request_id(
-            request_id=initial_response.request_id,
+            remote_future=RemoteFuture(
+                request_id=initial_response.request_id,
+                model_id=initial_response.model_id,
+            ),
             parse_result_fn=_parse_result,
         )
 
@@ -248,7 +255,9 @@ class TrainingClient(BaseClient):
         Returns:
             TinkerbellFuture[dict[str, Any]] - call .result() to poll for the response
         """
-        return self.create_future_from_request_id(request_id=request_id)
+        return self.create_future_from_request_id(
+            remote_future=RemoteFuture(request_id=request_id, model_id=self.model_id)
+        )
 
     def optim_step(
         self,

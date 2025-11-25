@@ -2,8 +2,6 @@ from typing import Any, Literal, Optional
 
 from ._models import BaseModel
 from .data import TensorData
-from .model_id import ModelID
-from .request_id import RequestID
 
 
 class HealthResponse(BaseModel):
@@ -13,21 +11,21 @@ class HealthResponse(BaseModel):
 
 class CreateTrainingActorsResponse(BaseModel):
     success: bool
-    model_id: ModelID
+    model_id: str
     message: str
 
 
 class ForwardResponse(BaseModel):
-    model_id: ModelID
-    request_id: RequestID | None = None
+    model_id: str
+    request_id: str | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, Any] | None = None
     metrics: Optional[dict[str, float]] = None
 
 
 class ForwardBackwardResponse(BaseModel):
-    model_id: ModelID
-    request_id: RequestID | None = None
+    model_id: str
+    request_id: str | None = None
     loss: float | list[float] | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, TensorData] | None = None
@@ -35,13 +33,13 @@ class ForwardBackwardResponse(BaseModel):
 
 
 class ActorStatusResponse(BaseModel):
-    status: Literal["ready", "initializing", "loading", "not_present"]
+    status: Literal["ready", "pending", "not_present"]
     message: str | None = None
 
 
 class RemoteFuture(BaseModel):
-    request_id: RequestID
-    model_id: ModelID | None = None
+    request_id: str
+    model_id: str | None = None
 
 
 class GetRayActorsResponse(BaseModel):
@@ -49,7 +47,7 @@ class GetRayActorsResponse(BaseModel):
 
 
 class SaveCheckpointResponse(BaseModel):
-    model_id: ModelID
+    model_id: str
     success: bool
     message: str | None = None
     path: Optional[str] = None
@@ -76,19 +74,19 @@ class SampleResponse(BaseModel):
 
 
 class LoadCheckpointResponse(BaseModel):
-    model_id: ModelID
+    model_id: str
     success: bool
     message: str | None = None
 
 
 class ShutdownSamplingActorResponse(BaseModel):
-    model_id: ModelID
+    model_id: str
     success: bool
     message: str | None = None
 
 
 class PollResultResponse(BaseModel):
     status: Literal["pending", "completed", "error"]
-    request_id: RequestID
+    request_id: str
     result: dict[str, Any] | None = None
     error: str | None = None

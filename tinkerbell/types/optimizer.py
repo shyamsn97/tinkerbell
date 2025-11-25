@@ -3,7 +3,6 @@ from typing import Any, Optional
 from typing_extensions import Literal
 
 from ._models import BaseModel, StrictBase
-from .model_id import ModelID
 
 DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
     "name": "adamw",
@@ -34,16 +33,16 @@ class AdamParams(StrictBase):
 
 
 class ZeroGradRequest(StrictBase):
-    model_id: ModelID
+    model_id: str
 
 
 class ZeroGradResponse(BaseModel):
-    model_id: ModelID
+    model_id: str
     message: str
 
 
 class OptimStepRequest(StrictBase):
-    model_id: ModelID
+    model_id: str
     optimizer_params: dict[str, Any]
     adam_params: Optional[AdamParams] = None
     seq_id: Optional[int] = None
@@ -51,7 +50,6 @@ class OptimStepRequest(StrictBase):
 
 
 class OptimStepResponse(BaseModel):
-    model_id: ModelID
+    model_id: str
     message: str
     metrics: Optional[dict[str, float]] = None
-    """Optimization step metrics as key-value pairs"""

@@ -11,7 +11,87 @@ import threading
 from typing import Any
 
 import dill
+import numpy as np
 import psutil
+import torch
+
+
+def convert_to_tensor_data(key: str, value: Any) -> Any:
+    """Convert torch.Tensor, numpy array, dict, or 1-D list to TensorData if needed."""
+    from tinkerbell.types.data import TensorData
+    from tinkerbell.types.tensor_dtype import _key_to_type
+
+    if isinstance(value, TensorData):
+        return value
+    elif isinstance(value, torch.Tensor):
+        return TensorData.from_torch(value)
+    elif isinstance(value, np.ndarray):
+        return TensorData.from_numpy(value)
+    elif (
+        isinstance(value, dict)
+        and "data" in value
+        and "dtype" in value
+        and "shape" in value
+    ):
+        return TensorData(**value)
+    elif isinstance(value, list):
+        return TensorData(
+            data=value, dtype=_key_to_type.get(key, "float32"), shape=[len(value)]
+        )
+    else:
+        return value
+
+
+def process_dict_values(data: dict[str, Any], converter_fn) -> dict[str, Any]:
+    """Apply converter function to all dictionary values."""
+    return {key: converter_fn(key, value) for key, value in data.items()}
+
+
+def pad_sequence(
+    tensors: list[torch.Tensor],
+    padding_side: str = "right",
+    pad_value: int = 0,
+) -> torch.Tensor:
+    """Pad a list of 1D tensors to the same length.
+
+    Args:
+        tensors: List of 1D tensors to pad
+        padding_side: 'left' or 'right' padding
+        pad_value: Value to use for padding
+
+    Returns:
+        Stacked tensor of shape (batch_size, max_length)
+    """
+    max_len = max(len(t) for t in tensors)
+    batch_size = len(tensors)
+    device = tensors[0].device
+    dtype = tensors[0].dtype
+
+    padded = torch.full((batch_size, max_len), pad_value, dtype=dtype, device=device)
+
+    for i, tensor in enumerate(tensors):
+        length = len(tensor)
+        if padding_side == "left":
+            padded[i, max_len - length :] = tensor
+        else:
+            padded[i, :length] = tensor
+
+    return padded
+
+
+def stack_or_cat_tensors(
+    tensors: list[torch.Tensor],
+    padding_side: str = "left",
+    pad_value: int = 0,
+) -> torch.Tensor:
+    """Stack or concatenate tensors, handling already-batched and variable-length cases."""
+    if len(tensors) == 1:
+        return tensors[0] if tensors[0].ndim >= 2 else tensors[0].unsqueeze(0)
+
+    lengths = [t.shape[-1] if t.ndim >= 2 else len(t) for t in tensors]
+    if len(set(lengths)) > 1:
+        return pad_sequence(tensors, padding_side=padding_side, pad_value=pad_value)
+    return torch.cat(tensors) if tensors[0].ndim >= 2 else torch.stack(tensors)
 
 
 def get_actor_names_by_prefix(prefix: str, actors: list[dict[str, Any]]) -> list[str]:
@@ -168,6 +248,93 @@ def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = N
             itself.send_signal(signal.SIGQUIT)
         except psutil.NoSuchProcess:
             pass
+
+
+def get_nested(data: dict, path: str, default: Any = None, separator: str = ".") -> Any:
+    """Get a value from a nested dictionary using dot notation.
+
+    Args:
+        data: The dictionary to traverse
+        path: Dot-separated path (e.g., "outer.inner.key")
+        default: Default value if path not found
+        separator: Path separator (default: ".")
+
+    Returns:
+        The value at the nested path, or default if not found
+
+    Examples:
+        >>> data = {"a": {"b": {"c": 42}}}
+        >>> get_nested(data, "a.b.c")
+        42
+        >>> get_nested(data, "a.b.x", default=0)
+        0
+    """
+    keys = path.split(separator)
+    result = data
+
+    try:
+        for key in keys:
+            result = result[key]
+        return result
+    except (KeyError, TypeError):
+        return default
+
+
+def set_nested(data: dict, path: str, value: Any, separator: str = ".") -> None:
+    """Set a value in a nested dictionary using dot notation.
+
+    Args:
+        data: The dictionary to modify (modified in-place)
+        path: Dot-separated path (e.g., "outer.inner.key")
+        value: Value to set
+        separator: Path separator (default: ".")
+
+    Examples:
+        >>> data = {}
+        >>> set_nested(data, "a.b.c", 42)
+        >>> data
+        {"a": {"b": {"c": 42}}}
+    """
+    keys = path.split(separator)
+    current = data
+
+    for key in keys[:-1]:
+        if key not in current:
+            current[key] = {}
+        current = current[key]
+
+    current[keys[-1]] = value
+
+
+class NestedDict(dict):
+    """Dictionary with elegant nested access using dot notation.
+
+    Examples:
+        >>> nd = NestedDict({"a": {"b": {"c": 42}}})
+        >>> nd.get_nested("a.b.c")
+        42
+        >>> nd.get_nested("a.b.x", default=0)
+        0
+        >>> nd.set_nested("a.b.x", 100)
+        >>> nd["a"]["b"]["x"]
+        100
+    """
+
+    def get_nested(self, path: str, default: Any = None, separator: str = ".") -> Any:
+        """Get value using dot notation path."""
+        return get_nested(self, path, default, separator)
+
+    def set_nested(self, path: str, value: Any, separator: str = ".") -> None:
+        """Set value using dot notation path."""
+        set_nested(self, path, value, separator)
+
+    def has_nested(self, path: str, separator: str = ".") -> bool:
+        """Check if a nested path exists."""
+        try:
+            get_nested(self, path, separator=separator)
+            return True
+        except (KeyError, TypeError):
+            return False
 
 
 def model_to_dict(obj, exclude: list[str] = [], exclude_none: bool = False):

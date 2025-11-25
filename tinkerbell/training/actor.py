@@ -127,9 +127,15 @@ class TrainingActor:
     ) -> torch.Tensor:
         """Forward pass with automatic tensor conversion from list of Datum objects."""
         try:
-            # Stack inputs from list of Datum objects
-            model_inputs, _, _ = self.training_model.stack_inputs(data)
-            # Forward through the model
+            from tinkerbell.training.loss import CROSS_ENTROPY_LOSS_FN
+
+            device = torch.cuda.current_device()
+            padded = CROSS_ENTROPY_LOSS_FN.pad(data, device)
+            model_inputs = {
+                "input_ids": padded["tokens"],
+                "attention_mask": padded["attention_mask"],
+                **padded.get("additional_inputs", {}),
+            }
             outputs = self.training_model.forward(
                 model_inputs=model_inputs,
                 with_grad=with_grad,
@@ -151,24 +157,21 @@ class TrainingActor:
     ):
         """Execute a single training step using list of Datum objects."""
         try:
-            # Stack inputs from list of Datum objects
-            model_inputs, labels, loss_fn_inputs = self.training_model.stack_inputs(
-                data
-            )
+            from tinkerbell.training.loss import CROSS_ENTROPY_LOSS_FN
 
-            # Forward pass
-            outputs = self.training_model.forward(
+            device = torch.cuda.current_device()
+            padded = CROSS_ENTROPY_LOSS_FN.pad(data, device)
+            model_inputs = padded["model_input"]
+            loss_fn_inputs = padded["loss_fn_inputs"]
+
+            logits = self.training_model.forward(
                 model_inputs=model_inputs,
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
 
-            # Compute loss
             if loss_fn == "cross_entropy":
-                # Expect 'labels' in loss_fn_inputs
-                per_batch_losses = ForCausalLMLoss(
-                    logits=outputs.logits, labels=labels, **loss_fn_inputs
-                )
+                per_batch_losses = ForCausalLMLoss(logits=logits, **loss_fn_inputs)
                 loss = per_batch_losses.mean()
                 loss.backward()
             else:

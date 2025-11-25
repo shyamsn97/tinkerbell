@@ -27,7 +27,7 @@ def _convert_tensor_dtype_to_numpy(dtype: TensorDtype) -> npt.DTypeLike:
         raise ValueError(f"Unsupported TensorDtype: {dtype}")
 
 
-def _convert_tensor_dtype_to_torch(dtype: TensorDtype) -> "torch.dtype":
+def _convert_tensor_dtype_to_torch(dtype: TensorDtype) -> torch.dtype:
     """Convert TensorDtype to torch dtype."""
     if dtype == "float32":
         return torch.float32
@@ -47,7 +47,7 @@ def _convert_numpy_dtype_to_tensor(dtype: np.dtype[Any]) -> TensorDtype:
         raise ValueError(f"Unsupported numpy dtype: {dtype}")
 
 
-def _convert_torch_dtype_to_tensor(dtype: "torch.dtype") -> TensorDtype:
+def _convert_torch_dtype_to_tensor(dtype: torch.dtype) -> TensorDtype:
     """Convert torch dtype to TensorDtype."""
     # torch.dtype objects have .is_floating_point
     if getattr(dtype, "is_floating_point", False):
@@ -65,6 +65,12 @@ class TensorData(StrictBase):
     shape: List[int]
     """The shape of the tensor (see PyTorch tensor.shape)."""
 
+    padding_side: str | None = None
+    """Padding side: 'left' or 'right'. Used when batching sequences of different lengths."""
+
+    padding_value: int | float | None = None
+    """Token ID to use for padding. Required if padding_side is specified."""
+
     @classmethod
     def from_numpy(cls, array: npt.NDArray[Any]) -> TensorData:
         return cls(
@@ -74,7 +80,7 @@ class TensorData(StrictBase):
         )
 
     @classmethod
-    def from_torch(cls, tensor: "torch.Tensor") -> TensorData:
+    def from_torch(cls, tensor: torch.Tensor) -> TensorData:
         return cls(
             data=tensor.flatten().tolist(),
             dtype=_convert_torch_dtype_to_tensor(tensor.dtype),
@@ -129,3 +135,23 @@ MultimodalDataInputFormat = Union[
     List[MultimodalDataInputItem],
     MultimodalDataInputItem,
 ]
+
+
+class PaddingStrategy(StrictBase):
+    padding_side: str = "left"
+    padding_value: int | float = 0
+
+    def pad_sequence(
+        self,
+        data: list[TensorData] | list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Pad a list of 1D tensors to the same length."""
+        from tinkerbell.utils import pad_sequence
+
+        if isinstance(data[0], TensorData):
+            tensors = [d.to_torch() for d in data]
+        else:
+            tensors = data
+        return pad_sequence(
+            tensors, padding_side=self.padding_side, pad_value=self.padding_value
+        )

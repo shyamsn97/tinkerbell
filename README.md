@@ -51,35 +51,23 @@ server_url = deploy_service(
 ### 2. Full Fine-Tuning Example
 
 ```python
-from tinkerbell.client.training import TrainingClient
+from tinkerbell.client.service import ServiceClient
 from tinkerbell.types import Datum, ModelInput, TensorData
 
-# Initialize client
-client = TrainingClient(
-    server_url="http://localhost:8000",
+# Initialize service client and create training actors
+service = ServiceClient(server_url="http://localhost:8000")
+client = service.create_training_client(
     model_id="meta-llama/Llama-3.2-1B",
-)
-
-# Create training actors (distributed workers)
-import httpx
-httpx.post(
-    "http://localhost:8000/create_training_actors",
-    json={
-        "world_size": 2,  # Number of GPUs
-        "model_id": "meta-llama/Llama-3.2-1B",
-        "model_kwargs": {"torch_dtype": "bfloat16"},
-        "parallelize_plan": {
-            "model.layers.*.self_attn.q_proj": "column",
-            "model.layers.*.self_attn.k_proj": "column",
-            "model.layers.*.self_attn.v_proj": "column",
-            "model.layers.*.self_attn.o_proj": "row",
-        },
+    tp_size=2,  # Number of GPUs
+    model_kwargs={"torch_dtype": "bfloat16"},
+    parallelize_plan={
+        "model.layers.*.self_attn.q_proj": "column",
+        "model.layers.*.self_attn.k_proj": "column",
+        "model.layers.*.self_attn.v_proj": "column",
+        "model.layers.*.self_attn.o_proj": "row",
     },
-    timeout=600.0,
+    wait_until_ready=True,
 )
-
-# Wait for actors to be ready
-client.wait_until_ready()
 
 # Prepare training data
 prompt = "Question: What is the capital of France? Answer:"
@@ -114,13 +102,8 @@ client.save_checkpoint("/tmp/my_model")
 ### 3. LoRA Fine-Tuning Example
 
 ```python
-from tinkerbell.client.training import TrainingClient
+from tinkerbell.client.service import ServiceClient
 from tinkerbell.types import LoraConfig
-
-client = TrainingClient(
-    server_url="http://localhost:8000",
-    model_id="meta-llama/Llama-3.2-1B",
-)
 
 # Create LoRA configuration
 lora_config = LoraConfig(
@@ -131,19 +114,14 @@ lora_config = LoraConfig(
 )
 
 # Create training actors with LoRA
-import httpx
-httpx.post(
-    "http://localhost:8000/create_training_actors",
-    json={
-        "world_size": 1,
-        "model_id": "meta-llama/Llama-3.2-1B",
-        "model_kwargs": {"torch_dtype": "bfloat16"},
-        "lora_config": lora_config.model_dump(),  # Enable LoRA!
-    },
-    timeout=600.0,
+service = ServiceClient(server_url="http://localhost:8000")
+client = service.create_training_client(
+    model_id="meta-llama/Llama-3.2-1B",
+    tp_size=1,
+    model_kwargs={"torch_dtype": "bfloat16"},
+    lora_config=lora_config.model_dump(),
+    wait_until_ready=True,
 )
-
-client.wait_until_ready()
 
 # Training works the same way as full fine-tuning
 # ... (same training loop as above)
