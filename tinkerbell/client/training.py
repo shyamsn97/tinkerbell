@@ -26,30 +26,6 @@ from tinkerbell.types.responses import (
 logger = logging.getLogger(__name__)
 
 
-class HuggingFaceTokenizer:
-    def __init__(self, model_id: str):
-        from transformers import AutoTokenizer
-
-        self.hf_tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-    def apply_chat_template(
-        self, messages: list[dict[str, str]], *args, **kwargs
-    ) -> list[str]:
-        return self.hf_tokenizer.apply_chat_template(
-            messages, tokenize=False, *args, **kwargs
-        )
-
-    def encode(self, *args, **kwargs) -> dict[str, TensorData]:
-        kwargs["return_tensors"] = "pt"
-        encoded = self.hf_tokenizer.encode(*args, **kwargs)
-        return {k: TensorData.from_torch(v) for k, v in encoded.items()}
-
-    def __call__(self, *args, **kwargs) -> dict[str, TensorData]:
-        kwargs["return_tensors"] = "pt"
-        output = self.hf_tokenizer(*args, **kwargs)
-        return {k: TensorData.from_torch(v) for k, v in output.items()}
-
-
 class TrainingClient(BaseClient):
     """Client for interacting with the Tinkerbell training service."""
 
@@ -75,7 +51,16 @@ class TrainingClient(BaseClient):
         self.lora_enabled = lora_enabled
         self.lora_config = lora_config
         self.model_id = model_id
-        self.tokenizer = self.get_tokenizer()
+        self._tokenizer = None
+
+    def get_tokenizer(self):
+        from transformers import AutoTokenizer
+
+        if self._tokenizer is None:
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token or 0
+        return self._tokenizer
 
     def wait_until_ready(
         self,
@@ -116,17 +101,6 @@ class TrainingClient(BaseClient):
         )
         response.raise_for_status()
         return ActorStatusResponse(**response.json())
-
-    def get_tokenizer(self) -> HuggingFaceTokenizer:
-        """
-        Load and cache a tokenizer.
-
-        Args:
-        Returns:
-            HuggingFaceTokenizer instance
-        """
-        self.tokenizer = HuggingFaceTokenizer(self.model_id)
-        return self.tokenizer
 
     def zero_grad(self) -> TinkerbellFuture[dict[str, Any]]:
         """

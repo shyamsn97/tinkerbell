@@ -95,7 +95,7 @@ def forward_backward_example(client: httpx.Client, model_id: str):
     # Create Datum objects for each input
     datum1 = Datum(
         model_input=ModelInput(
-            tokens=tokenized_inputs['input_ids'].slice(0),
+            input_ids=tokenized_inputs['input_ids'].slice(0),
             attention_mask=tokenized_inputs['attention_mask'].slice(0)
         ),
         loss_fn_inputs={
@@ -105,7 +105,7 @@ def forward_backward_example(client: httpx.Client, model_id: str):
     
     datum2 = Datum(
         model_input=ModelInput(
-            tokens=tokenized_inputs['input_ids'].slice(1),
+            input_ids=tokenized_inputs['input_ids'].slice(1),
             attention_mask=tokenized_inputs['attention_mask'].slice(1)
         ),
         loss_fn_inputs={

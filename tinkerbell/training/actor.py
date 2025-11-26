@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 from tinkerbell.training.llm import LLM
-from tinkerbell.training.loss import ForCausalLMLoss
+from tinkerbell.training.loss import LOSSES
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.types.loss_fn_type import LossFnType
@@ -103,7 +103,7 @@ class TrainingActor:
         self._setup_distributed()
 
         # Initialize the LLM training model
-        # This will create the model, apply LoRA, and parallelize it
+        # This will create the model, tokenizer, setup padding strategies, apply LoRA, and parallelize it
         self.training_model = LLM(
             rank=self.rank,
             world_size=self.world_size,
@@ -127,12 +127,10 @@ class TrainingActor:
     ) -> torch.Tensor:
         """Forward pass with automatic tensor conversion from list of Datum objects."""
         try:
-            from tinkerbell.training.loss import CROSS_ENTROPY_LOSS_FN
-
             device = torch.cuda.current_device()
-            padded = CROSS_ENTROPY_LOSS_FN.pad(data, device)
+            padded = self.training_model.pad(data, device)
             model_inputs = {
-                "input_ids": padded["tokens"],
+                "input_ids": padded["input_ids"],
                 "attention_mask": padded["attention_mask"],
                 **padded.get("additional_inputs", {}),
             }
@@ -156,31 +154,22 @@ class TrainingActor:
         loss_fn_config: Dict[str, float] | None = None,
     ):
         """Execute a single training step using list of Datum objects."""
-        try:
-            from tinkerbell.training.loss import CROSS_ENTROPY_LOSS_FN
+        if loss_fn not in LOSSES:
+            raise ValueError(f"Unknown loss function: {loss_fn}")
 
-            device = torch.cuda.current_device()
-            padded = CROSS_ENTROPY_LOSS_FN.pad(data, device)
-            model_inputs = padded["model_input"]
-            loss_fn_inputs = padded["loss_fn_inputs"]
+        device = torch.cuda.current_device()
+        padded = self.training_model.pad(data, device)
+        model_inputs = padded["model_input"]
+        loss_fn_inputs = padded["loss_fn_inputs"]
 
-            logits = self.training_model.forward(
-                model_inputs=model_inputs,
-                with_grad=True,
-                forward_kwargs=forward_kwargs,
-            )
-
-            if loss_fn == "cross_entropy":
-                per_batch_losses = ForCausalLMLoss(logits=logits, **loss_fn_inputs)
-                loss = per_batch_losses.mean()
-                loss.backward()
-            else:
-                raise ValueError(f"Unknown loss function: {loss_fn}")
-
-        except Exception as e:
-            tb_str = traceback.format_exc()
-            logger.error(f"Error in forward_backward: {e}\n{tb_str}")
-            raise e
+        logits = self.training_model.forward(
+            model_inputs=model_inputs,
+            with_grad=True,
+            forward_kwargs=forward_kwargs,
+        )
+        per_batch_losses = LOSSES[loss_fn](logits=logits, **loss_fn_inputs)
+        loss = per_batch_losses.mean()
+        loss.backward()
 
         return (
             {"loss": [per_batch_loss.item() for per_batch_loss in per_batch_losses]}

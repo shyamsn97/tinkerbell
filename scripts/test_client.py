@@ -4,26 +4,32 @@ Test client for Tinkerbell training and inference with LoRA.
 This script demonstrates:
 1. Deploying a Modal server with tensor parallelism
 2. Creating training actors with LoRA (Low-Rank Adaptation) configuration
-3. Training with LoRA adapters for parameter-efficient fine-tuning
-4. Saving LoRA-adapted weights and transitioning to inference
-5. Running multithreaded and sequential inference tests
+3. Using Renderer to create properly formatted training data with label shifting
+4. Training with LoRA adapters for parameter-efficient fine-tuning
+5. Saving LoRA-adapted weights and transitioning to inference
+6. Running multithreaded and sequential inference tests
 
 LoRA significantly reduces memory usage and training time by only training
 low-rank adapter matrices while keeping the base model weights frozen.
+
+The Renderer handles proper label masking and shifting for next-token prediction.
 """
 
 from tinkerbell.client import TrainingClient, ServiceClient
 from tinkerbell.types import ModalDeployConfig, LoraConfig
-from tinkerbell.types.datum import Datum
-from tinkerbell.types.model_input import ModelInput
+from tinkerbell.renderer import Renderer, TrainOnWhat
 from tqdm import tqdm
 import time
 import concurrent.futures
 from functools import partial
 import httpx
 
+# MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+GPU_TYPE = "H100"
+
 deploy_config = ModalDeployConfig(
-    gpu="A100",
+    gpu=GPU_TYPE, 
     num_gpus=4,
     timeout=86400,
     container_idle_timeout=600,
@@ -70,48 +76,6 @@ print("Get Store Keys:")
 store_keys_response = service_client.get_store_keys()
 print("Store keys response: ", store_keys_response)
 
-
-# client = httpx.Client(base_url=server_url, timeout=60.0)
-
-# print("Health check:")
-# health_response = client.get("/health")
-# health_response.raise_for_status()
-# health_data = health_response.json()
-# print("Health: ", health_data)
-
-# # Get store keys
-# store_keys_response = client.get("/get_store_keys")
-# store_keys_response.raise_for_status()
-# print("Store keys response: ", store_keys_response)
-# store_keys_data = store_keys_response.json()
-# store_keys = store_keys_data.get("keys", [])
-# print(f"\nStore keys ({len(store_keys)} total):")
-# for key in store_keys:
-#     print(f"  - {key}")
-
-# # Get ray actors result
-# # List all Ray actors using the server API
-# print("\nGetting Ray actors and store keys...")
-# ray_actors_response = client.post("/get_ray_actors", content=b"")
-# ray_actors_response.raise_for_status()
-# ray_actors_data = ray_actors_response.json()
-# print("Ray actors data: ", ray_actors_data)
-
-# ray_actors_future = client.post("/get_result", json={"request_id": ray_actors_data["request_id"]})
-# ray_actors_future.raise_for_status()
-# ray_actors_future = ray_actors_future.json()
-# ray_actors = ray_actors_future.get("actor_names", [])
-# # ray_actors_response = service_client.get_ray_actors()
-# print(f"\nRay Actors ({len(ray_actors)} total):")
-# for actor_name in ray_actors:
-#     print(f"  - {actor_name}")
-# print()
-# ray_actors = ray_actors_response.result()
-# print(f"\nRay Actors ({len(ray_actors)} total):")
-# for actor_name in ray_actors:
-#     print(f"  - {actor_name}")
-# print()
-
 # ============================================================================
 # LoRA CONFIGURATION
 # ============================================================================
@@ -130,7 +94,7 @@ print(f"LoRA Config: rank={lora_config.rank}, "
       f"train_unembed={lora_config.train_unembed}")
 
 training_client = service_client.create_training_client(
-    model_id="Qwen/Qwen3-30B-A3B-Instruct-2507",
+    model_id=MODEL_NAME,
     tp_size=2,
     parallelize_plan=parallelize_plan,
     initialize_random_weights=False,
@@ -152,77 +116,33 @@ print("TRAINING EXAMPLE: Running forward-backward passes")
 print("=" * 70)
 
 # Create training examples
-messages = [
+conversations = [
     [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "The capital of France is Paris."},
     ],
     [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is 2 + 2?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Who wrote Romeo and Juliet?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the largest planet in our solar system?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "How many continents are there?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the chemical symbol for gold?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "In what year did World War II end?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the speed of light?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Who painted the Mona Lisa?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the smallest unit of matter?"},
+        {"role": "assistant", "content": "The answer to 2 + 2 is 4."},
     ],
 ]
 
-formatted_messages = training_client.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+print(f"\nTraining on {len(conversations)} conversations...")
 
-print(f"\nTraining on {len(formatted_messages)} examples...")
-print("Texts:")
-for i, text in enumerate(formatted_messages):
-    print(f"  {i+1}. {text}")
+# Use Renderer to create properly formatted training data with masking and shifting
+tokenizer = training_client.get_tokenizer()
+renderer = Renderer(tokenizer)
 
-# Tokenize the training examples
-tokenizer = training_client.tokenizer
-
-encoded = tokenizer(
-    formatted_messages,
-    padding=True,
-    truncation=True,
-    max_length=128,
-    return_tensors="pt"
+# Build training data - train only on assistant responses with proper next-token prediction
+training_data = renderer.build_chat_examples(
+    conversations=conversations,
+    train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    mask_value=-100,
 )
 
-# Create Datum objects for each training example
-training_data = [
-    Datum(
-        model_input=ModelInput(
-            tokens=encoded["input_ids"],
-            attention_mask=encoded["attention_mask"],
-            labels=encoded["input_ids"],
-        )
-    )
-]
+print(f"Created {len(training_data)} training examples with proper label shifting")
 
 # Training loop: Run multiple iterations with gradient descent using LoRA!
 # Note: Only LoRA adapter parameters are trained, base model weights are frozen
@@ -282,12 +202,28 @@ print("\n" + "=" * 70)
 print("INFERENCE EXAMPLE: Generating text with trained model")
 print("=" * 70 + "\n")
 
+# Prepare inference prompts (just the user/system messages, not the assistant response)
+inference_prompts = [
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ],
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is 2 + 2?"},
+    ],
+]
+
+# Tokenize prompts for inference
+formatted_prompts = tokenizer.apply_chat_template(inference_prompts, add_generation_prompt=True, tokenize=False)
+encoded = tokenizer(formatted_prompts, padding=True, return_tensors="pt")
+
 print("=" * 70)
 print("Multithreaded request to generate...")
 start_time = time.time()
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
     # Submit sampling requests and get TinkerbellFuture objects
-    tinkerbell_futures = [sampling_client.sample(input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+    tinkerbell_futures = [sampling_client.sample(input_ids=encoded["input_ids"][i], sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(inference_prompts))]
     # Now resolve the futures in parallel
     thread_futures = [executor.submit(lambda f: f.result(), tf) for tf in tinkerbell_futures]
     outputs_list = []
@@ -300,9 +236,9 @@ print(f"Generated {len(outputs_list)} outputs")
 print("=" * 70)
 print("Sequential request to generate...")
 start_time = time.time()
-for i in tqdm(range(len(messages)), desc="Sequential requests"):
+for i in tqdm(range(len(inference_prompts)), desc="Sequential requests"):
     tinkerbell_future = sampling_client.sample(
-        input_ids=encoded["input_ids"].slice(i),
+        input_ids=encoded["input_ids"][i],
         sampling_params={
             "max_new_tokens": 512,
             "temperature": 0.7,
@@ -315,7 +251,7 @@ print("Multithreaded request to generate run # 2...")
 start_time = time.time()
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
     # Submit sampling requests and get TinkerbellFuture objects
-    tinkerbell_futures = [sampling_client.sample(input_ids=encoded["input_ids"].slice(i), sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(messages))]
+    tinkerbell_futures = [sampling_client.sample(input_ids=encoded["input_ids"][i], sampling_params={"max_new_tokens": 100, "temperature": 0.7}) for i in range(len(inference_prompts))]
     # Now resolve the futures in parallel
     thread_futures = [executor.submit(lambda f: f.result(), tf) for tf in tinkerbell_futures]
     outputs_list = []
@@ -328,9 +264,9 @@ print("=" * 70)
 
 print("Sequential request to generate run # 2...")
 start_time = time.time()
-for i in tqdm(range(len(messages)), desc="Sequential requests"):
+for i in tqdm(range(len(inference_prompts)), desc="Sequential requests"):
     tinkerbell_future = sampling_client.sample(
-        input_ids=encoded["input_ids"].slice(i),
+        input_ids=encoded["input_ids"][i],
         sampling_params={
             "max_new_tokens": 100,
             "temperature": 0.7,

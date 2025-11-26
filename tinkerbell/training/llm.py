@@ -55,12 +55,39 @@ class LLM:
         self.lora_config = lora_config
         self.initialize_random_weights = initialize_random_weights
         self.should_merge_lora = False
+        self.tokenizer = None  # Will be initialized during setup
         self.setup()
 
     def setup(self) -> None:
         """
-        Setup the model.
+        Setup the model, tokenizer, and padding strategies.
         """
+        from transformers import AutoTokenizer
+
+        from tinkerbell.types.data import PaddingStrategy
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+
+        # Setup padding strategies using tokenizer's pad_token_id
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token or 0
+
+        pad_token_id = self.tokenizer.pad_token_id
+
+        self.padding_strategies = {
+            "model_input.input_ids": PaddingStrategy(
+                padding_side="left", padding_value=pad_token_id
+            ),
+            "model_input.attention_mask": PaddingStrategy(
+                padding_side="left", padding_value=0
+            ),
+            "loss_fn_inputs.labels": PaddingStrategy(
+                padding_side="left", padding_value=-100
+            ),
+        }
+
+        # Load and configure model
         self.model = self.create_model(
             model_id=self.model_id,
             model_kwargs=self.model_kwargs,
@@ -189,6 +216,59 @@ class LLM:
 
         return model
 
+    def pad(
+        self,
+        data: list,
+        device: torch.device,
+    ) -> dict[str, torch.Tensor]:
+        """Pad a batch of Datum objects and return dictionary of padded tensors.
+
+        Args:
+            data: List of Datum objects
+            device: Device to place tensors on
+
+        Returns:
+            Dictionary with padded tensors using nested paths from padding strategies
+        """
+        from tinkerbell.utils import get_nested, set_nested
+
+        torch_data = [d.to_torch(device=device) for d in data]
+        result = {}
+
+        # Iterate through all padding strategy keys and apply them
+        for path, padding_strategy in self.padding_strategies.items():
+            # Extract values from each datum using the nested path
+            values = [get_nested(d, path) for d in torch_data]
+
+            # Handle None values - skip padding if all values are None
+            if all(v is None for v in values):
+                continue
+
+            # If some values are None, we need to handle them
+            # For attention_mask, None means all tokens are valid, so create all-ones mask
+            if any(v is None for v in values):
+                if "attention_mask" in path:
+                    # Get the token lengths to create proper attention masks
+                    input_ids_path = path.replace("attention_mask", "input_ids")
+                    input_ids_values = [
+                        get_nested(d, input_ids_path) for d in torch_data
+                    ]
+                    values = [
+                        torch.ones_like(input_ids_values[i]) if v is None else v
+                        for i, v in enumerate(values)
+                    ]
+                else:
+                    # For other fields, skip None values (shouldn't happen for input_ids/labels)
+                    continue
+
+            # Pad the values
+            padded = padding_strategy.pad_sequence(values)
+
+            # Set the padded result back using the nested path
+            set_nested(result, path, padded)
+
+        return result
+
     def forward(
         self,
         model_inputs: dict[str, torch.Tensor],
@@ -238,8 +318,6 @@ class LLM:
         Args:
             save_dir: Directory to save the model to
         """
-        from transformers import AutoTokenizer
-
         if self.rank == 0:
 
             # Check if this is a PEFT model
@@ -265,8 +343,7 @@ class LLM:
 
             # Also save the tokenizer - SGLang needs it to load the model
             try:
-                tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-                tokenizer.save_pretrained(save_dir)
+                self.tokenizer.save_pretrained(save_dir)
             except Exception:
                 logger.warning("Warning: Failed to save tokenizer")
                 logger.warning("The checkpoint may not be loadable by SGLang")

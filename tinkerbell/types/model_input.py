@@ -17,7 +17,7 @@ class ModelInput(StrictBase):
     Simplified from tinker's chunk-based approach for tinkerbell compatibility.
     """
 
-    tokens: TensorData | List[int] | Any
+    input_ids: TensorData | List[int] | Any
     """List of input token IDs"""
 
     attention_mask: TensorData | List[int] | Any | None = None
@@ -33,8 +33,10 @@ class ModelInput(StrictBase):
         from tinkerbell.utils import convert_to_tensor_data, process_dict_values
 
         if isinstance(data, dict):
-            if "tokens" in data and data["tokens"] is not None:
-                data["tokens"] = convert_to_tensor_data("tokens", data["tokens"])
+            if "input_ids" in data and data["input_ids"] is not None:
+                data["input_ids"] = convert_to_tensor_data(
+                    "input_ids", data["input_ids"]
+                )
 
             if "attention_mask" in data and data["attention_mask"] is not None:
                 data["attention_mask"] = convert_to_tensor_data(
@@ -55,20 +57,24 @@ class ModelInput(StrictBase):
 
     def __len__(self) -> int:
         """Return the total context length."""
-        return len(self.tokens)
+        return len(self.input_ids)
 
     def to_torch(self, device: str = "cuda") -> dict[str, torch.Tensor]:
         """Convert ModelInput to a dictionary of torch tensors."""
         return {
-            "tokens": self.tokens.to_torch(device=device),
+            "input_ids": self.input_ids.to_torch(device=device),
             "attention_mask": (
                 self.attention_mask.to_torch(device=device)
                 if self.attention_mask is not None
                 else None
             ),
-            "additional_inputs": {
-                key: value.to_torch(device=device)
-                for key, value in self.additional_inputs.items()
-                if value is not None
-            },
+            "additional_inputs": (
+                {
+                    key: value.to_torch(device=device)
+                    for key, value in self.additional_inputs.items()
+                    if value is not None
+                }
+                if self.additional_inputs is not None
+                else {}
+            ),
         }

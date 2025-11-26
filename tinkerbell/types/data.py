@@ -65,12 +65,6 @@ class TensorData(StrictBase):
     shape: List[int]
     """The shape of the tensor (see PyTorch tensor.shape)."""
 
-    padding_side: str | None = None
-    """Padding side: 'left' or 'right'. Used when batching sequences of different lengths."""
-
-    padding_value: int | float | None = None
-    """Token ID to use for padding. Required if padding_side is specified."""
-
     @classmethod
     def from_numpy(cls, array: npt.NDArray[Any]) -> TensorData:
         return cls(

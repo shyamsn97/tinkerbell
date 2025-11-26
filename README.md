@@ -83,7 +83,7 @@ prompt_tokens = client.tokenizer([prompt])["input_ids"][0]
 labels = [-100] * len(prompt_tokens) + input_ids[len(prompt_tokens):]
 
 datum = Datum(
-    model_input=ModelInput(tokens=input_ids),
+    model_input=ModelInput(input_ids=input_ids),
     loss_fn_inputs={"labels": TensorData.from_list(labels)},
 )
 
