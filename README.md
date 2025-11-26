@@ -13,6 +13,7 @@ Tinkerbell is a distributed training and inference framework for large language 
 
 - 🚀 **Distributed Training**: Multi-GPU training with tensor parallelism
 - 🎯 **LoRA Support**: Parameter-efficient fine-tuning with Low-Rank Adaptation
+- 📝 **Smart Renderer**: Automatic chat formatting, label masking, and label shifting
 - ⚡ **Fast Inference**: Integrated SGLang backend for high-performance sampling
 - 🔄 **Seamless Workflow**: Train → Save → Load → Inference in one API
 - 📦 **Ray-Powered**: Built on Ray for distributed computing
@@ -48,15 +49,15 @@ server_url = deploy_service(
 )
 ```
 
-### 2. Full Fine-Tuning Example
+### 2. Training with Renderer (Recommended)
 
 ```python
-from tinkerbell.client.service import ServiceClient
-from tinkerbell.types import Datum, ModelInput, TensorData
+from tinkerbell.client import ServiceClient
+from tinkerbell.renderer import Renderer, TrainOnWhat
 
 # Initialize service client and create training actors
 service = ServiceClient(server_url="http://localhost:8000")
-client = service.create_training_client(
+training_client = service.create_training_client(
     model_id="meta-llama/Llama-3.2-1B",
     tp_size=2,  # Number of GPUs
     model_kwargs={"torch_dtype": "bfloat16"},
@@ -66,87 +67,149 @@ client = service.create_training_client(
         "model.layers.*.self_attn.v_proj": "column",
         "model.layers.*.self_attn.o_proj": "row",
     },
-    wait_until_ready=True,
 )
+training_client.wait_until_ready()
 
-# Prepare training data
-prompt = "Question: What is the capital of France? Answer:"
-completion = " Paris"
-full_text = prompt + completion
+# Prepare training conversations
+conversations = [
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "The capital of France is Paris."},
+    ],
+]
 
-# Tokenize
-tokenized = client.tokenizer([full_text])
-input_ids = tokenized["input_ids"][0]
+# Use Renderer to create properly formatted training data
+tokenizer = training_client.get_tokenizer()
+renderer = Renderer(tokenizer)
 
-# Create labels
-prompt_tokens = client.tokenizer([prompt])["input_ids"][0]
-labels = [-100] * len(prompt_tokens) + input_ids[len(prompt_tokens):]
-
-datum = Datum(
-    model_input=ModelInput(input_ids=input_ids),
-    loss_fn_inputs={"labels": TensorData.from_list(labels)},
+training_data = renderer.build_chat_examples(
+    conversations=conversations,
+    train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,  # Only train on assistant's response
+    mask_value=-100,
 )
+# Returns a list of Datum objects, each with structure:
+# Datum(
+#     model_input=ModelInput(input_ids=[...], attention_mask=[...]),
+#     loss_fn_inputs={"labels": TensorData([...])}  # -100 for masked tokens
+# )
 
 # Training loop
 for step in range(100):
-    client.zero_grad()
-    result = client.forward_backward(data=[datum])
-    loss_info = client.get_result(result.request_id)
-    print(f"Step {step}, Loss: {loss_info['loss']}")
-    client.optim_step(optimizer_params={"name": "adamw", "lr": 1e-4})
+    training_client.zero_grad()
+    
+    response = training_client.forward_backward(
+        data=training_data,
+        forward_kwargs={},
+    )
+    result = response.result()
+    
+    losses = result.loss
+    if losses:
+        avg_loss = sum(losses) / len(losses)
+        print(f"Step {step}, Loss: {avg_loss:.4f}")
+    
+    training_client.optim_step(
+        optimizer_params={
+            "name": "adamw",
+            "lr": 1e-4,
+            "weight_decay": 0.01,
+        }
+    ).result()
 
 # Save checkpoint
-client.save_checkpoint("/tmp/my_model")
+training_client.save_checkpoint("/tmp/my_model")
 ```
 
 ### 3. LoRA Fine-Tuning Example
 
 ```python
-from tinkerbell.client.service import ServiceClient
+from tinkerbell.client import ServiceClient
 from tinkerbell.types import LoraConfig
+from tinkerbell.renderer import Renderer, TrainOnWhat
 
 # Create LoRA configuration
 lora_config = LoraConfig(
     rank=8,              # LoRA rank
+    seed=42,             # For reproducible initialization
     train_attn=True,     # Apply LoRA to attention layers
     train_mlp=True,      # Apply LoRA to MLP layers
-    train_unembed=True,  # Apply LoRA to output layer
+    train_unembed=False, # Apply LoRA to output layer
 )
 
 # Create training actors with LoRA
 service = ServiceClient(server_url="http://localhost:8000")
-client = service.create_training_client(
+training_client = service.create_training_client(
     model_id="meta-llama/Llama-3.2-1B",
     tp_size=1,
+    lora_config=lora_config.model_dump(),  # Enable LoRA
     model_kwargs={"torch_dtype": "bfloat16"},
-    lora_config=lora_config.model_dump(),
-    wait_until_ready=True,
+)
+training_client.wait_until_ready()
+
+# Prepare training data with Renderer
+tokenizer = training_client.get_tokenizer()
+renderer = Renderer(tokenizer)
+conversations = [
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is 2 + 2?"},
+        {"role": "assistant", "content": "The answer is 4."},
+    ],
+]
+training_data = renderer.build_chat_examples(
+    conversations=conversations,
+    train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    mask_value=-100,
 )
 
-# Training works the same way as full fine-tuning
-# ... (same training loop as above)
+# Training loop (same as above, but only LoRA parameters are updated!)
+for step in range(100):
+    training_client.zero_grad()
+    response = training_client.forward_backward(data=training_data, forward_kwargs={})
+    result = response.result()
+    training_client.optim_step(
+        optimizer_params={"name": "adamw", "lr": 1e-4, "weight_decay": 0.01}
+    ).result()
 
 # Save LoRA adapters (much smaller than full model!)
-client.save_checkpoint("/tmp/lora_adapters")
+training_client.save_checkpoint("/tmp/lora_adapters")
 ```
 
 ### 4. Inference After Training
 
 ```python
 # Save checkpoint and create sampling actor in one call
-sampling_client = client.save_weights_and_get_sampling_client(
+sampling_client = training_client.save_weights_and_get_sampling_client(
     checkpoint_path="/tmp/my_model",
     tp_size=1,
     wait_until_ready=True,
 )
 
-# Generate text
-response = sampling_client.sample(
-    text="Question: What is the capital of France? Answer:",
-    sampling_params={"max_new_tokens": 50, "temperature": 0.7},
-)
+# Prepare inference prompts
+inference_prompts = [
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ],
+]
 
-print(response.outputs[0])
+# Tokenize prompts for inference
+formatted_prompts = tokenizer.apply_chat_template(
+    inference_prompts, 
+    add_generation_prompt=True, 
+    tokenize=False
+)
+encoded = tokenizer(formatted_prompts, padding=True, return_tensors="pt")
+
+# Generate text
+tinkerbell_future = sampling_client.sample(
+    input_ids=encoded["input_ids"][0],
+    sampling_params={"max_new_tokens": 100, "temperature": 0.7},
+)
+outputs = tinkerbell_future.result()
+
+print(outputs)
 ```
 
 ## LoRA Configuration Options
@@ -157,7 +220,7 @@ LoraConfig(
     seed=42,             # Optional: for reproducible initialization
     train_attn=True,     # Apply to attention layers (Q,K,V,O)
     train_mlp=True,      # Apply to MLP/FFN layers
-    train_unembed=True,  # Apply to output embedding layer
+    train_unembed=False, # Apply to output embedding layer
 )
 ```
 
@@ -200,10 +263,10 @@ LoraConfig(
 
 ## Examples
 
-See the `examples/` directory for more:
-- `lora_training_example.py` - Complete LoRA fine-tuning example
-- `training_client_example.py` - Full fine-tuning example
-- `tensor_parallel_minimal.py` - Multi-GPU training setup
+See the `examples/` and `scripts/` directories for more:
+- `scripts/test_client.py` - Complete training and inference example with LoRA and Renderer
+- `examples/tutorial.py` - Getting started tutorial
+- `examples/futures_api_example.py` - Async API examples
 
 ## Requirements
 
