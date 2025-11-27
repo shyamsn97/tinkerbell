@@ -2,7 +2,7 @@ import logging
 import time
 from typing import Any
 
-from tinkerbell.client.base import BaseClient, TinkerbellFuture
+from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,
@@ -186,6 +186,39 @@ class SamplingClient(BaseClient):
             parse_result_fn=_parse_result,
         )
 
+    async def sample_async(
+        self,
+        *args,
+        **kwargs,
+    ) -> AsyncTinkerbellFuture[SampleResponse]:
+        """
+        Async: Sample text. First await submits request, second await gets result.
+
+        Args:
+            *args: Positional arguments to pass to the SampleRequest
+            **kwargs: Keyword arguments to pass to the SampleRequest
+
+        Returns:
+            AsyncTinkerbellFuture[SampleResponse] - await twice for result
+        """
+        if "model_id" not in kwargs:
+            kwargs["model_id"] = self.model_id
+
+        request = SampleRequest(*args, **kwargs)
+        response = await self.async_client.post(
+            "/sample", json=request.model_dump(exclude_none=True)
+        )
+        response.raise_for_status()
+        remote_future = RemoteFuture(**response.json())
+
+        return AsyncTinkerbellFuture(
+            remote_future=remote_future,
+            server_url=self.server_url,
+            result_parser=lambda result: SampleResponse(**result),
+            poll_interval=1.0,
+            timeout=self.timeout,
+        )
+
     def load_checkpoint(
         self,
         checkpoint_path: str,
@@ -227,6 +260,40 @@ class SamplingClient(BaseClient):
             parse_result_fn=_parse_result,
         )
 
+    async def load_checkpoint_async(
+        self,
+        checkpoint_path: str,
+        pin_lora: bool = False,
+    ) -> AsyncTinkerbellFuture[LoadCheckpointResponse]:
+        """
+        Async: Load checkpoint. First await submits request, second await gets result.
+
+        Args:
+            checkpoint_path: Path to the checkpoint directory
+            pin_lora: Whether to pin the LoRA adapter
+
+        Returns:
+            AsyncTinkerbellFuture[LoadCheckpointResponse] - await twice for result
+        """
+        request = LoadCheckpointRequest(
+            model_id=self.model_id,
+            checkpoint_path=checkpoint_path,
+            pin_lora=pin_lora,
+        )
+        response = await self.async_client.post(
+            "/load_checkpoint", json=request.model_dump(exclude_none=True)
+        )
+        response.raise_for_status()
+        remote_future = RemoteFuture(**response.json())
+
+        return AsyncTinkerbellFuture(
+            remote_future=remote_future,
+            server_url=self.server_url,
+            result_parser=lambda result: LoadCheckpointResponse(**result),
+            poll_interval=1.0,
+            timeout=self.timeout,
+        )
+
     def shutdown(self) -> TinkerbellFuture[ShutdownSamplingActorResponse]:
         """
                 Shutdown the sampling actor.
@@ -256,3 +323,29 @@ class SamplingClient(BaseClient):
     def close(self):
         """Close the HTTP client."""
         self.client.close()
+        if self._async_client is not None:
+            import warnings
+
+            warnings.warn(
+                "Async client not closed. Use 'async with' or call await client.aclose()",
+                ResourceWarning,
+            )
+
+    async def aclose(self):
+        """Close both sync and async HTTP clients."""
+        self.client.close()
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()

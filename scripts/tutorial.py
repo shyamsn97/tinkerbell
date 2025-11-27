@@ -20,6 +20,7 @@ from tinkerbell.types import ModalDeployConfig, LoraConfig
 from tinkerbell.renderer import Renderer, TrainOnWhat
 from tqdm import tqdm
 import time
+import asyncio
 import concurrent.futures
 from functools import partial
 import httpx
@@ -276,3 +277,48 @@ for i in tqdm(range(len(inference_prompts)), desc="Sequential requests"):
 print("Last outputs: ", outputs)
 print(f"Time taken: {time.time() - start_time} seconds")
 print("=" * 70)
+
+print("Async request to generate with asyncio.gather (two-phase)...")
+
+
+async def async_sample_two_phase():
+    """
+    Two-phase async sampling for maximum efficiency:
+    Phase 1: Submit all requests in parallel (first await)
+    Phase 2: Poll all results in parallel (second await)
+    """
+    start_time = time.time()
+    
+    # Phase 1: Submit all requests and get futures
+    print(f"Phase 1: Submitting {len(inference_prompts)} async requests...")
+    submit_start = time.time()
+    
+    async def submit_request(i):
+        """First await: submit request and return the future."""
+        return await sampling_client.sample_async(
+            input_ids=encoded["input_ids"][i],
+            sampling_params={"max_new_tokens": 100, "temperature": 0.7}
+        )
+    
+    # Gather all futures (first await for each)
+    futures = await asyncio.gather(*[submit_request(i) for i in range(len(inference_prompts))])
+    print(f"  ✓ All requests submitted in {time.time() - submit_start:.2f}s")
+    
+    # Phase 2: Poll all futures for results
+    print(f"Phase 2: Polling {len(futures)} futures for results...")
+    poll_start = time.time()
+    
+    # Gather all results (second await for each)
+    outputs_list = await asyncio.gather(*futures)
+    print(f"  ✓ All results received in {time.time() - poll_start:.2f}s")
+    
+    elapsed = time.time() - start_time
+    print(f"All {len(outputs_list)} async requests completed!")
+    print(f"Last output: {outputs_list[-1]}")
+    print(f"Total time: {elapsed:.2f} seconds")
+    print("=" * 70)
+    return outputs_list
+
+
+# Run the async function
+asyncio.run(async_sample_two_phase())
