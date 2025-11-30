@@ -33,12 +33,15 @@ class ActorGroup:
         self,
         workers: list[Any],
         model_id: str,
+        model_name: str,
         status: ActorStatus = ActorStatus.PENDING,
         max_wait_time: float = 600.0,
     ):
         self.workers = workers
         self.setup_refs = [worker.setup.remote() for worker in self.workers]
         self.model_id = model_id
+        self.model_name = model_name
+        self.adapters: dict[str, str] = {}  # adapter_name -> checkpoint_path
         self.status = status
         self.max_wait_time = max_wait_time
 
@@ -76,29 +79,53 @@ class ActorGroup:
     async def forward_backward(
         self,
         data: list[Any],
+        adapter_name: Optional[str] = None,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
     ) -> list[dict[str, Any]]:
-        """Forward and backward pass through the model with list of Datum objects."""
+        """Forward and backward pass. Switches to adapter_name if provided."""
         await self._ensure_ready()
         outputs = await self._execute_forward_backward(
-            data, forward_kwargs, return_logprobs
+            data, adapter_name, forward_kwargs, return_logprobs
         )
         return self._restructure_outputs(outputs, len(data))
 
-    async def optim_step(self, optimizer_params: dict[str, Any] = {}) -> None:
+    async def optim_step(
+        self, adapter_name: Optional[str] = None, optimizer_params: dict[str, Any] = {}
+    ) -> None:
         """Step the optimizer for all workers."""
         refs = [
-            worker.optim_step.remote(optimizer_params=optimizer_params)
+            worker.optim_step.remote(
+                adapter_name=adapter_name, optimizer_params=optimizer_params
+            )
             for worker in self.workers
         ]
         await asyncio.gather(*refs)
 
-    async def save_checkpoint(self, checkpoint_path: str) -> None:
-        """Save the checkpoint for all workers."""
+    async def save_checkpoint(
+        self, checkpoint_path: str, adapter_name: str | None = None
+    ) -> None:
+        """Save checkpoint for all workers, optionally for a specific adapter."""
         refs = [
-            worker.save_checkpoint.remote(checkpoint_path=checkpoint_path)
+            worker.save_checkpoint.remote(checkpoint_path, adapter_name)
             for worker in self.workers
+        ]
+        await asyncio.gather(*refs)
+        if adapter_name:
+            self.adapters[adapter_name] = checkpoint_path
+
+    async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> None:
+        """Add a new LoRA adapter to all workers."""
+        refs = [
+            worker.add_adapter.remote(adapter_name, lora_config)
+            for worker in self.workers
+        ]
+        await asyncio.gather(*refs)
+
+    async def set_active_adapter(self, adapter_name: str) -> None:
+        """Set active adapter on all workers."""
+        refs = [
+            worker.set_active_adapter.remote(adapter_name) for worker in self.workers
         ]
         await asyncio.gather(*refs)
 
@@ -125,6 +152,7 @@ class ActorGroup:
     async def _execute_forward_backward(
         self,
         data: list[Any],
+        adapter_name: Optional[str],
         forward_kwargs: dict[str, Any],
         return_logprobs: bool,
     ) -> list[dict[str, Any]]:
@@ -132,6 +160,7 @@ class ActorGroup:
         refs = [
             worker.forward_backward.remote(
                 data=data,
+                adapter_name=adapter_name,
                 forward_kwargs=forward_kwargs,
                 return_logprobs=return_logprobs,
             )
@@ -141,14 +170,12 @@ class ActorGroup:
 
     @classmethod
     def try_reconnect_to_existing_actors(
-        cls, model_id: str, max_wait_time: float = 600.0
+        cls, model_name: str, model_id: str, max_wait_time: float = 600.0
     ) -> ActorGroup:
-        """Get all workers for a model.
-        Raises:
-            ValueError: If any actor cannot be retrieved or if no actors are found.
-        """
+        """Reconnect to existing actors by model_name."""
+        cleaned_name = model_name.replace("/", "_").replace(":", "_").lower()
         actor_names = get_actor_names_by_prefix(
-            f"training_actor_{model_id}",
+            f"training_actor_{cleaned_name}",
             ray.util.list_named_actors(namespace="tinkerbell"),
         )
         workers = [
@@ -157,6 +184,7 @@ class ActorGroup:
         return cls(
             workers=workers,
             model_id=model_id,
+            model_name=model_name,
             status=ActorStatus.PENDING,
             max_wait_time=max_wait_time,
         )
@@ -166,18 +194,20 @@ class ActorGroup:
         cls,
         world_size: int,
         model_id: str,
+        model_name: str,
         model_kwargs: dict[str, Any],
         parallelize_plan: dict[str, str],
         scheduler_params: dict[str, Any],
         ray_worker_options: dict[str, Any] = {},
         lora_config: Optional[dict[str, Any]] = None,
+        adapter_name: Optional[str] = None,
         initialize_random_weights: bool = False,
         max_wait_time: float = 600.0,
     ) -> ActorGroup:
-        """Create all training actors for the group."""
+        """Create training actors for the group."""
         master_addr = "127.0.0.1"
         master_port = str(get_free_port())
-        cleaned_name = model_id.replace("/", "_").replace(":", "_").lower()
+        cleaned_name = model_name.replace("/", "_").replace(":", "_").lower()
 
         workers = []
         for rank in range(world_size):
@@ -197,6 +227,7 @@ class ActorGroup:
                 parallelize_plan=parallelize_plan,
                 scheduler_params=scheduler_params,
                 lora_config=lora_config,
+                adapter_name=adapter_name,
                 initialize_random_weights=initialize_random_weights,
             )
             workers.append(worker)
@@ -204,6 +235,7 @@ class ActorGroup:
         return cls(
             workers=workers,
             model_id=model_id,
+            model_name=model_name,
             status=ActorStatus.PENDING,
             max_wait_time=max_wait_time,
         )
@@ -243,128 +275,162 @@ class TrainingManager:
             except asyncio.CancelledError:
                 pass
 
-    async def get_actor_status(self, model_id: str) -> ActorStatus:
+    async def get_actor_status(self, model_name: str) -> ActorStatus:
         """Check if training actors are ready."""
-        if model_id not in self.actor_groups:
+        if model_name not in self.actor_groups:
             return ActorStatus.NOT_PRESENT
-        return await self.actor_groups[model_id].get_status()
+        return await self.actor_groups[model_name].get_status()
 
     async def forward(
         self,
-        model_id: str,
+        model_name: str,
         data: list[Any],
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
     ) -> RemoteFuture:
-        """Queue a forward request to be processed in the next batch."""
+        """Queue a forward request."""
         request = ForwardRequest(
             request_id=str(uuid.uuid4()),
-            model_id=model_id,
+            model_id=model_name,  # Use model_name as the routing key
             data=data,
             forward_kwargs=forward_kwargs,
         )
-        return await self._queue_and_process(request, model_id)
+        return await self._queue_and_process(request, model_name)
 
     async def forward_backward(
         self,
-        model_id: str,
+        model_name: str,
         data: list[Any],
+        adapter_name: Optional[str] = None,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
     ) -> RemoteFuture:
-        """Queue a forward-backward request to be processed in the next batch."""
+        """Queue a forward-backward request."""
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
-            model_id=model_id,
+            model_id=model_name,
+            adapter_name=adapter_name,
             data=data,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
         )
-        return await self._queue_and_process(request, model_id)
+        return await self._queue_and_process(request, model_name)
 
-    async def zero_grad(self, model_id: str) -> None:
-        """Zero the gradients for all workers."""
-        actor_group = self._get_actor_group_or_raise(model_id)
-        await actor_group.zero_grad()
+    async def zero_grad(self, model_name: str) -> None:
+        """Zero gradients for all workers."""
+        await self._get_actor_group_or_raise(model_name).zero_grad()
 
     async def optim_step(
-        self, model_id: str, optimizer_params: dict[str, Any] = {}
+        self,
+        model_name: str,
+        adapter_name: Optional[str] = None,
+        optimizer_params: dict[str, Any] = {},
     ) -> None:
-        """Step the optimizer for all workers."""
-        actor_group = self._get_actor_group_or_raise(model_id)
-        await actor_group.optim_step(optimizer_params=optimizer_params)
+        """Step optimizer for all workers."""
+        await self._get_actor_group_or_raise(model_name).optim_step(
+            adapter_name=adapter_name, optimizer_params=optimizer_params
+        )
 
-    async def save_checkpoint(self, model_id: str, checkpoint_path: str) -> None:
-        """Save the checkpoint for all workers."""
-        actor_group = self._get_actor_group_or_raise(model_id)
-        await actor_group.save_checkpoint(checkpoint_path=checkpoint_path)
+    async def save_checkpoint(
+        self, model_name: str, checkpoint_path: str, adapter_name: str | None = None
+    ) -> None:
+        """Save checkpoint, optionally for a specific adapter."""
+        await self._get_actor_group_or_raise(model_name).save_checkpoint(
+            checkpoint_path, adapter_name
+        )
+
+    async def set_active_adapter(self, model_name: str, adapter_name: str) -> None:
+        """Set active adapter for training."""
+        await self._get_actor_group_or_raise(model_name).set_active_adapter(
+            adapter_name
+        )
+
+    def get_adapter_paths(self, model_name: str) -> dict[str, str]:
+        """Get saved adapter paths for a model group."""
+        if model_name in self.actor_groups:
+            return self.actor_groups[model_name].adapters.copy()
+        return {}
 
     async def create_training_actors(
         self,
         world_size: int,
         model_id: str,
-        model_kwargs: dict[str, Any],
-        parallelize_plan: dict[str, str],
-        scheduler_params: dict[str, Any],
+        model_name: Optional[str] = None,
+        adapter_name: Optional[str] = None,
+        model_kwargs: dict[str, Any] = {},
+        parallelize_plan: dict[str, str] = {},
+        scheduler_params: dict[str, Any] = {},
         ray_worker_options: dict[str, Any] = {},
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
         initialize_random_weights: bool = False,
     ) -> str:
-        """Create a training worker for the given model id."""
+        """Create or add adapter to training actors."""
         await self.start()
-        if model_id in self.actor_groups:
-            return model_id
+        model_name = model_name or model_id
 
-        # Try to reconnect to existing actors first
+        lora_config_dict = None
+        if lora_config is not None:
+            lora_config_dict = (
+                lora_config
+                if isinstance(lora_config, dict)
+                else lora_config.model_dump()
+            )
+
+        # If actor group exists, add adapter to it
+        if model_name in self.actor_groups:
+            if adapter_name and lora_config_dict:
+                await self.actor_groups[model_name].add_adapter(
+                    adapter_name, lora_config_dict
+                )
+            return model_name
+
+        # Try reconnect
         try:
-            _ = self._get_actor_group_or_raise(model_id)
-            return model_id
+            existing = ActorGroup.try_reconnect_to_existing_actors(
+                model_name, model_id, self.max_wait_time
+            )
+            self.actor_groups[model_name] = existing
+            if adapter_name and lora_config_dict:
+                await existing.add_adapter(adapter_name, lora_config_dict)
+            return model_name
         except Exception:
             pass
 
-        # Parse LoRA config if provided as dict
-        lora_config_dict = None
-        if lora_config is not None:
-            if isinstance(lora_config, dict):
-                lora_config_dict = lora_config
-            else:
-                lora_config_dict = lora_config.model_dump()
-
-        # Create new actors if reconnection failed
-        self.actor_groups[model_id] = ActorGroup.create_actor_group(
+        # Create new actor group
+        self.actor_groups[model_name] = ActorGroup.create_actor_group(
             world_size=world_size,
             model_id=model_id,
+            model_name=model_name,
             model_kwargs=model_kwargs,
             parallelize_plan=parallelize_plan,
             scheduler_params=scheduler_params,
             ray_worker_options=ray_worker_options,
             lora_config=lora_config_dict,
+            adapter_name=adapter_name,
             initialize_random_weights=initialize_random_weights,
             max_wait_time=self.max_wait_time,
         )
+        return model_name
 
-        return model_id
-
-    # Private helper methods
-    def _get_actor_group_or_raise(self, model_id: str) -> ActorGroup:
+    def _get_actor_group_or_raise(
+        self, model_name: str, model_id: str = ""
+    ) -> ActorGroup:
         """Get actor group or raise ValueError if not found."""
-        if model_id not in self.actor_groups:
-            # Try to reconnect to existing actors before raising
-            existing_group = ActorGroup.try_reconnect_to_existing_actors(model_id)
-            self.actor_groups[model_id] = existing_group
-        return self.actor_groups[model_id]
+        if model_name not in self.actor_groups:
+            existing = ActorGroup.try_reconnect_to_existing_actors(
+                model_name, model_id or model_name, self.max_wait_time
+            )
+            self.actor_groups[model_name] = existing
+        return self.actor_groups[model_name]
 
     async def _queue_and_process(
-        self, request: ForwardRequest | ForwardBackwardRequest, model_id: str
+        self, request: ForwardRequest | ForwardBackwardRequest, model_name: str
     ) -> RemoteFuture:
         """Queue a request and optionally process immediately."""
         await self.global_store.add_request_to_queue.remote(request=request)
         if self.clock_cycle <= 0.0:
-            await self._process_batch(model_id)
-        return RemoteFuture(
-            request_id=request.request_id,
-            model_id=model_id,
-        )
+            await self._process_batch(model_name)
+        return RemoteFuture(request_id=request.request_id, model_id=model_name)
 
     async def _batch_processor_loop(self) -> None:
         """Background task that processes batches at regular intervals."""
@@ -403,64 +469,45 @@ class TrainingManager:
             batch_data.extend(req.data)
         return batch_data, request_sizes
 
-    async def _process_batch(self, model_id: str) -> None:
-        """Process a batch of requests for a specific model."""
+    async def _process_batch(self, model_name: str) -> None:
+        """Process a batch of requests for a model."""
         try:
-            print(
-                f"[_process_batch] Processing batch for model_id: {model_id}",
-                flush=True,
-            )
-            logger.info(f"[_process_batch] Processing batch for model_id: {model_id}")
-            requests = await self._get_pending_requests(model_id)
-            print(
-                f"[_process_batch] Found {len(requests)} pending requests", flush=True
-            )
+            logger.info(f"[_process_batch] Processing batch for: {model_name}")
+            requests = await self._get_pending_requests(model_name)
             logger.info(f"[_process_batch] Found {len(requests)} pending requests")
             if not requests:
                 return
 
-            await self.global_store.clear_request_queue.remote(model_id=model_id)
+            await self.global_store.clear_request_queue.remote(model_id=model_name)
 
-            status = await self.get_actor_status(model_id)
-            logger.info(f"[_process_batch] Actor status: {status}")
+            status = await self.get_actor_status(model_name)
             if status != ActorStatus.READY:
-                logger.warning(
-                    f"[_process_batch] Actors not ready for model {model_id}, skipping batch"
-                )
+                logger.warning(f"[_process_batch] Actors not ready for {model_name}")
                 return
 
             batch_data, request_sizes = self._prepare_batch_data(requests)
-            logger.info(
-                f"[_process_batch] Executing batch with {len(batch_data)} data items"
-            )
-            output = await self._execute_batch(model_id, requests[0], batch_data)
-            logger.info(
-                f"[_process_batch] Batch execution complete, distributing results"
-            )
-            logger.info(
-                f"[_process_batch] Output type: {type(output)}, length: {len(output) if output else 'None'}"
-            )
+            output = await self._execute_batch(model_name, requests[0], batch_data)
             await self._distribute_results(requests, output, request_sizes)
             logger.info(f"[_process_batch] Batch processing complete")
         except Exception as e:
             logger.error(
-                f"[_process_batch] EXCEPTION in batch processing for {model_id}: {e}",
-                exc_info=True,
+                f"[_process_batch] EXCEPTION for {model_name}: {e}", exc_info=True
             )
             raise
 
-    async def _get_pending_requests(self, model_id: str) -> list[Any]:
+    async def _get_pending_requests(self, model_name: str) -> list[Any]:
         """Get all pending requests for a model."""
         request_queue = await self.global_store.get_request_queue.remote()
-        return request_queue.get(model_id, [])
+        return request_queue.get(model_name, [])
 
     async def _execute_batch(
-        self, model_id: str, sample_request: Any, batch_data: list[Any]
+        self, model_name: str, sample_request: Any, batch_data: list[Any]
     ) -> list[dict[str, Any]]:
         """Execute the batched forward-backward pass."""
-        actor_group = self._get_actor_group_or_raise(model_id)
+        actor_group = self._get_actor_group_or_raise(model_name)
         return await actor_group.forward_backward(
             data=batch_data,
+            adapter_name=getattr(sample_request, "adapter_name", None),
             forward_kwargs=sample_request.forward_kwargs,
             return_logprobs=getattr(sample_request, "return_logprobs", False),
         )

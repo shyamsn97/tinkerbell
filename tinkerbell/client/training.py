@@ -6,13 +6,12 @@ from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, Tinkerbell
 from tinkerbell.client.sampling import SamplingClient
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.datum import Datum
-from tinkerbell.types.optimizer import OptimStepRequest
+from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     CreateSamplingActorRequest,
     ForwardRequest,
     SaveCheckpointRequest,
-    ZeroGradRequest,
 )
 from tinkerbell.types.responses import (
     ActorStatusResponse,
@@ -33,14 +32,18 @@ class TrainingClient(BaseClient):
         self,
         server_url: str,
         model_id: str,
+        model_name: Optional[str] = None,
+        adapter_name: Optional[str] = None,
         timeout: float = 600.0,
         lora_enabled: bool = False,
         lora_config: Optional[dict[str, Any]] = None,
     ):
         super().__init__(server_url, timeout)
+        self.model_id = model_id
+        self.model_name = model_name or model_id
+        self.adapter_name = adapter_name
         self.lora_enabled = lora_enabled
         self.lora_config = lora_config
-        self.model_id = model_id
         self._tokenizer = None
 
     def get_tokenizer(self):
@@ -68,7 +71,7 @@ class TrainingClient(BaseClient):
 
     def get_actor_status(self) -> ActorStatusResponse:
         """Get the status of training actors."""
-        request = ActorStatusRequest(model_id=self.model_id)
+        request = ActorStatusRequest(model_id=self.model_name)
         response = self.client.post(
             "/get_actor_status", json=request.model_dump(exclude_none=True)
         )
@@ -80,19 +83,23 @@ class TrainingClient(BaseClient):
     def zero_grad(self) -> TinkerbellFuture[dict[str, Any]]:
         """Zero out gradients."""
         return self.create_future(
-            request=ZeroGradRequest(model_id=self.model_id), endpoint="/zero_grad"
+            request=ZeroGradRequest(
+                model_id=self.model_name, adapter_name=self.adapter_name
+            ),
+            endpoint="/zero_grad",
         )
 
     async def zero_grad_async(self) -> AsyncTinkerbellFuture[dict[str, Any]]:
-        """Async: Zero out gradients. First await submits request, second await gets result."""
-        request = ZeroGradRequest(model_id=self.model_id)
+        """Async: Zero out gradients."""
+        request = ZeroGradRequest(
+            model_id=self.model_name, adapter_name=self.adapter_name
+        )
         response = await self.async_client.post(
             "/zero_grad", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future = RemoteFuture(**response.json())
         return AsyncTinkerbellFuture(
-            remote_future=remote_future,
+            remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
             result_parser=lambda x: x,
             poll_interval=1.0,
@@ -107,7 +114,7 @@ class TrainingClient(BaseClient):
     ) -> ForwardRequest:
         """Build forward request."""
         return ForwardRequest(
-            model_id=self.model_id,
+            model_id=self.model_name,
             inputs=inputs,
             forward_kwargs=forward_kwargs or {},
             request_id=request_id,
@@ -176,7 +183,8 @@ class TrainingClient(BaseClient):
     ) -> dict[str, Any]:
         """Build forward_backward request payload."""
         return {
-            "model_id": self.model_id,
+            "model_id": self.model_name,
+            "adapter_name": self.adapter_name,
             "data": [datum.model_dump() for datum in data],
             "forward_kwargs": forward_kwargs or {},
             "return_logprobs": return_logprobs,
@@ -245,32 +253,35 @@ class TrainingClient(BaseClient):
     def get_result(self, request_id: str) -> TinkerbellFuture[dict[str, Any]]:
         """Get the result of an async forward/backward request (deprecated)."""
         return self.create_future_from_request_id(
-            RemoteFuture(request_id=request_id, model_id=self.model_id)
+            RemoteFuture(request_id=request_id, model_id=self.model_name)
         )
 
     def optim_step(
         self, optimizer_params: Optional[dict[str, Any]] = None
     ) -> TinkerbellFuture[dict[str, Any]]:
-        """Perform optimizer step."""
+        """Perform optimizer step for this client's adapter."""
         request = OptimStepRequest(
-            model_id=self.model_id, optimizer_params=optimizer_params or {}
+            model_id=self.model_name,
+            adapter_name=self.adapter_name,
+            optimizer_params=optimizer_params or {},
         )
         return self.create_future(request=request, endpoint="/optim_step")
 
     async def optim_step_async(
         self, optimizer_params: Optional[dict[str, Any]] = None
     ) -> AsyncTinkerbellFuture[dict[str, Any]]:
-        """Async: Perform optimizer step. First await submits request, second await gets result."""
+        """Async: Perform optimizer step for this client's adapter."""
         request = OptimStepRequest(
-            model_id=self.model_id, optimizer_params=optimizer_params or {}
+            model_id=self.model_name,
+            adapter_name=self.adapter_name,
+            optimizer_params=optimizer_params or {},
         )
         response = await self.async_client.post(
             "/optim_step", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future = RemoteFuture(**response.json())
         return AsyncTinkerbellFuture(
-            remote_future=remote_future,
+            remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
             result_parser=lambda x: x,
             poll_interval=1.0,
@@ -280,9 +291,11 @@ class TrainingClient(BaseClient):
     def save_checkpoint(
         self, checkpoint_path: str
     ) -> TinkerbellFuture[SaveCheckpointResponse]:
-        """Save model checkpoint."""
+        """Save model checkpoint (or specific adapter if lora_enabled)."""
         request = SaveCheckpointRequest(
-            model_id=self.model_id, checkpoint_path=checkpoint_path
+            model_id=self.model_name,
+            checkpoint_path=checkpoint_path,
+            adapter_name=self.adapter_name,
         )
         return self.create_future(
             request=request,
@@ -293,17 +306,18 @@ class TrainingClient(BaseClient):
     async def save_checkpoint_async(
         self, checkpoint_path: str
     ) -> AsyncTinkerbellFuture[SaveCheckpointResponse]:
-        """Async: Save model checkpoint. First await submits request, second await gets result."""
+        """Async: Save model checkpoint."""
         request = SaveCheckpointRequest(
-            model_id=self.model_id, checkpoint_path=checkpoint_path
+            model_id=self.model_name,
+            checkpoint_path=checkpoint_path,
+            adapter_name=self.adapter_name,
         )
         response = await self.async_client.post(
             "/save_checkpoint", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future = RemoteFuture(**response.json())
         return AsyncTinkerbellFuture(
-            remote_future=remote_future,
+            remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
             result_parser=lambda r: SaveCheckpointResponse(**r),
             poll_interval=1.0,
@@ -317,34 +331,53 @@ class TrainingClient(BaseClient):
         engine_kwargs: Optional[dict[str, Any]] = None,
         wait_until_ready: bool = True,
     ) -> SamplingClient:
-        """Save model weights and return a loaded sampling client for generation."""
+        """Save weights and return a sampling client.
+
+        For LoRA: Creates actor with base model, then loads LoRA adapter.
+        For full model: Creates actor directly with checkpoint path (SGLang does conversion).
+        """
         from tinkerbell.client.sampling import SamplingClient
 
-        # Save checkpoint
         self.save_checkpoint(checkpoint_path).result()
 
-        # Create sampling actor
+        is_lora = self.adapter_name is not None
+        final_engine_kwargs = engine_kwargs or {}
+
+        if is_lora:
+            # LoRA: Create actor with base model, then load adapter
+            actor_model_id = self.model_id
+        else:
+            # Full model: Create actor directly with checkpoint (SGLang converts HF format)
+            # Disable LoRA mode since it's not needed
+            actor_model_id = checkpoint_path
+            final_engine_kwargs = {**final_engine_kwargs, "enable_lora": False}
+
         request = CreateSamplingActorRequest(
-            model_id=self.model_id,
+            model_id=actor_model_id,
+            model_name=self.model_name,
             tp_size=tp_size or 1,
-            engine_kwargs=engine_kwargs or {},
+            engine_kwargs=final_engine_kwargs,
         )
         response = self.client.post("/create_sampling_actor", json=request.model_dump())
         response.raise_for_status()
         result = CreateSamplingActorResponse(**response.json())
-
         if not result.success:
             raise RuntimeError(f"Failed to create sampling actor: {result.message}")
 
-        # Create and initialize sampling client
         sampling_client = SamplingClient(
-            server_url=self.server_url, model_id=self.model_id, timeout=self.timeout
+            server_url=self.server_url,
+            model_id=self.model_name,
+            adapter_name=self.adapter_name,
+            timeout=self.timeout,
         )
 
         if wait_until_ready:
             sampling_client.wait_until_ready()
 
-        sampling_client.load_checkpoint(checkpoint_path).result()
+        # Only load checkpoint for LoRA (full model already loaded from checkpoint path)
+        if is_lora:
+            sampling_client.load_checkpoint(checkpoint_path).result()
+
         return sampling_client
 
     # ===== Cleanup =====

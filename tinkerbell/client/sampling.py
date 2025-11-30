@@ -27,18 +27,13 @@ class SamplingClient(BaseClient):
         self,
         server_url: str,
         model_id: str,
+        adapter_name: str | None = None,
         timeout: float = 600.0,
     ):
-        """
-        Initialize the sampling client.
-
-        Args:
-            server_url: Server URL of the sampling service
-            model_id: ID of the model
-            timeout: Request timeout in seconds
-        """
         super().__init__(server_url, timeout)
         self.model_id = model_id
+        self.adapter_name = adapter_name
+        self.lora_path: str | None = None  # Set after load_checkpoint
 
     def wait_until_ready(
         self,
@@ -145,74 +140,42 @@ class SamplingClient(BaseClient):
             parse_result_fn=_parse_result,
         )
 
-    def sample(
-        self,
-        *args,
-        **kwargs,
-    ) -> TinkerbellFuture[SampleResponse]:
-        """
-        Sample text from the request.
-
-        Args:
-            *args: Positional arguments to pass to the SampleRequest
-            **kwargs: Keyword arguments to pass to the SampleRequest
-
-        Returns:
-            TinkerbellFuture[SampleResponse] - call .result() to poll for the response
-        """
-        # Send request immediately
-        # Always include model_id from the client
+    def sample(self, *args, **kwargs) -> TinkerbellFuture[SampleResponse]:
+        """Sample text. Uses lora_path only if adapter_name is set (LoRA mode)."""
         if "model_id" not in kwargs:
             kwargs["model_id"] = self.model_id
+        # Only pass lora_path for LoRA adapters (when adapter_name is set)
+        if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
+            kwargs["lora_path"] = self.lora_path
 
-        request = SampleRequest(
-            *args,
-            **kwargs,
-        )
-
+        request = SampleRequest(*args, **kwargs)
         response = self.client.post(
-            "/sample",
-            json=request.model_dump(exclude_none=True),
+            "/sample", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future_dict = response.json()
-
-        # Parse result
-        def _parse_result(result: dict[str, Any]) -> SampleResponse:
-            return SampleResponse(**result)
 
         return self.create_future_from_request_id(
-            remote_future=RemoteFuture(**remote_future_dict),
-            parse_result_fn=_parse_result,
+            remote_future=RemoteFuture(**response.json()),
+            parse_result_fn=lambda result: SampleResponse(**result),
         )
 
     async def sample_async(
-        self,
-        *args,
-        **kwargs,
+        self, *args, **kwargs
     ) -> AsyncTinkerbellFuture[SampleResponse]:
-        """
-        Async: Sample text. First await submits request, second await gets result.
-
-        Args:
-            *args: Positional arguments to pass to the SampleRequest
-            **kwargs: Keyword arguments to pass to the SampleRequest
-
-        Returns:
-            AsyncTinkerbellFuture[SampleResponse] - await twice for result
-        """
+        """Async: Sample text. Uses lora_path only if adapter_name is set."""
         if "model_id" not in kwargs:
             kwargs["model_id"] = self.model_id
+        if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
+            kwargs["lora_path"] = self.lora_path
 
         request = SampleRequest(*args, **kwargs)
         response = await self.async_client.post(
             "/sample", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future = RemoteFuture(**response.json())
 
         return AsyncTinkerbellFuture(
-            remote_future=remote_future,
+            remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
             result_parser=lambda result: SampleResponse(**result),
             poll_interval=1.0,
@@ -220,74 +183,46 @@ class SamplingClient(BaseClient):
         )
 
     def load_checkpoint(
-        self,
-        checkpoint_path: str,
-        pin_lora: bool = False,
+        self, checkpoint_path: str, pin_lora: bool = False
     ) -> TinkerbellFuture[LoadCheckpointResponse]:
-        """
-        Start loading a checkpoint from a directory (async operation).
+        """Load checkpoint from disk. Stores lora_name for subsequent samples."""
+        import os
 
-        This method sends the request immediately and returns a future.
-        Use wait_until_ready() to poll until the checkpoint is fully loaded.
-
-        Args:
-            checkpoint_path: Path to the checkpoint directory
-
-        Returns:
-            TinkerbellFuture[LoadCheckpointResponse] - call .result() to poll for the response
-        """
-        # Send request immediately
         request = LoadCheckpointRequest(
-            model_id=self.model_id,
-            checkpoint_path=checkpoint_path,
-            pin_lora=pin_lora,
+            model_id=self.model_id, checkpoint_path=checkpoint_path, pin_lora=pin_lora
         )
-
         response = self.client.post(
-            "/load_checkpoint",
-            json=request.model_dump(exclude_none=True),
+            "/load_checkpoint", json=request.model_dump(exclude_none=True)
         )
-
         response.raise_for_status()
-        remote_future_dict = response.json()
 
-        # Parse result
-        def _parse_result(result: dict[str, Any]) -> LoadCheckpointResponse:
-            return LoadCheckpointResponse(**result)
+        # Store lora_name (basename) for sample requests - SGLang uses basename as adapter name
+        self.lora_path = os.path.basename(os.path.normpath(checkpoint_path))
 
         return self.create_future_from_request_id(
-            remote_future=RemoteFuture(**remote_future_dict),
-            parse_result_fn=_parse_result,
+            remote_future=RemoteFuture(**response.json()),
+            parse_result_fn=lambda result: LoadCheckpointResponse(**result),
         )
 
     async def load_checkpoint_async(
-        self,
-        checkpoint_path: str,
-        pin_lora: bool = False,
+        self, checkpoint_path: str, pin_lora: bool = False
     ) -> AsyncTinkerbellFuture[LoadCheckpointResponse]:
-        """
-        Async: Load checkpoint. First await submits request, second await gets result.
+        """Async: Load checkpoint. First await submits, second await gets result."""
+        import os
 
-        Args:
-            checkpoint_path: Path to the checkpoint directory
-            pin_lora: Whether to pin the LoRA adapter
-
-        Returns:
-            AsyncTinkerbellFuture[LoadCheckpointResponse] - await twice for result
-        """
         request = LoadCheckpointRequest(
-            model_id=self.model_id,
-            checkpoint_path=checkpoint_path,
-            pin_lora=pin_lora,
+            model_id=self.model_id, checkpoint_path=checkpoint_path, pin_lora=pin_lora
         )
         response = await self.async_client.post(
             "/load_checkpoint", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future = RemoteFuture(**response.json())
+
+        # Store lora_name (basename) for sample requests
+        self.lora_path = os.path.basename(os.path.normpath(checkpoint_path))
 
         return AsyncTinkerbellFuture(
-            remote_future=remote_future,
+            remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
             result_parser=lambda result: LoadCheckpointResponse(**result),
             poll_interval=1.0,

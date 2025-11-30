@@ -40,6 +40,24 @@ def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Proc
 @ray.remote
 class SGLangSamplingActor:
     def __init__(self, model_id: str, tp_size: int, engine_kwargs: dict = {}):
+        try:
+            self._init_impl(model_id, tp_size, engine_kwargs)
+        except Exception as e:
+            error_msg = (
+                f"FATAL: SGLangSamplingActor.__init__ failed: {type(e).__name__}: {e}"
+            )
+            print(error_msg, flush=True)
+            logger.error(error_msg)
+            import traceback
+
+            tb = traceback.format_exc()
+            print(tb, flush=True)
+            logger.error(tb)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            raise
+
+    def _init_impl(self, model_id: str, tp_size: int, engine_kwargs: dict):
         from sglang.srt.entrypoints.http_server import launch_server
         from sglang.srt.server_args import ServerArgs
 
@@ -72,12 +90,14 @@ class SGLangSamplingActor:
         engine_kwargs["tp_size"] = tp_size
         engine_kwargs["port"] = self.port
         engine_kwargs["host"] = "127.0.0.1"
-        engine_kwargs["enable_lora"] = True
-        if "max_loras_per_batch" not in engine_kwargs:
-            engine_kwargs["max_loras_per_batch"] = 2
-        if "max_lora_rank" not in engine_kwargs:
-            engine_kwargs["max_lora_rank"] = 256
-        engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
+        # LoRA config - only set if not explicitly disabled
+        if engine_kwargs.get("enable_lora") is not False:
+            engine_kwargs["enable_lora"] = True
+            if "max_loras_per_batch" not in engine_kwargs:
+                engine_kwargs["max_loras_per_batch"] = 2
+            if "max_lora_rank" not in engine_kwargs:
+                engine_kwargs["max_lora_rank"] = 256
+            engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
 
         start_msg = "🔧 Starting SGLang server process..."
         logger.info(start_msg)
@@ -154,14 +174,15 @@ class SGLangSamplingActor:
                 if response.status_code == 200:
                     logger.info(f"✓ SGLang server ready after {elapsed:.1f}s")
                     return
-            except Exception:
-                # Log every 10 seconds with elapsed time
-                if time.time() - last_log_time >= 10:
+            except Exception as health_err:
+                # Log every 5 seconds with elapsed time
+                if time.time() - last_log_time >= 5:
                     logger.info(
-                        f"[{elapsed:.1f}s] Still waiting for SGLang server... (process is alive)"
+                        f"[{elapsed:.1f}s] Still waiting for SGLang server... "
+                        f"(process alive={self.server_process.is_alive()}, health_err={type(health_err).__name__})"
                     )
                     last_log_time = time.time()
-                pass
+                    sys.stdout.flush()
             time.sleep(2)
 
         # Timeout reached - check if process is still alive
@@ -186,24 +207,41 @@ class SGLangSamplingActor:
         return self.server_process.is_alive()
 
     def _is_lora_adapter_path(self, path: str) -> bool:
-        """Check if the given path contains a LoRA adapter.
-
-        LoRA adapters are identified by the presence of adapter-specific files
-        like adapter_config.json, adapter_model.bin, or adapter_model.safetensors.
-        """
+        """Check if path contains a LoRA adapter (directly or in subdirectory)."""
         import os
 
         if not os.path.exists(path):
+            logger.info(f"_is_lora_adapter_path: {path} does not exist")
             return False
 
-        files = os.listdir(path)
-        # Check for common LoRA adapter files
         lora_indicators = [
             "adapter_config.json",
             "adapter_model.bin",
             "adapter_model.safetensors",
         ]
-        return any(indicator in files for indicator in lora_indicators)
+        files = os.listdir(path)
+        logger.info(f"_is_lora_adapter_path: {path} contains: {files}")
+
+        # Check directly in path
+        if any(f in files for f in lora_indicators):
+            logger.info(
+                f"_is_lora_adapter_path: Found LoRA indicator directly in {path}"
+            )
+            return True
+
+        # Check in subdirectories
+        for f in files:
+            subdir = os.path.join(path, f)
+            if os.path.isdir(subdir):
+                subfiles = os.listdir(subdir)
+                if any(ind in subfiles for ind in lora_indicators):
+                    logger.info(
+                        f"_is_lora_adapter_path: Found LoRA indicator in subdir {subdir}"
+                    )
+                    return True
+
+        logger.info(f"_is_lora_adapter_path: No LoRA indicators found in {path}")
+        return False
 
     def update_weights_from_disk(
         self,
@@ -237,42 +275,40 @@ class SGLangSamplingActor:
                 "SGLang server process is not alive. Cannot load checkpoint."
             )
 
-        # Detect if this is a LoRA adapter
+        # Detect if this is a LoRA adapter and find the actual path
         is_lora = self._is_lora_adapter_path(checkpoint_path)
-        lora_name = None  # Initialize to None for non-LoRA cases
+        lora_name = None
+        lora_path = checkpoint_path
 
         if is_lora:
-            logger.info(f"Detected LoRA adapter at {checkpoint_path}")
-            endpoint = "/load_lora_adapter"
-            # Extract adapter name from path (use last directory name)
-            lora_name = os.path.basename(os.path.normpath(checkpoint_path))
+            # Find actual adapter path (might be in subdirectory)
+            lora_indicators = ["adapter_config.json"]
+            if not any(f in os.listdir(checkpoint_path) for f in lora_indicators):
+                # Look in subdirectories
+                for f in os.listdir(checkpoint_path):
+                    subdir = os.path.join(checkpoint_path, f)
+                    if os.path.isdir(subdir) and "adapter_config.json" in os.listdir(
+                        subdir
+                    ):
+                        lora_path = subdir
+                        break
 
-            # First, try to unload the adapter if it exists to avoid conflicts
-            # This handles the case where the adapter was already loaded in a previous run
+            lora_name = os.path.basename(os.path.normpath(lora_path))
+            logger.info(f"Detected LoRA adapter: name={lora_name}, path={lora_path}")
+            endpoint = "/load_lora_adapter"
+
+            # Try to unload existing adapter
             try:
-                logger.info(
-                    f"Attempting to unload existing adapter '{lora_name}' if present..."
+                self.client.post(
+                    "/unload_lora_adapter", json={"lora_name": lora_name}, timeout=60.0
                 )
-                unload_response = self.client.post(
-                    "/unload_lora_adapter",
-                    json={"lora_name": lora_name},
-                    timeout=60.0,
-                )
-                if unload_response.status_code == 200:
-                    logger.info(f"Successfully unloaded existing adapter '{lora_name}'")
-                else:
-                    logger.info(
-                        f"Adapter '{lora_name}' was not present (status: {unload_response.status_code})"
-                    )
-            except Exception as e:
-                logger.info(
-                    f"Could not unload adapter '{lora_name}' (likely doesn't exist): {e}"
-                )
+            except Exception:
+                pass
 
             request_data = {
-                "lora_name": lora_name,  # REQUIRED
-                "lora_path": checkpoint_path,  # REQUIRED
-                "pinned": pin_lora,  # Optional: whether to pin adapter in memory
+                "lora_name": lora_name,
+                "lora_path": lora_path,
+                "pinned": pin_lora,
             }
         else:
             logger.info(f"Loading full model checkpoint from {checkpoint_path}")

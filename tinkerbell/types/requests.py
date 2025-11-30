@@ -13,6 +13,8 @@ from .optimizer import DEFAULT_SCHEDULER_PARAMS
 class CreateTrainingActorsRequest(StrictBase):
     world_size: int
     model_id: str
+    model_name: Optional[str] = None  # Groups actors; defaults to model_id
+    adapter_name: Optional[str] = None  # For multi-LoRA: names the adapter
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     parallelize_plan: dict[str, str] = Field(default_factory=lambda: {})
     scheduler_params: dict[str, Any] = Field(
@@ -25,16 +27,13 @@ class CreateTrainingActorsRequest(StrictBase):
 
 
 class SaveCheckpointRequest(StrictBase):
-    model_id: str
+    model_id: str  # This is model_name for routing
     checkpoint_path: str
+    adapter_name: Optional[str] = None  # Which LoRA adapter to save
 
 
 class ActorRequest(StrictBase):
     request_id: str
-
-
-class ZeroGradRequest(StrictBase):
-    model_id: str
 
 
 class ForwardRequest(StrictBase):
@@ -45,8 +44,9 @@ class ForwardRequest(StrictBase):
 
 
 class ForwardBackwardRequest(StrictBase):
-    model_id: str
+    model_id: str  # This is model_name for routing
     request_id: Optional[str] = None
+    adapter_name: Optional[str] = None  # Which LoRA adapter to use
     data: list[Datum] = Field(default_factory=lambda: [])
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     loss_fn: LossFnType = "cross_entropy"
@@ -58,7 +58,8 @@ class ActorStatusRequest(StrictBase):
 
 
 class CreateSamplingActorRequest(StrictBase):
-    model_id: str
+    model_id: str  # HF model path for loading
+    model_name: Optional[str] = None  # Actor key (defaults to model_id)
     tp_size: int
     engine_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 

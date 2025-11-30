@@ -143,6 +143,8 @@ class ServiceClient(BaseClient):
         self,
         model_id: str,
         tp_size: int,
+        model_name: Optional[str] = None,
+        adapter_name: Optional[str] = None,
         parallelize_plan: Optional[dict[str, str]] = None,
         model_kwargs: Optional[dict[str, Any]] = None,
         scheduler_params: Optional[dict[str, Any]] = None,
@@ -152,56 +154,51 @@ class ServiceClient(BaseClient):
         deploy_config: DeployConfig | None = None,
         initialize_random_weights: bool = False,
     ) -> TrainingClient:
-        """
-        Create training actors on the server.
+        """Create training actors on the server.
 
         Args:
-            model_id: ID of the model
-            tp_size: Number of processes in distributed training (world_size)
-            parallelize_plan: Dictionary mapping layer patterns to parallelization strategy
-            model_kwargs: Additional kwargs for model initialization
-            scheduler_params: Learning rate scheduler parameters
-            lora_config: LoRA configuration
-            ray_worker_options: Ray worker options
-            wait_until_ready: If True, blocks until actors are ready
-            deploy_config: Deployment configuration
-
-        Returns:
-            TrainingClient
+            model_id: HuggingFace model ID
+            tp_size: Tensor parallel size (world_size)
+            model_name: Group name for actor sharing. Same model_name = shared actors.
+            adapter_name: Name for this LoRA adapter (for multi-LoRA)
+            lora_config: LoRA configuration (None for full model training)
         """
         if not self.is_deployed() and deploy_config is not None:
             self.deploy(deploy_config)
 
+        model_name = model_name or model_id
+
         request = CreateTrainingActorsRequest(
             model_id=model_id,
+            model_name=model_name,
+            adapter_name=adapter_name,
             world_size=tp_size,
             parallelize_plan=parallelize_plan or {},
             model_kwargs=model_kwargs or {},
             scheduler_params=scheduler_params or {},
-            lora_config=lora_config or {},
+            lora_config=lora_config,
             ray_worker_options=ray_worker_options or {},
             wait_until_ready=wait_until_ready,
             initialize_random_weights=initialize_random_weights,
         )
 
         response = self.client.post(
-            "/create_training_actors",
-            json=request.model_dump(),
+            "/create_training_actors", json=request.model_dump()
         )
         response.raise_for_status()
 
-        # Convert LoraConfig to dict if needed
-        lora_config_dict = None
-        if lora_config:
-            if hasattr(lora_config, "model_dump"):
-                lora_config_dict = lora_config.model_dump()
-            else:
-                lora_config_dict = lora_config
+        lora_config_dict = (
+            lora_config.model_dump()
+            if hasattr(lora_config, "model_dump")
+            else lora_config
+        )
 
         return TrainingClient(
             server_url=self.server_url,
             model_id=model_id,
+            model_name=model_name,
+            adapter_name=adapter_name,
             timeout=self.timeout,
-            lora_enabled=True,
+            lora_enabled=lora_config is not None,
             lora_config=lora_config_dict,
         )

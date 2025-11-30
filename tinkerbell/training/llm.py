@@ -45,6 +45,7 @@ class LLM:
         model_kwargs: dict[str, Any],
         parallelize_plan: dict[str, str],
         lora_config: LoraConfig | None = None,
+        adapter_name: str | None = None,
         initialize_random_weights: bool = False,
     ):
         self.rank = rank
@@ -53,28 +54,25 @@ class LLM:
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.lora_config = lora_config
+        self.adapter_name = adapter_name or "default"
         self.initialize_random_weights = initialize_random_weights
-        self.should_merge_lora = False
-        self.tokenizer = None  # Will be initialized during setup
+        self.should_merge_lora = {}  # Per-adapter merge flags
+        self.adapters: dict[str, LoraConfig] = {}  # Track all adapters
+        self.active_adapter: str | None = None
+        self.tokenizer = None
         self.setup()
 
     def setup(self) -> None:
-        """
-        Setup the model, tokenizer, and padding strategies.
-        """
+        """Setup the model, tokenizer, and padding strategies."""
         from transformers import AutoTokenizer
 
         from tinkerbell.types.data import PaddingStrategy
 
-        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-
-        # Setup padding strategies using tokenizer's pad_token_id
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token or 0
 
         pad_token_id = self.tokenizer.pad_token_id
-
         self.padding_strategies = {
             "model_input.input_ids": PaddingStrategy(
                 padding_side="left", padding_value=pad_token_id
@@ -87,18 +85,13 @@ class LLM:
             ),
         }
 
-        # Load and configure model
         self.model = self.create_model(
-            model_id=self.model_id,
-            model_kwargs=self.model_kwargs,
+            model_id=self.model_id, model_kwargs=self.model_kwargs
         )
-        self.model = self.setup_lora(
-            model=self.model,
-            lora_config=self.lora_config,
-        )
+        if self.lora_config is not None:
+            self.model = self.add_adapter(self.adapter_name, self.lora_config)
         self.model = self.parallelize(
-            model=self.model,
-            parallelize_plan=self.parallelize_plan,
+            model=self.model, parallelize_plan=self.parallelize_plan
         )
 
     def create_model(self, model_id: str, model_kwargs: dict[str, Any]) -> nn.Module:
@@ -114,107 +107,88 @@ class LLM:
             )
         return model
 
-    def setup_lora(
-        self, model: nn.Module, lora_config: LoraConfig | None = None
-    ) -> nn.Module:
-        if lora_config is None:
-            return model
-        try:
-            from peft import LoraConfig as PeftLoraConfig
-            from peft import get_peft_model
-        except ImportError:
-            raise ImportError(
-                "PEFT library is required for LoRA support. "
-                "Install it with: pip install peft"
-            )
-
-        logger.info(f"[Rank {self.rank}] Applying LoRA with config: {lora_config}")
-
-        # Build target modules list based on config
+    def _build_target_modules(self, lora_config: LoraConfig) -> list[str]:
+        """Build target modules list from LoRA config."""
         target_modules = []
-
         if lora_config.train_attn:
-            # Standard attention module names across different architectures
-            target_modules.extend(
-                [
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",  # LLaMA, Mistral, etc.
-                    "qkv_proj",  # Some architectures use combined QKV
-                ]
-            )
-
+            target_modules.extend(["q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj"])
         if lora_config.train_mlp:
-            # Standard MLP module names
-            target_modules.extend(
-                [
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",  # LLaMA, Mistral
-                    "gate_up_proj",  # Some architectures combine gate and up
-                ]
-            )
-
+            target_modules.extend(["gate_proj", "up_proj", "down_proj", "gate_up_proj"])
         if lora_config.train_unembed:
-            target_modules.extend(
-                [
-                    "lm_head",  # Standard language model head
-                    "embed_out",  # Alternative naming
-                ]
-            )
+            target_modules.extend(["lm_head", "embed_out"])
+        return target_modules
 
-        # Create PEFT LoRA config
+    def add_adapter(self, adapter_name: str, lora_config: LoraConfig) -> nn.Module:
+        """Add a named LoRA adapter. Supports multiple adapters on same base model."""
+        from peft import LoraConfig as PeftLoraConfig
+        from peft import get_peft_model
+
+        if adapter_name in self.adapters:
+            logger.info(
+                f"[Rank {self.rank}] Adapter '{adapter_name}' already exists, switching to it"
+            )
+            self.set_active_adapter(adapter_name)
+            return self.model
+
+        logger.info(
+            f"[Rank {self.rank}] Adding adapter '{adapter_name}' with config: {lora_config}"
+        )
+        target_modules = self._build_target_modules(lora_config)
+
         peft_config = PeftLoraConfig(
             r=lora_config.rank,
-            lora_alpha=lora_config.rank * 2,  # Common default: 2x rank
+            lora_alpha=lora_config.rank * 2,
             target_modules=target_modules,
-            lora_dropout=0.0,  # Can be made configurable if needed
+            lora_dropout=0.0,
             bias="none",
             task_type="CAUSAL_LM",
         )
 
-        # Apply LoRA
-        model = get_peft_model(model, peft_config)
+        # First adapter: wrap with get_peft_model; subsequent: add_adapter
+        if not self.adapters:
+            self.model = get_peft_model(
+                self.model, peft_config, adapter_name=adapter_name
+            )
+        else:
+            self.model.add_adapter(adapter_name, peft_config)
 
-        def matches_supported_pattern(target_module: str) -> bool:
-            """Check if target_module contains any supported pattern."""
-            for supported in SUPPORTED_LORA_TARGET_MODULES:
-                # Use regex to check if supported pattern appears in target_module
-                # This handles cases like "attention1.*.gate_proj.0" matching "gate_proj"
-                pattern = re.escape(supported)
-                if re.search(pattern, target_module):
-                    return True
-            return False
+        self.adapters[adapter_name] = lora_config
+        self.set_active_adapter(adapter_name)
 
-        all_supported = all(
-            matches_supported_pattern(target_module) for target_module in target_modules
-        )
-
-        if not all_supported:
-            unsupported = [
-                tm for tm in target_modules if not matches_supported_pattern(tm)
-            ]
+        # Check for unsupported target modules
+        unsupported = [
+            tm
+            for tm in target_modules
+            if not any(
+                re.search(re.escape(s), tm) for s in SUPPORTED_LORA_TARGET_MODULES
+            )
+        ]
+        self.should_merge_lora[adapter_name] = bool(unsupported)
+        if unsupported:
             logger.warning(
-                f"[Rank {self.rank}] LoRA target modules {unsupported} do not match "
-                f"supported patterns {SUPPORTED_LORA_TARGET_MODULES}. "
-                f"Will merge and save as full model."
+                f"[Rank {self.rank}] Adapter '{adapter_name}' has unsupported modules {unsupported}"
             )
-            self.should_merge_lora = True
 
-        # Print trainable parameters info
         if self.rank == 0:
-            trainable_params = sum(
-                p.numel() for p in model.parameters() if p.requires_grad
+            trainable = sum(
+                p.numel() for p in self.model.parameters() if p.requires_grad
             )
-            total_params = sum(p.numel() for p in model.parameters())
-            logger.info(f"[Rank {self.rank}] LoRA applied successfully!")
+            total = sum(p.numel() for p in self.model.parameters())
             logger.info(
-                f"[Rank {self.rank}] Trainable params: {trainable_params:,} / {total_params:,} "
-                f"({100 * trainable_params / total_params:.2f}%)"
+                f"[Rank {self.rank}] Adapter '{adapter_name}' added. Trainable: {trainable:,}/{total:,}"
             )
 
-        return model
+        return self.model
+
+    def set_active_adapter(self, adapter_name: str) -> None:
+        """Set which adapter is active for training/inference."""
+        if adapter_name not in self.adapters:
+            raise ValueError(
+                f"Adapter '{adapter_name}' not found. Available: {list(self.adapters.keys())}"
+            )
+        self.model.set_adapter(adapter_name)
+        self.active_adapter = adapter_name
+        logger.info(f"[Rank {self.rank}] Active adapter set to '{adapter_name}'")
 
     def pad(
         self,
@@ -312,41 +286,53 @@ class LLM:
         state_dict = get_model_state_dict(self.model, options=options)
         return state_dict
 
-    def save_model(self, save_dir: str):
-        """Save the model to a directory.
+    def save_model(self, save_dir: str, adapter_name: str | None = None):
+        """Save model or specific adapter to a directory."""
+        import os
 
-        Args:
-            save_dir: Directory to save the model to
-        """
+        # For full model (no adapters): get_model_state_dict needs ALL ranks
+        state_dict = None
+        if not self.adapters:
+            state_dict = self.get_model_state_dict(full_state_dict=True)
+
         if self.rank == 0:
+            import shutil
 
-            # Check if this is a PEFT model
-            if self.lora_config is not None:
-                # Check if we need to merge LoRA weights due to unsupported target modules
-                if self.should_merge_lora:
-                    try:
-                        # Merge LoRA weights into the base model
-                        self.model = self.model.merge_and_unload()
-                        # Save as full model
-                        state_dict = self.get_model_state_dict(full_state_dict=True)
-                        self.model.save_pretrained(save_dir, state_dict=state_dict)
-                    except Exception as e:
-                        logger.error(f"Failed to merge LoRA weights: {e}")
-                        raise
+            os.makedirs(save_dir, exist_ok=True)
+            if self.adapters:
+                name = adapter_name or self.active_adapter
+                if name and self.should_merge_lora.get(name, False):
+                    self.model = self.model.merge_and_unload()
+                    merged_state = self.get_model_state_dict(full_state_dict=True)
+                    self.model.save_pretrained(save_dir, state_dict=merged_state)
                 else:
-                    # For LoRA models with supported target modules, save ONLY the adapter weights (lightweight!)
-                    self.model.save_pretrained(save_dir)
+                    # Save adapter - PEFT creates files in save_dir/adapter_name/
+                    self.model.save_pretrained(
+                        save_dir, selected_adapters=[name] if name else None
+                    )
+                    # Move files from subdirectory to save_dir for simpler loading
+                    subdir = os.path.join(save_dir, name) if name else None
+                    logger.info(f"Checking for adapter files in subdir: {subdir}")
+                    if subdir and os.path.exists(subdir):
+                        for f in os.listdir(subdir):
+                            src = os.path.join(subdir, f)
+                            dst = os.path.join(save_dir, f)
+                            logger.info(f"Moving {src} -> {dst}")
+                            shutil.move(src, dst)
+                        os.rmdir(subdir)
+                    logger.info(
+                        f"Adapter saved. Files in {save_dir}: {os.listdir(save_dir)}"
+                    )
             else:
-                # For full fine-tuning, save the full model
-                state_dict = self.get_model_state_dict(full_state_dict=True)
                 self.model.save_pretrained(save_dir, state_dict=state_dict)
+                logger.info(
+                    f"Full model saved. Files in {save_dir}: {os.listdir(save_dir)}"
+                )
 
-            # Also save the tokenizer - SGLang needs it to load the model
             try:
                 self.tokenizer.save_pretrained(save_dir)
             except Exception:
-                logger.warning("Warning: Failed to save tokenizer")
-                logger.warning("The checkpoint may not be loadable by SGLang")
+                logger.warning("Failed to save tokenizer")
 
         dist.barrier()
 

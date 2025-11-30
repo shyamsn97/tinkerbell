@@ -29,15 +29,14 @@ class TrainingActor:
         parallelize_plan: dict[str, str] = {},
         scheduler_params: dict[str, Any] = {},
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
+        adapter_name: Optional[str] = None,
         initialize_random_weights: bool = False,
     ):
-        # Configure logging for Ray actor - logs will go to stdout
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            force=True,  # Override any existing configuration
+            force=True,
         )
-
         self.rank = rank
         self.world_size = world_size
         self.master_addr = master_addr
@@ -47,16 +46,17 @@ class TrainingActor:
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
         self.initialize_random_weights = initialize_random_weights
-        self.training_model = None  # Will be initialized during setup
+        self.adapter_name = adapter_name
+        self.training_model = None
         self.optimizer = None
         self.ready = False
 
-        # Parse LoRA config
         if lora_config is not None:
-            if isinstance(lora_config, dict):
-                self.lora_config = LoraConfig(**lora_config)
-            else:
-                self.lora_config = lora_config
+            self.lora_config = (
+                LoraConfig(**lora_config)
+                if isinstance(lora_config, dict)
+                else lora_config
+            )
         else:
             self.lora_config = None
 
@@ -102,8 +102,6 @@ class TrainingActor:
 
         self._setup_distributed()
 
-        # Initialize the LLM training model
-        # This will create the model, tokenizer, setup padding strategies, apply LoRA, and parallelize it
         self.training_model = LLM(
             rank=self.rank,
             world_size=self.world_size,
@@ -111,12 +109,30 @@ class TrainingActor:
             model_kwargs=self.model_kwargs,
             parallelize_plan=self.parallelize_plan,
             lora_config=self.lora_config,
+            adapter_name=self.adapter_name,
             initialize_random_weights=self.initialize_random_weights,
         )
 
         logger.info(f"[Rank {self.rank}] Setup complete")
         self.ready = True
         return True
+
+    async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> bool:
+        """Add a new LoRA adapter to the model."""
+        config = (
+            LoraConfig(**lora_config) if isinstance(lora_config, dict) else lora_config
+        )
+        self.training_model.add_adapter(adapter_name, config)
+        return True
+
+    async def set_active_adapter(self, adapter_name: str) -> bool:
+        """Set which adapter is active for training."""
+        self.training_model.set_active_adapter(adapter_name)
+        return True
+
+    async def get_adapters(self) -> list[str]:
+        """Get list of adapter names."""
+        return list(self.training_model.adapters.keys())
 
     async def forward(
         self,
@@ -148,14 +164,19 @@ class TrainingActor:
     async def forward_backward(
         self,
         data: list[Datum],
+        adapter_name: str | None = None,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
         loss_fn: LossFnType = "cross_entropy",
         loss_fn_config: Dict[str, float] | None = None,
     ):
-        """Execute a single training step using list of Datum objects."""
+        """Execute training step. Switches to adapter_name if provided."""
         if loss_fn not in LOSSES:
             raise ValueError(f"Unknown loss function: {loss_fn}")
+
+        # Switch to the correct adapter before forward pass
+        if adapter_name and self.training_model.adapters:
+            self.training_model.set_active_adapter(adapter_name)
 
         device = torch.cuda.current_device()
         padded = self.training_model.pad(data, device)
@@ -177,25 +198,15 @@ class TrainingActor:
             else None
         )
 
-    def save_model(self, save_dir: str):
-        """Save the model using the training model's save_model method."""
-        self.training_model.save_model(save_dir)
-
-    async def save_checkpoint(self, checkpoint_path: str):
-        """Save model checkpoint using PyTorch's distributed checkpoint API.
-
-        Args:
-            checkpoint_path: Path to save the checkpoint
-        """
-
-        logger.info(f"[Rank {self.rank}] Starting checkpoint save process...")
-
+    async def save_checkpoint(
+        self, checkpoint_path: str, adapter_name: str | None = None
+    ):
+        """Save model checkpoint, optionally for a specific adapter."""
+        logger.info(f"[Rank {self.rank}] Saving checkpoint (adapter={adapter_name})...")
         if self.rank == 0:
             os.makedirs(checkpoint_path, exist_ok=True)
-
-        self.save_model(checkpoint_path)
+        self.training_model.save_model(checkpoint_path, adapter_name=adapter_name)
         logger.info(f"[Rank {self.rank}] Checkpoint save complete")
-
         return self.rank == 0
 
     async def cleanup(self):
@@ -211,6 +222,11 @@ class TrainingActor:
     async def backward(self, loss):
         loss.backward()
 
-    async def optim_step(self, optimizer_params: dict[str, Any] = {}):
+    async def optim_step(
+        self, adapter_name: str | None = None, optimizer_params: dict[str, Any] = {}
+    ):
+        """Step optimizer. Switches to adapter_name first if provided."""
+        if adapter_name and self.training_model.adapters:
+            self.training_model.set_active_adapter(adapter_name)
         optimizer = self._get_optimizer(optimizer_params)
         optimizer.step()
