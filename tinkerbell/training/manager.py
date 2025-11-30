@@ -454,11 +454,19 @@ class TrainingManager:
                 raise e
 
     async def _process_all_batches(self) -> None:
-        """Process all pending batches across all model groups."""
+        """Process all pending batches across all model/adapter groups."""
         request_queue = await self.global_store.get_request_queue.remote()
-        for model_id in list(request_queue.keys()):
-            if len(request_queue[model_id]) > 0:
-                await self._process_batch(model_id)
+        # Queue keys are "model_name:adapter_name" format
+        for queue_key in list(request_queue.keys()):
+            if len(request_queue[queue_key]) > 0:
+                await self._process_batch(queue_key)
+
+    def _parse_queue_key(self, queue_key: str) -> tuple[str, str | None]:
+        """Parse queue key into (model_name, adapter_name)."""
+        parts = queue_key.split(":", 1)
+        model_name = parts[0]
+        adapter_name = parts[1] if len(parts) > 1 and parts[1] else None
+        return model_name, adapter_name
 
     def _prepare_batch_data(self, requests: list[Any]) -> tuple[list[Any], list[int]]:
         """Flatten request data into a single batch and track sizes."""
@@ -469,16 +477,19 @@ class TrainingManager:
             batch_data.extend(req.data)
         return batch_data, request_sizes
 
-    async def _process_batch(self, model_name: str) -> None:
-        """Process a batch of requests for a model."""
+    async def _process_batch(self, queue_key: str) -> None:
+        """Process a batch of requests for a model/adapter combination."""
         try:
-            logger.info(f"[_process_batch] Processing batch for: {model_name}")
-            requests = await self._get_pending_requests(model_name)
+            model_name, adapter_name = self._parse_queue_key(queue_key)
+            logger.info(
+                f"[_process_batch] Processing batch for: {queue_key} (model={model_name}, adapter={adapter_name})"
+            )
+            requests = await self._get_pending_requests(queue_key)
             logger.info(f"[_process_batch] Found {len(requests)} pending requests")
             if not requests:
                 return
 
-            await self.global_store.clear_request_queue.remote(model_id=model_name)
+            await self.global_store.clear_request_queue.remote(queue_key=queue_key)
 
             status = await self.get_actor_status(model_name)
             if status != ActorStatus.READY:
@@ -486,28 +497,34 @@ class TrainingManager:
                 return
 
             batch_data, request_sizes = self._prepare_batch_data(requests)
-            output = await self._execute_batch(model_name, requests[0], batch_data)
+            output = await self._execute_batch(
+                model_name, adapter_name, batch_data, requests[0]
+            )
             await self._distribute_results(requests, output, request_sizes)
             logger.info(f"[_process_batch] Batch processing complete")
         except Exception as e:
             logger.error(
-                f"[_process_batch] EXCEPTION for {model_name}: {e}", exc_info=True
+                f"[_process_batch] EXCEPTION for {queue_key}: {e}", exc_info=True
             )
             raise
 
-    async def _get_pending_requests(self, model_name: str) -> list[Any]:
-        """Get all pending requests for a model."""
+    async def _get_pending_requests(self, queue_key: str) -> list[Any]:
+        """Get all pending requests for a queue key."""
         request_queue = await self.global_store.get_request_queue.remote()
-        return request_queue.get(model_name, [])
+        return request_queue.get(queue_key, [])
 
     async def _execute_batch(
-        self, model_name: str, sample_request: Any, batch_data: list[Any]
+        self,
+        model_name: str,
+        adapter_name: str | None,
+        batch_data: list[Any],
+        sample_request: Any,
     ) -> list[dict[str, Any]]:
         """Execute the batched forward-backward pass."""
         actor_group = self._get_actor_group_or_raise(model_name)
         return await actor_group.forward_backward(
             data=batch_data,
-            adapter_name=getattr(sample_request, "adapter_name", None),
+            adapter_name=adapter_name,
             forward_kwargs=sample_request.forward_kwargs,
             return_logprobs=getattr(sample_request, "return_logprobs", False),
         )

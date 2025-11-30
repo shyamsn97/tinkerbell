@@ -31,20 +31,25 @@ class GlobalStore:
     async def get_request_queue(self) -> Dict[str, list[ActorRequest]]:
         return self.request_queue
 
-    async def get_requests(self, model_id: str) -> list[ActorRequest]:
-        if model_id not in self.request_queue:
+    async def get_requests(self, queue_key: str) -> list[ActorRequest]:
+        """Get requests by queue key (model_id:adapter_name format)."""
+        if queue_key not in self.request_queue:
             return []
-        return self.request_queue[model_id]
+        return self.request_queue[queue_key]
 
-    async def clear_request_queue(self, model_id: str):
-        if model_id not in self.request_queue:
+    async def clear_request_queue(self, queue_key: str):
+        """Clear requests by queue key (model_id:adapter_name format)."""
+        if queue_key not in self.request_queue:
             return
-        self.request_queue[model_id] = []
+        self.request_queue[queue_key] = []
 
     async def add_request_to_queue(self, request: ActorRequest):
-        if request.model_id not in self.request_queue:
-            self.request_queue[request.model_id] = []
-        self.request_queue[request.model_id].append(request)
+        # Key by (model_id, adapter_name) so different adapters batch separately
+        adapter_name = getattr(request, "adapter_name", None) or ""
+        queue_key = f"{request.model_id}:{adapter_name}"
+        if queue_key not in self.request_queue:
+            self.request_queue[queue_key] = []
+        self.request_queue[queue_key].append(request)
 
     async def get_results(self) -> Dict[str, Any]:
         return self.results

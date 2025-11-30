@@ -3,8 +3,6 @@ from tinkerbell.types import ModalDeployConfig, LoraConfig
 from tinkerbell.renderer import Renderer, TrainOnWhat
 from tqdm import tqdm
 import time
-import asyncio
-import concurrent.futures
 
 
 # MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
@@ -387,205 +385,68 @@ general_formatted = tokenizer.apply_chat_template(general_prompts, add_generatio
 general_encoded = tokenizer(general_formatted, padding=True, return_tensors="pt")
 
 # ============================================================================
-# Multi-LoRA Inference: Using separate adapter clients
+# INFERENCE: Test all models with all prompts
 # ============================================================================
 print("\n" + "=" * 70)
-print("DEBUG: Checking Ray actors before inference")
-print("=" * 70)
-ray_actors_response = service_client.get_ray_actors().result()
-print(f"Ray Actors: {ray_actors_response}")
+print("INFERENCE: Testing all models with all prompts")
 print("=" * 70)
 
-print("\n" + "=" * 70)
-print("MULTI-LORA INFERENCE: Testing with separate adapter clients")
-print("=" * 70)
+# Combine all prompts for batch inference
+all_prompts = geography_prompts + math_prompts + general_prompts
+all_formatted = tokenizer.apply_chat_template(all_prompts, add_generation_prompt=True, tokenize=False)
+all_encoded = tokenizer(all_formatted, padding=True, return_tensors="pt")
 
-print("\n1. Geography question with Adapter 1 (task1_attention):")
-print("   Prompt:", geography_prompts[0][1]["content"])
+prompt_names = ["Geography", "Math", "General"]
+print(f"\nTesting {len(all_prompts)} prompts on 3 models (LoRA 1, LoRA 2, Full Model)")
+print("Submitting all requests in parallel...\n")
+
+sampling_params = {"max_new_tokens": 50, "temperature": 0.7}
 start_time = time.time()
-geography_output = lora_sampling_client.sample(
-    input_ids=geography_encoded["input_ids"][0],
-    sampling_params={
-        "max_new_tokens": 50,
-        "temperature": 0.7,
-    },
-).result()
-print(f"   Response: {geography_output.outputs[0]}")
-print(f"   Time: {time.time() - start_time:.2f}s")
 
-print("\n2. Math question with Adapter 2 (task2_mlp):")
-print("   Prompt:", math_prompts[0][1]["content"])
-start_time = time.time()
-math_output = lora_sampling_client_2.sample(
-    input_ids=math_encoded["input_ids"][0],
-    sampling_params={
-        "max_new_tokens": 50,
-        "temperature": 0.7,
-    },
-).result()
-print(f"   Response: {math_output.outputs[0]}")
-print(f"   Time: {time.time() - start_time:.2f}s")
+# Submit ALL requests at once (non-blocking)
+lora1_futures = [
+    lora_sampling_client.sample(input_ids=all_encoded["input_ids"][i], sampling_params=sampling_params)
+    for i in range(len(all_prompts))
+]
+lora2_futures = [
+    lora_sampling_client_2.sample(input_ids=all_encoded["input_ids"][i], sampling_params=sampling_params)
+    for i in range(len(all_prompts))
+]
+full_futures = [
+    full_sampling_client.sample(input_ids=all_encoded["input_ids"][i], sampling_params=sampling_params)
+    for i in range(len(all_prompts))
+]
 
-# ============================================================================
-# Full Model Inference: No LoRA adapters
-# ============================================================================
-print("\n" + "=" * 70)
-print("FULL MODEL INFERENCE: Testing without LoRA")
+print(f"✓ Submitted {len(lora1_futures) + len(lora2_futures) + len(full_futures)} requests")
+print("Waiting for results...\n")
+
+# Get all results
+lora1_results = [f.result() for f in lora1_futures]
+lora2_results = [f.result() for f in lora2_futures]
+full_results = [f.result() for f in full_futures]
+
+elapsed = time.time() - start_time
+print(f"✓ All requests completed in {elapsed:.2f}s\n")
+
+# Print results in a nice format
+print("=" * 70)
+print("RESULTS")
 print("=" * 70)
 
-print("\n1. General question with full model:")
-print("   Prompt:", general_prompts[0][1]["content"])
-start_time = time.time()
-general_full_output = full_sampling_client.sample(
-    input_ids=general_encoded["input_ids"][0],
-    sampling_params={
-        "max_new_tokens": 50,
-        "temperature": 0.7,
-    },
-).result()
-print(f"   Response: {general_full_output.outputs[0]}")
-print(f"   Time: {time.time() - start_time:.2f}s")
+for i, (prompt, name) in enumerate(zip(all_prompts, prompt_names)):
+    print(f"\n{'─' * 70}")
+    print(f"Prompt ({name}): {prompt[1]['content']}")
+    print(f"{'─' * 70}")
+    print(f"  LoRA 1 (task1_attention): {lora1_results[i].outputs[0][:100]}...")
+    print(f"  LoRA 2 (task2_mlp):       {lora2_results[i].outputs[0][:100]}...")
+    print(f"  Full Model:               {full_results[i].outputs[0][:100]}...")
 
 print("\n" + "=" * 70)
-print("COMPARISON SUMMARY")
+print("SUMMARY")
 print("=" * 70)
-print("\nMulti-LoRA Model (Separate Clients):")
-print("  - Each adapter has its own training client")
-print("  - Memory efficient: only trains low-rank matrices")
-print("  - Client 1: task1_attention (rank=8, attn)")
-print("  - Client 2: task2_mlp (rank=4, mlp)")
-print("\nFull Model:")
-print("  - Trains all parameters")
-print("  - Higher memory usage but potentially better quality")
-print("  - No adapter management needed")
+print(f"Total prompts: {len(all_prompts)}")
+print(f"Total models: 3 (LoRA 1, LoRA 2, Full Model)")
+print(f"Total requests: {len(all_prompts) * 3}")
+print(f"Total time: {elapsed:.2f}s")
+print(f"Avg time per request: {elapsed / (len(all_prompts) * 3):.3f}s")
 print("=" * 70)
-
-
-# ============================================================================
-# BATCH INFERENCE EXAMPLES: Multithreaded and Async
-# ============================================================================
-print("\n" + "=" * 70)
-print("BATCH INFERENCE: Testing throughput with multiple requests")
-print("=" * 70)
-
-# Create a batch of mixed prompts
-batch_prompts = geography_prompts + math_prompts + general_prompts
-batch_formatted = tokenizer.apply_chat_template(batch_prompts, add_generation_prompt=True, tokenize=False)
-batch_encoded = tokenizer(batch_formatted, padding=True, return_tensors="pt")
-
-print(f"\nBatch size: {len(batch_prompts)} prompts")
-
-# Test 1: Multithreaded inference with Adapter 1
-print("\n" + "=" * 70)
-print("Test 1: Multithreaded inference with Adapter 1 (task1_attention)")
-start_time = time.time()
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    tinkerbell_futures = [
-        lora_sampling_client.sample(
-            input_ids=batch_encoded["input_ids"][i],
-            sampling_params={"max_new_tokens": 50, "temperature": 0.7}
-        ) for i in range(len(batch_prompts))
-    ]
-    thread_futures = [executor.submit(lambda f: f.result(), tf) for tf in tinkerbell_futures]
-    outputs_list = []
-    for future in tqdm(concurrent.futures.as_completed(thread_futures), total=len(thread_futures), desc="Adapter 1 requests"):
-        outputs = future.result()
-        outputs_list.append(outputs)
-print(f"✓ Completed {len(outputs_list)} requests in {time.time() - start_time:.2f}s")
-print("=" * 70)
-
-# Test 2: Multithreaded inference with Full Model
-print("\nTest 2: Multithreaded Full Model inference")
-start_time = time.time()
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    tinkerbell_futures = [
-        full_sampling_client.sample(
-            input_ids=batch_encoded["input_ids"][i],
-            sampling_params={"max_new_tokens": 50, "temperature": 0.7}
-        ) for i in range(len(batch_prompts))
-    ]
-    thread_futures = [executor.submit(lambda f: f.result(), tf) for tf in tinkerbell_futures]
-    outputs_list = []
-    for future in tqdm(concurrent.futures.as_completed(thread_futures), total=len(thread_futures), desc="Full model requests"):
-        outputs = future.result()
-        outputs_list.append(outputs)
-print(f"✓ Completed {len(outputs_list)} requests in {time.time() - start_time:.2f}s")
-print("=" * 70)
-
-# Test 3: Async inference with Adapter 1 (two-phase approach)
-print("\n" + "=" * 70)
-print("Test 3: Async inference with Adapter 1 (two-phase)")
-print("=" * 70)
-
-async def async_sample_two_phase():
-    """
-    Two-phase async sampling for maximum efficiency:
-    Phase 1: Submit all requests in parallel (first await)
-    Phase 2: Poll all results in parallel (second await)
-    """
-    start_time = time.time()
-    
-    # Phase 1: Submit all requests and get futures
-    print(f"Phase 1: Submitting {len(batch_prompts)} async requests...")
-    submit_start = time.time()
-    
-    async def submit_request(i):
-        """First await: submit request and return the future."""
-        return await lora_sampling_client.sample_async(
-            input_ids=batch_encoded["input_ids"][i],
-            sampling_params={"max_new_tokens": 50, "temperature": 0.7}
-        )
-    
-    # Gather all futures (first await for each)
-    futures = await asyncio.gather(*[submit_request(i) for i in range(len(batch_prompts))])
-    print(f"  ✓ All requests submitted in {time.time() - submit_start:.2f}s")
-    
-    # Phase 2: Poll all futures for results
-    print(f"Phase 2: Polling {len(futures)} futures for results...")
-    poll_start = time.time()
-    
-    # Gather all results (second await for each)
-    outputs_list = await asyncio.gather(*futures)
-    print(f"  ✓ All results received in {time.time() - poll_start:.2f}s")
-    
-    elapsed = time.time() - start_time
-    print(f"✓ All {len(outputs_list)} async requests completed!")
-    print(f"Total time: {elapsed:.2f} seconds")
-    print("=" * 70)
-    return outputs_list
-
-
-# Run the async function
-asyncio.run(async_sample_two_phase())
-# ============================================================================
-# FINAL SUMMARY
-# ============================================================================
-print("\n" + "=" * 70)
-print("✅ TUTORIAL COMPLETE!")
-print("=" * 70)
-print("\n📚 What we demonstrated:")
-print("\n1. Multi-LoRA Training:")
-print("   ✓ Created 2 LoRA adapters with separate training clients")
-print("   ✓ Adapter 1: High-rank (8), attention-focused")
-print("   ✓ Adapter 2: Low-rank (4), MLP-focused")
-print("   ✓ Each adapter trained independently with its own client")
-print("\n2. Full Model Training:")
-print("   ✓ Trained without LoRA for comparison")
-print("   ✓ All parameters updated (vs frozen base + LoRA)")
-print("\n3. Multi-LoRA Inference:")
-print("   ✓ Used separate sampling clients for each adapter")
-print("   ✓ Task-specific inference with appropriate adapter clients")
-print("\n4. Full Model Inference:")
-print("   ✓ Standard inference without adapter selection")
-print("\n5. Performance Testing:")
-print("   ✓ Multithreaded inference with ThreadPoolExecutor")
-print("   ✓ Async inference with two-phase approach")
-print("   ✓ Compared throughput between adapters and Full Model")
-print("\n🎯 Key Takeaways:")
-print("  • Multi-LoRA enables task-specific fine-tuning")
-print("  • Separate clients allow independent adapter training")
-print("  • Memory efficient: ~1-2% overhead per adapter")
-print("  • Full model training for comparison and baseline")
-print("  • Flexible inference: use different adapter clients")
-print("\n" + "=" * 70)
-
