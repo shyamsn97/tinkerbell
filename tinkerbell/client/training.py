@@ -329,7 +329,7 @@ class TrainingClient(BaseClient):
         checkpoint_path: str,
         tp_size: Optional[int] = None,
         engine_kwargs: Optional[dict[str, Any]] = None,
-        wait_until_ready: bool = True,
+        wait_until_ready: bool = False,
     ) -> SamplingClient:
         """Save weights and return a sampling client.
 

@@ -1,6 +1,5 @@
 import logging
 import os
-import traceback
 from typing import Any, Dict, Optional
 
 import ray
@@ -50,15 +49,9 @@ class TrainingActor:
         self.training_model = None
         self.optimizer = None
         self.ready = False
-
-        if lora_config is not None:
-            self.lora_config = (
-                LoraConfig(**lora_config)
-                if isinstance(lora_config, dict)
-                else lora_config
-            )
-        else:
-            self.lora_config = None
+        self.lora_config = (
+            LoraConfig(**lora_config) if isinstance(lora_config, dict) else lora_config
+        )
 
     def _get_optimizer(self, optimizer_config: dict[str, Any]) -> torch.optim.Optimizer:
         optimizer_name = optimizer_config.pop("name", "adam").lower()
@@ -71,37 +64,23 @@ class TrainingActor:
             "adadelta": torch.optim.Adadelta,
         }
         optimizer_config["foreach"] = False
-
-        # Only optimize parameters that require gradients (important for LoRA)
         trainable_params = [
             p for p in self.training_model.model.parameters() if p.requires_grad
         ]
-        optimizer = optimizer_dict[optimizer_name](trainable_params, **optimizer_config)
-        return optimizer
+        return optimizer_dict[optimizer_name](trainable_params, **optimizer_config)
 
     def _setup_distributed(self):
-        logger.info(f"[Rank {self.rank}] Initializing torch distributed")
-
-        # Set environment variables for distributed setup
         os.environ["MASTER_ADDR"] = self.master_addr
         os.environ["MASTER_PORT"] = self.master_port
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(self.world_size)
-
-        # Initialize process group
         dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
-
-        # Set CUDA device - Ray manages GPU assignment via CUDA_VISIBLE_DEVICES
-        # Each actor sees only one GPU as device 0
         torch.cuda.set_device(0)
 
     def setup(self):
-        """Initialize the PyTorch distributed process group and model."""
         if self.ready:
             return True
-
         self._setup_distributed()
-
         self.training_model = LLM(
             rank=self.rank,
             world_size=self.world_size,
@@ -112,13 +91,10 @@ class TrainingActor:
             adapter_name=self.adapter_name,
             initialize_random_weights=self.initialize_random_weights,
         )
-
-        logger.info(f"[Rank {self.rank}] Setup complete")
         self.ready = True
         return True
 
     async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> bool:
-        """Add a new LoRA adapter to the model."""
         config = (
             LoraConfig(**lora_config) if isinstance(lora_config, dict) else lora_config
         )
@@ -126,12 +102,10 @@ class TrainingActor:
         return True
 
     async def set_active_adapter(self, adapter_name: str) -> bool:
-        """Set which adapter is active for training."""
         self.training_model.set_active_adapter(adapter_name)
         return True
 
     async def get_adapters(self) -> list[str]:
-        """Get list of adapter names."""
         return list(self.training_model.adapters.keys())
 
     async def forward(
@@ -141,7 +115,6 @@ class TrainingActor:
         forward_kwargs: dict[str, Any] = {},
         **kwargs,
     ) -> torch.Tensor:
-        """Forward pass with automatic tensor conversion from list of Datum objects."""
         try:
             device = torch.cuda.current_device()
             padded = self.training_model.pad(data, device)
@@ -150,16 +123,14 @@ class TrainingActor:
                 "attention_mask": padded["attention_mask"],
                 **padded.get("additional_inputs", {}),
             }
-            outputs = self.training_model.forward(
+            return self.training_model.forward(
                 model_inputs=model_inputs,
                 with_grad=with_grad,
                 forward_kwargs=forward_kwargs,
             )
-            return outputs
         except Exception as e:
-            tb_str = traceback.format_exc()
-            logger.error(f"Error in forward: {e}\n{tb_str}")
-            raise e
+            logger.error(f"Forward error: {e}")
+            raise
 
     async def forward_backward(
         self,
@@ -170,48 +141,37 @@ class TrainingActor:
         loss_fn: LossFnType = "cross_entropy",
         loss_fn_config: Dict[str, float] | None = None,
     ):
-        """Execute training step. Switches to adapter_name if provided."""
         if loss_fn not in LOSSES:
             raise ValueError(f"Unknown loss function: {loss_fn}")
 
-        # Switch to the correct adapter before forward pass
         if adapter_name and self.training_model.adapters:
             self.training_model.set_active_adapter(adapter_name)
 
         device = torch.cuda.current_device()
         padded = self.training_model.pad(data, device)
-        model_inputs = padded["model_input"]
-        loss_fn_inputs = padded["loss_fn_inputs"]
-
         logits = self.training_model.forward(
-            model_inputs=model_inputs,
+            model_inputs=padded["model_input"],
             with_grad=True,
             forward_kwargs=forward_kwargs,
         )
-        per_batch_losses = LOSSES[loss_fn](logits=logits, **loss_fn_inputs)
-        loss = per_batch_losses.mean()
-        loss.backward()
+        per_batch_losses = LOSSES[loss_fn](logits=logits, **padded["loss_fn_inputs"])
+        per_batch_losses.mean().backward()
 
         return (
-            {"loss": [per_batch_loss.item() for per_batch_loss in per_batch_losses]}
-            if loss is not None and self.rank == 0
+            {"loss": [loss.item() for loss in per_batch_losses]}
+            if self.rank == 0
             else None
         )
 
     async def save_checkpoint(
         self, checkpoint_path: str, adapter_name: str | None = None
     ):
-        """Save model checkpoint, optionally for a specific adapter."""
-        logger.info(f"[Rank {self.rank}] Saving checkpoint (adapter={adapter_name})...")
         if self.rank == 0:
             os.makedirs(checkpoint_path, exist_ok=True)
         self.training_model.save_model(checkpoint_path, adapter_name=adapter_name)
-        logger.info(f"[Rank {self.rank}] Checkpoint save complete")
         return self.rank == 0
 
     async def cleanup(self):
-        """Clean up the PyTorch distributed process group."""
-        logger.info(f"[Rank {self.rank}] Cleaning up torch distributed")
         dist.destroy_process_group()
         return self.rank == 0
 
@@ -225,8 +185,6 @@ class TrainingActor:
     async def optim_step(
         self, adapter_name: str | None = None, optimizer_params: dict[str, Any] = {}
     ):
-        """Step optimizer. Switches to adapter_name first if provided."""
         if adapter_name and self.training_model.adapters:
             self.training_model.set_active_adapter(adapter_name)
-        optimizer = self._get_optimizer(optimizer_params)
-        optimizer.step()
+        self._get_optimizer(optimizer_params).step()

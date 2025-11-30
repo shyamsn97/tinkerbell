@@ -87,8 +87,6 @@ training_client = service_client.create_training_client(
         "torch_dtype": "bfloat16",
     }
 )
-training_client.wait_until_ready()
-print("   ✓ Adapter 'task1_attention' ready")
 
 # Adapter 2: Low-rank adapter for MLP layers (efficient, task-specific)
 print("\n2. Creating second adapter on the SAME base model (low-rank, MLP-focused)...")
@@ -115,13 +113,6 @@ training_client_2 = service_client.create_training_client(
         "torch_dtype": "bfloat16",
     }
 )
-training_client_2.wait_until_ready()
-print("   ✓ Adapter 'task2_mlp' ready (sharing actor with task1_attention)")
-print(f"\n✓ Both LoRA adapters sharing the same base model actor group!")
-print(f"  - Client 1: 'task1_attention' (rank={lora_config_1.rank}, attn layers)")
-print(f"  - Client 2: 'task2_mlp' (rank={lora_config_2.rank}, mlp layers)")
-print(f"  - Total GPU usage: {2} GPUs (tp_size=2) for both adapters combined")
-print("=" * 70)
 
 print("\n3. Creating full model training client (no LoRA)...")
 full_model_client = service_client.create_training_client(
@@ -135,6 +126,13 @@ full_model_client = service_client.create_training_client(
         "torch_dtype": "bfloat16",
     }
 )
+
+training_client.wait_until_ready()
+print("   ✓ Adapter 'task1_attention' ready")
+
+training_client_2.wait_until_ready()
+print("   ✓ Adapter 'task2_mlp' ready")
+
 full_model_client.wait_until_ready()
 print("   ✓ Full model client ready")
 print("=" * 70)
@@ -317,26 +315,33 @@ print("\n1. Saving adapter 1 (task1_attention)...")
 lora_sampling_client = training_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/task1-attention-qwen",
     tp_size=1,
-    wait_until_ready=True
+    wait_until_ready=False,
+    # engine_kwargs={"disable_cuda_graph": True}
 )
-print("   ✓ Adapter 1 sampling client ready")
 
 # Save adapter 2
 print("\n2. Saving adapter 2 (task2_mlp)...")
 lora_sampling_client_2 = training_client_2.save_weights_and_get_sampling_client(
     checkpoint_path="/models/task2-mlp-qwen",
     tp_size=1,
-    wait_until_ready=True
+    wait_until_ready=False,
+    # engine_kwargs={"disable_cuda_graph": True}
 )
-print("   ✓ Adapter 2 sampling client ready")
 
 # Save full model
 print("\n3. Saving full model (no LoRA)...")
 full_sampling_client = full_model_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/full-qwen",
     tp_size=1,
-    wait_until_ready=True
+    wait_until_ready=False,
+    # engine_kwargs={"disable_cuda_graph": True}
 )
+
+lora_sampling_client.wait_until_ready()
+lora_sampling_client_2.wait_until_ready()
+full_sampling_client.wait_until_ready()
+print("   ✓ Adapter 1 sampling client ready")
+print("   ✓ Adapter 2 sampling client ready")
 print("   ✓ Full model sampling client ready")
 print("=" * 70)
 
