@@ -190,24 +190,24 @@ class TinkerbellServiceDeployment:
     @APP.post("/zero_grad")
     @returns_future
     async def zero_grad(self, request: ZeroGradRequest) -> RemoteFuture:
-        await self.training_manager.zero_grad(model_id=request.model_id)
-        result = {
+        await self.training_manager.zero_grad(model_name=request.model_id)
+        return {
             "model_id": request.model_id,
-            "message": f"Gradients zeroed for model {request.model_id}",
+            "message": f"Gradients zeroed for {request.model_id}",
         }
-        return result
 
     @APP.post("/optim_step")
     @returns_future
     async def optim_step(self, request: OptimStepRequest) -> RemoteFuture:
         await self.training_manager.optim_step(
-            model_id=request.model_id, optimizer_params=request.optimizer_params
+            model_name=request.model_id,
+            adapter_name=request.adapter_name,
+            optimizer_params=request.optimizer_params,
         )
-        result = {
+        return {
             "model_id": request.model_id,
-            "message": f"Optimizer stepped for model {request.model_id}",
+            "message": f"Optimizer stepped for {request.model_id}",
         }
-        return result
 
     @APP.get("/health")
     async def health(self) -> HealthResponse:
@@ -221,9 +221,11 @@ class TinkerbellServiceDeployment:
         self,
         request: CreateTrainingActorsRequest,
     ) -> CreateTrainingActorsResponse:
-        model_id = await self.training_manager.create_training_actors(
+        model_name = await self.training_manager.create_training_actors(
             world_size=request.world_size,
             model_id=request.model_id,
+            model_name=request.model_name,
+            adapter_name=request.adapter_name,
             model_kwargs=request.model_kwargs,
             parallelize_plan=request.parallelize_plan,
             scheduler_params=request.scheduler_params,
@@ -233,37 +235,34 @@ class TinkerbellServiceDeployment:
         )
         return CreateTrainingActorsResponse(
             success=True,
-            model_id=model_id,
-            message=f"Training actors for model {model_id} created...",
+            model_id=model_name,
+            message=f"Training actors for {model_name} created...",
         )
 
     @APP.post("/save_checkpoint")
     @returns_future
     async def save_checkpoint(self, request: SaveCheckpointRequest) -> RemoteFuture:
         await self.training_manager.save_checkpoint(
-            model_id=request.model_id, checkpoint_path=request.checkpoint_path
+            model_name=request.model_id,
+            checkpoint_path=request.checkpoint_path,
+            adapter_name=request.adapter_name,
         )
-        result = {
+        return {
             "model_id": request.model_id,
             "success": True,
-            "message": f"Checkpoint saved for model {request.model_id}",
+            "message": f"Checkpoint saved for {request.model_id}",
             "path": request.checkpoint_path,
         }
-        return result
 
     @APP.post("/forward_backward")
     async def forward_backward(
-        self,
-        request: ForwardBackwardRequest,
+        self, request: ForwardBackwardRequest
     ) -> ForwardBackwardResponse:
         if not self.training_manager.running:
             await self.training_manager.start()
-        logger.debug(f"Request: {request}")
-        logger.debug(f"Request data: {request.data}, type: {type(request.data)}")
-        logger.debug(f"Request forward_kwargs: {request.forward_kwargs}")
-        logger.debug(f"Request return_logprobs: {request.return_logprobs}")
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
-            model_id=request.model_id,
+            model_name=request.model_id,
+            adapter_name=request.adapter_name,
             data=request.data,
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
@@ -272,13 +271,14 @@ class TinkerbellServiceDeployment:
 
     @APP.post("/get_actor_status")
     async def get_actor_status(
-        self,
-        request: ActorStatusRequest,
+        self, request: ActorStatusRequest
     ) -> ActorStatusResponse:
-        status = await self.training_manager.get_actor_status(request.model_id)
+        status = await self.training_manager.get_actor_status(
+            model_name=request.model_id
+        )
         return ActorStatusResponse(
             status=status.value,
-            message=f"Actor status for model {request.model_id} is {status.value}",
+            message=f"Actor status for {request.model_id}: {status.value}",
         )
 
     @APP.get("/get_store_keys")
@@ -311,17 +311,16 @@ class TinkerbellServiceDeployment:
 
     @APP.post("/create_sampling_actor")
     async def create_sampling_actor(
-        self,
-        request: CreateSamplingActorRequest,
+        self, request: CreateSamplingActorRequest
     ) -> CreateSamplingActorResponse:
-        _ = self.sampling_manager.create_sampling_actor(
+        key = self.sampling_manager.create_sampling_actor(
             model_id=request.model_id,
+            model_name=request.model_name,
             tp_size=request.tp_size,
             engine_kwargs=request.engine_kwargs,
         )
         return CreateSamplingActorResponse(
-            success=True,
-            message=f"Sampling actor for model {request.model_id} created...",
+            success=True, message=f"Sampling actor for {key} created..."
         )
 
     @APP.post("/get_sampling_actor_status")

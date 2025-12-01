@@ -19,11 +19,9 @@ class SamplingActorStatus(Enum):
 
 @dataclass
 class ActorState:
-    """Consolidated state for a sampling actor."""
-
     actor: SGLangSamplingActor
     status: SamplingActorStatus
-    pending_ref: Optional[Any] = None  # Ray ObjectRef for async operations
+    pending_ref: Optional[Any] = None
 
 
 class SamplingManager:
@@ -34,33 +32,36 @@ class SamplingManager:
     def create_sampling_actor(
         self,
         model_id: str,
-        tp_size: int,
+        model_name: str | None = None,
+        tp_size: int = 1,
         engine_kwargs: dict[str, Any] = {},
     ) -> str:
-        if model_id in self.actors:
-            logger.info(f"Sampling actor for {model_id} already exists")
-            return model_id
+        key = model_name or model_id
+        if key in self.actors:
+            return key
 
-        actor_name = self._get_actor_name(model_id)
-        logger.info(f"Creating sampling actor: {actor_name} (tp_size={tp_size})")
-        logger.info(f"Check logs: ray logs {actor_name}")
+        actor_name = self._get_actor_name(key)
+        actor = SGLangSamplingActor.options(
+            num_gpus=tp_size,
+            get_if_exists=True,
+            lifetime="detached",
+            name=actor_name,
+            namespace="tinkerbell",
+        ).remote(model_id=model_id, tp_size=tp_size, engine_kwargs=engine_kwargs)
 
-        actor = self._create_actor_with_options(model_id, tp_size, engine_kwargs)
-        self.actors[model_id] = ActorState(
+        self.actors[key] = ActorState(
             actor=actor,
             status=SamplingActorStatus.PENDING,
             pending_ref=actor.is_ready.remote(),
         )
-        return model_id
+        return key
 
     async def get_sampling_actor_status(self, model_id: str) -> SamplingActorStatus:
         state = self.actors.get(model_id)
         if state is None:
             return SamplingActorStatus.NOT_PRESENT
-
         if state.status == SamplingActorStatus.PENDING:
             await self._check_pending_status(model_id)
-
         return self.actors.get(
             model_id, ActorState(None, SamplingActorStatus.NOT_PRESENT)
         ).status
@@ -72,10 +73,7 @@ class SamplingManager:
     async def load_checkpoint(
         self, model_id: str, checkpoint_path: str, pin_lora: bool = False
     ) -> bool:
-        """Start loading a checkpoint in the background (fire-and-forget)."""
         state = self._get_state_or_raise(model_id)
-        logger.info(f"Loading checkpoint for {model_id} from {checkpoint_path}")
-
         state.status = SamplingActorStatus.PENDING
         state.pending_ref = state.actor.update_weights_from_disk.remote(
             checkpoint_path=checkpoint_path,
@@ -85,57 +83,34 @@ class SamplingManager:
         return True
 
     async def shutdown(self, model_id: str) -> bool:
-        """Shutdown a sampling actor."""
         state = self._get_state_or_raise(model_id)
         result = await state.actor.shutdown.remote()
         del self.actors[model_id]
         return result
 
-    # Private helper methods
-    def _create_actor_with_options(
-        self, model_id: str, tp_size: int, engine_kwargs: dict[str, Any]
-    ) -> SGLangSamplingActor:
-        """Create and configure a Ray actor with appropriate options."""
-        actor_name = self._get_actor_name(model_id)
-        return SGLangSamplingActor.options(
-            num_gpus=tp_size,
-            get_if_exists=True,
-            lifetime="detached",
-            name=actor_name,
-            namespace="tinkerbell",
-        ).remote(
-            model_id=model_id,
-            tp_size=tp_size,
-            engine_kwargs=engine_kwargs,
-        )
-
     async def _check_pending_status(self, model_id: str) -> None:
-        """Check if pending operation (initialization or loading) is complete."""
         state = self.actors.get(model_id)
         if state is None or state.pending_ref is None:
             return
 
         if self._is_actor_dead(model_id):
-            self._handle_actor_failure(model_id)
+            del self.actors[model_id]
             return
 
         try:
             ready, _ = ray.wait([state.pending_ref], num_returns=1, timeout=0)
             if ready:
-                result = await state.pending_ref
-                logger.info(f"✓ Pending operation completed for {model_id}: {result}")
+                await state.pending_ref
                 state.status = SamplingActorStatus.READY
                 state.pending_ref = None
         except ray.exceptions.RayActorError as e:
-            logger.error(f"Actor {model_id} crashed during operation: {e}")
-            logger.error(f"Check logs: ray logs {self._get_actor_name(model_id)}")
+            logger.error(f"Actor {model_id} crashed: {e}")
             del self.actors[model_id]
         except Exception as e:
-            logger.error(f"Operation failed for {model_id}: {type(e).__name__}: {e}")
+            logger.error(f"Error for {model_id}: {e}")
             del self.actors[model_id]
 
     def _is_actor_dead(self, model_id: str) -> bool:
-        """Check if actor is in DEAD state."""
         state = self.actors.get(model_id)
         if state is None or state.actor is None:
             return False
@@ -145,21 +120,13 @@ class SamplingManager:
         except Exception:
             return False
 
-    def _handle_actor_failure(self, model_id: str) -> None:
-        """Handle actor failure."""
-        logger.error(f"Actor {model_id} DIED during operation")
-        logger.error(f"Check logs: ray logs {self._get_actor_name(model_id)}")
-        del self.actors[model_id]
-
     def _get_state_or_raise(self, model_id: str) -> ActorState:
-        """Get actor state or raise ValueError if not found."""
         state = self.actors.get(model_id)
         if state is None:
-            raise ValueError(f"Sampling actor for model {model_id} not found")
+            raise ValueError(f"Sampling actor {model_id} not found")
         return state
 
     @staticmethod
     def _get_actor_name(model_id: str) -> str:
-        """Generate a clean actor name from model_id."""
         cleaned = model_id.replace("/", "_").replace(":", "_").lower()
         return f"sampling_actor_{cleaned}"

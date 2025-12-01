@@ -1,8 +1,8 @@
 # Tinkerbell
 
-An open-source implementation of [Tinker](https://tinker-docs.thinkingmachines.ai/) from Thinking Machines.
+An small(ish) open-source reimplementation of [Tinker](https://tinker-docs.thinkingmachines.ai/) from Thinking Machines.
 
-Tinkerbell is a distributed training and inference framework for large language models, built on Ray and PyTorch. Like Tinker, it provides a simple API that lets you focus on your data and loss functions while handling the complexity of distributed training. You write a training loop that runs on your machine, and Tinkerbell figures out how to efficiently execute it across multiple GPUs.
+Tinkerbell is a distributed training and inference framework for large language models, built on Ray, PyTorch, and [SGlang](https://github.com/sgl-project/sglang). Like Tinker, it provides a simple API that lets you focus on your data and loss functions while handling the complexity of distributed training. You write a training loop that runs on your machine, and Tinkerbell figures out how to efficiently execute it across multiple GPUs.
 
 **Key Philosophy** (inspired by Tinker):
 - 📊 **You focus on**: Your datasets, loss functions, and training logic
