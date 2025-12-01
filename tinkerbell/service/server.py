@@ -540,7 +540,7 @@ def deploy_on_modal(
             "cloudpickle",
             "dill",
             "flashinfer-python",  # Install FlashInfer first
-            "sglang[all]==0.5.2",
+            "sglang[all]>=0.5.3",
             "sgl-kernel",
             "huggingface_hub",
             "hf_transfer",

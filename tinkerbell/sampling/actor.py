@@ -56,11 +56,13 @@ class SGLangSamplingActor:
         engine_kwargs["port"] = self.port
         engine_kwargs["host"] = "127.0.0.1"
 
-        if engine_kwargs.get("enable_lora") is not False:
+        if engine_kwargs.get("enable_lora", None) is not False:
             engine_kwargs["enable_lora"] = True
-            engine_kwargs.setdefault("max_loras_per_batch", 2)
+            engine_kwargs.setdefault("max_loras_per_batch", 64)
             engine_kwargs.setdefault("max_lora_rank", 256)
             engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
+
+        engine_kwargs.setdefault("enable_deterministic_inference", True)
 
         server_args = ServerArgs(**engine_kwargs)
         self.server_process = launch_server_process(server_args, launch_server)

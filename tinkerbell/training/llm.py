@@ -17,7 +17,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
-
+from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.utils import get_submodules_with_wildcard
 
@@ -158,7 +158,7 @@ class LLM:
         self.model.set_adapter(adapter_name)
         self.active_adapter = adapter_name
 
-    def pad(self, data: list, device: torch.device) -> dict[str, torch.Tensor]:
+    def pad(self, data: list[Datum], device: torch.device) -> dict[str, torch.Tensor]:
         from tinkerbell.utils import get_nested, set_nested
 
         torch_data = [d.to_torch(device=device) for d in data]
