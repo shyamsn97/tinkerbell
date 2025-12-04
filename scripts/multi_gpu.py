@@ -195,20 +195,20 @@ tokenizer = training_client.get_tokenizer()
 renderer = Renderer(tokenizer)
 
 # Build training data for each task with adapter routing
-task1_data = renderer.build_chat_examples(
-    conversations=task1_conversations,
+task1_data = renderer.build_chat_samples(
+    messages=task1_conversations,
     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     mask_value=-100,
 )
 
-task2_data = renderer.build_chat_examples(
-    conversations=task2_conversations,
+task2_data = renderer.build_chat_samples(
+    messages=task2_conversations,
     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     mask_value=-100,
 )
 
-full_model_data = renderer.build_chat_examples(
-    conversations=full_model_conversations,
+full_model_data = renderer.build_chat_samples(
+    messages=full_model_conversations,
     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     mask_value=-100,
 )

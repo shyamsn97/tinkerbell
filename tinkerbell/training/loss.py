@@ -15,19 +15,21 @@ def cross_entropy_loss(
     Returns:
         Per-example loss of shape [batch_size]
     """
-    # Upcast to float to avoid precision issues
-    logits = logits.float()
     batch_size = logits.shape[0]
     vocab_size = logits.shape[-1]
 
     # Flatten the tokens
-    logits = logits.view(-1, vocab_size)
-    labels = labels.view(-1)
-    labels = labels.to(logits.device)
+    logits_flat = logits.view(-1, vocab_size)
+    labels_flat = labels.view(-1)
+    labels_flat = labels_flat.to(logits.device)
 
     # Compute cross-entropy with ignore_index for masked tokens
+    # Use logits.float() only when needed to avoid unnecessary memory allocation
+    if logits.dtype != torch.float32:
+        logits_flat = logits_flat.float()
+
     loss = nn.functional.cross_entropy(
-        logits, labels, ignore_index=-100, reduction="none"
+        logits_flat, labels_flat, ignore_index=-100, reduction="none"
     )
 
     # Reshape and average over sequence length

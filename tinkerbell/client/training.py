@@ -201,6 +201,7 @@ class TrainingClient(BaseClient):
             logprobs=result.get("logprobs"),
             outputs=result.get("outputs"),
             metrics=result.get("metrics"),
+            sum_gradient=result.get("sum_gradient"),
         )
 
     def forward_backward(

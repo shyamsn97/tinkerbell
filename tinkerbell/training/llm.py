@@ -17,6 +17,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
+
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.utils import get_submodules_with_wildcard
@@ -87,19 +88,44 @@ class LLM:
         self.model = self.create_model(
             model_id=self.model_id, model_kwargs=self.model_kwargs
         )
+
+        # Enable gradient checkpointing BEFORE PEFT wrapping (required for PEFT compatibility)
+        # See: https://github.com/huggingface/peft/issues/2826
+        if self.model_kwargs.get("gradient_checkpointing", False):
+            if hasattr(self.model, "gradient_checkpointing_enable"):
+                self.model.gradient_checkpointing_enable()
+                logger.info(
+                    "Gradient checkpointing enabled on base model (before PEFT)"
+                )
+            elif hasattr(self.model, "config") and hasattr(
+                self.model.config, "gradient_checkpointing"
+            ):
+                self.model.config.gradient_checkpointing = True
+                logger.info("Gradient checkpointing enabled via config (before PEFT)")
+
         if self.lora_config is not None:
             self.model = self.add_adapter(self.adapter_name, self.lora_config)
+
         self.model = self.parallelize(
             model=self.model, parallelize_plan=self.parallelize_plan
         )
 
+    def train(self) -> None:
+        self.model.train()
+
     def create_model(self, model_id: str, model_kwargs: dict[str, Any]) -> nn.Module:
         from transformers import AutoConfig, AutoModelForCausalLM
 
+        # Remove gradient_checkpointing from kwargs - it's not a valid model init argument
+        # We'll enable it separately after model creation
+        filtered_kwargs = {
+            k: v for k, v in model_kwargs.items() if k != "gradient_checkpointing"
+        }
+
         config = AutoConfig.from_pretrained(model_id)
         if self.initialize_random_weights:
-            return AutoModelForCausalLM.from_config(config, **model_kwargs)
-        return AutoModelForCausalLM.from_pretrained(self.model_id, **self.model_kwargs)
+            return AutoModelForCausalLM.from_config(config, **filtered_kwargs)
+        return AutoModelForCausalLM.from_pretrained(self.model_id, **filtered_kwargs)
 
     def _build_target_modules(self, lora_config: LoraConfig) -> list[str]:
         target_modules = []
@@ -196,7 +222,10 @@ class LLM:
                 self.model.eval()
                 with torch.no_grad():
                     outputs = self.model(**model_inputs, **forward_kwargs)
-            return outputs.logits
+            # Extract logits and explicitly delete outputs to free memory
+            logits = outputs.logits
+            del outputs
+            return logits
         except Exception as e:
             logger.error(f"Forward error: {e}")
             raise

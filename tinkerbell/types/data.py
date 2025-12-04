@@ -107,6 +107,9 @@ class TensorData(StrictBase):
         torch_tensor = torch_tensor[index]
         return TensorData.from_torch(torch_tensor)
 
+    def __len__(self) -> int:
+        return len(self.data)
+
 
 @dataclass
 class ImageData:

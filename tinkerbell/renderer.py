@@ -78,7 +78,7 @@ class Renderer:
 
         return labels
 
-    def build_message_examples(
+    def build_message_samples(
         self,
         messages: list[dict[str, str]],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
@@ -99,7 +99,7 @@ class Renderer:
             ...     {"role": "user", "content": "What is 2+2?"},
             ...     {"role": "assistant", "content": "The answer is 4."},
             ... ]
-            >>> datum = renderer.build_message_examples(
+            >>> datum = renderer.build_single_message_sample(
             ...     messages,
             ...     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE
             ... )
@@ -156,24 +156,24 @@ class Renderer:
             },
         )
 
-    def build_chat_examples(
+    def build_chat_samples(
         self,
-        conversations: list[list[dict[str, str]]],
+        messages: list[list[dict[str, str]]] | list[dict[str, str]],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
         mask_value: int = -100,
     ) -> list[Datum]:
-        """Build multiple training examples from a list of conversations.
+        """Build multiple training examples from a list of messages.
 
         Args:
-            conversations: List of conversations, where each conversation is a list of messages
-            train_on_what: Which parts of each conversation to train on
+            messages: List of messages, where each message is a list of messages
+            train_on_what: Which parts of the conversation to train on
             mask_value: Value to use for masked tokens (default: -100)
 
         Returns:
-            List of Datum objects, one per conversation.
+            List of Datum objects, one per message.
 
         Example:
-            >>> conversations = [
+            >>> messages = [
             ...     [
             ...         {"role": "user", "content": "What is 2+2?"},
             ...         {"role": "assistant", "content": "4"},
@@ -183,12 +183,14 @@ class Renderer:
             ...         {"role": "assistant", "content": "6"},
             ...     ],
             ... ]
-            >>> data = renderer.build_chat_examples(
+            >>> data = renderer.build_chat_samples(
             ...     conversations,
             ...     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE
             ... )
         """
+        if isinstance(messages[0], dict):
+            messages = [messages]
         return [
-            self.build_message_examples(messages, train_on_what, mask_value)
-            for messages in conversations
+            self.build_message_samples(message, train_on_what, mask_value)
+            for message in messages
         ]

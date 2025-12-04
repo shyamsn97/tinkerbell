@@ -30,6 +30,7 @@ class ForwardBackwardResponse(BaseModel):
     logprobs: TensorData | None = None
     outputs: dict[str, TensorData] | None = None
     metrics: Optional[dict[str, float]] = None
+    sum_gradient: Optional[dict[str, float]] = None
 
 
 class ActorStatusResponse(BaseModel):
