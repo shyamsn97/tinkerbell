@@ -104,6 +104,28 @@ class ActorGroup:
         if adapter_name:
             self.adapters[adapter_name] = checkpoint_path
 
+    async def push_to_hub(
+        self,
+        repo_id: str,
+        adapter_name: str | None = None,
+        token: str | None = None,
+        private: bool = False,
+        commit_message: str | None = None,
+        push_kwargs: dict[str, Any] = {},
+    ) -> None:
+        refs = [
+            worker.push_to_hub.remote(
+                repo_id=repo_id,
+                adapter_name=adapter_name,
+                token=token,
+                private=private,
+                commit_message=commit_message,
+                push_kwargs=push_kwargs,
+            )
+            for worker in self.workers
+        ]
+        await asyncio.gather(*refs)
+
     async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> None:
         refs = [
             worker.add_adapter.remote(adapter_name, lora_config)
@@ -260,7 +282,7 @@ class TrainingManager:
     def __init__(
         self,
         max_wait_time: float = 600.0,
-        clock_cycle: float = 5.0,
+        clock_cycle: float = 0.0,
         global_store: GlobalStore = None,
     ):
         self.actor_groups: Dict[str, ActorGroup] = {}
@@ -274,10 +296,7 @@ class TrainingManager:
         if self.running:
             return
         self.running = True
-        if self.clock_cycle > 0.0:
-            self.batch_processor_task = asyncio.create_task(
-                self._batch_processor_loop()
-            )
+        self.batch_processor_task = asyncio.create_task(self._batch_processor_loop())
 
     async def stop(self):
         self.running = False
@@ -346,6 +365,25 @@ class TrainingManager:
     ) -> None:
         await self._get_actor_group_or_raise(model_name).save_checkpoint(
             checkpoint_path, adapter_name
+        )
+
+    async def push_to_hub(
+        self,
+        model_name: str,
+        repo_id: str,
+        adapter_name: str | None = None,
+        token: str | None = None,
+        private: bool = False,
+        commit_message: str | None = None,
+        push_kwargs: dict[str, Any] = {},
+    ) -> None:
+        await self._get_actor_group_or_raise(model_name).push_to_hub(
+            repo_id=repo_id,
+            adapter_name=adapter_name,
+            token=token,
+            private=private,
+            commit_message=commit_message,
+            push_kwargs=push_kwargs,
         )
 
     async def set_active_adapter(self, model_name: str, adapter_name: str) -> None:
@@ -426,8 +464,6 @@ class TrainingManager:
         self, request: ForwardRequest | ForwardBackwardRequest, model_name: str
     ) -> RemoteFuture:
         await self.global_store.add_request_to_queue.remote(request=request)
-        if self.clock_cycle <= 0.0:
-            await self._process_batch(model_name)
         return RemoteFuture(request_id=request.request_id, model_id=model_name)
 
     async def _batch_processor_loop(self) -> None:

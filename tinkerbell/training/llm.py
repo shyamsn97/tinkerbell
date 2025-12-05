@@ -48,6 +48,7 @@ class LLM:
         lora_config: LoraConfig | None = None,
         adapter_name: str | None = None,
         initialize_random_weights: bool = False,
+        enable_gradient_checkpointing: bool = True,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -58,6 +59,7 @@ class LLM:
         self.adapter_name = adapter_name or "default"
         self.initialize_random_weights = initialize_random_weights
         self.should_merge_lora = {}
+        self.enable_gradient_checkpointing = enable_gradient_checkpointing
         self.adapters: dict[str, LoraConfig] = {}
         self.active_adapter: str | None = None
         self.tokenizer = None
@@ -91,7 +93,7 @@ class LLM:
 
         # Enable gradient checkpointing BEFORE PEFT wrapping (required for PEFT compatibility)
         # See: https://github.com/huggingface/peft/issues/2826
-        if self.model_kwargs.get("gradient_checkpointing", False):
+        if self.enable_gradient_checkpointing:
             if hasattr(self.model, "gradient_checkpointing_enable"):
                 self.model.gradient_checkpointing_enable()
                 logger.info(
@@ -260,7 +262,6 @@ class LLM:
                         os.rmdir(subdir)
             else:
                 self.model.save_pretrained(save_dir, state_dict=state_dict)
-
             try:
                 self.tokenizer.save_pretrained(save_dir)
             except Exception:

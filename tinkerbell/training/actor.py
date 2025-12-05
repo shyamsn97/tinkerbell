@@ -74,11 +74,7 @@ class TrainingActor:
     def _get_or_create_optimizer(
         self, optimizer_config: dict[str, Any]
     ) -> torch.optim.Optimizer:
-        """Get existing optimizer or create a new one if config changed."""
-        # Make a copy to avoid mutating the original dict
-        config_copy = optimizer_config.copy()
-        config_copy.pop("name", "adam")  # Remove name for comparison
-
+        """Get existing optimizer or create a new one if trainable parameters changed."""
         # Get current trainable parameters
         current_trainable_params = [
             p for p in self.training_model.model.parameters() if p.requires_grad
@@ -88,7 +84,6 @@ class TrainingActor:
         # Check if we need to create a new optimizer
         if self.optimizer is None:
             self.optimizer = self._get_optimizer(optimizer_config)
-            self._last_optimizer_config = config_copy
             self._last_param_ids = current_param_ids
         else:
             # Check if trainable parameters changed (e.g., adapter switch)
@@ -98,36 +93,9 @@ class TrainingActor:
             ):
                 # Parameters changed, need to recreate optimizer
                 logger.info("Trainable parameters changed, recreating optimizer")
-                # Clear optimizer state to free memory
-                self.optimizer.state.clear()
                 del self.optimizer
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                import gc
-
-                gc.collect()
-                torch.cuda.empty_cache()
                 self.optimizer = self._get_optimizer(optimizer_config)
-                self._last_optimizer_config = config_copy
                 self._last_param_ids = current_param_ids
-            # Check if config changed (simple comparison - could be improved)
-            elif (
-                not hasattr(self, "_last_optimizer_config")
-                or self._last_optimizer_config != config_copy
-            ):
-                # Config changed, create new optimizer
-                logger.info("Optimizer config changed, recreating optimizer")
-                # Clear optimizer state to free memory
-                self.optimizer.state.clear()
-                del self.optimizer
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                import gc
-
-                gc.collect()
-                torch.cuda.empty_cache()
-                self.optimizer = self._get_optimizer(optimizer_config)
-                self._last_optimizer_config = config_copy
             else:
                 # Update learning rate if it changed
                 if "lr" in optimizer_config:
@@ -270,13 +238,9 @@ class TrainingActor:
                 [loss.item() for loss in per_batch_losses] if self.rank == 0 else None
             )
 
-            # Clean up intermediate tensors to free memory immediately
+            # Clean up intermediate tensors to free memory
             del logits, padded, per_batch_losses, loss_mean
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
 
-            # Compute sum of gradients for each parameter (only trainable ones with gradients)
-            # Use no_grad to avoid creating computation graph
             sum_gradient = {}
             with torch.no_grad():
                 for name, param in self.training_model.model.named_parameters():
@@ -285,14 +249,6 @@ class TrainingActor:
                         # Only compute for parameters that actually have gradients
                         grad_sum = param.grad.detach().sum().item()
                         sum_gradient[name] = grad_sum
-
-            # Note: We don't clear gradients here because they're needed for optim_step
-            # Gradients should be cleared by zero_grad() before the next forward_backward
-            # or by optim_step() after the optimizer step
-
-            # Final memory cleanup
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
 
             if self.rank == 0:
                 return {
@@ -325,12 +281,61 @@ class TrainingActor:
         self.training_model.save_model(checkpoint_path, adapter_name=adapter_name)
         return self.rank == 0
 
+    async def push_to_hub(
+        self,
+        repo_id: str,
+        adapter_name: str | None = None,
+        token: str | None = None,
+        private: bool = False,
+        commit_message: str | None = None,
+        push_kwargs: dict[str, Any] = {},
+    ):
+        """Push model to Hugging Face Hub.
+
+        The repository will be created automatically if it doesn't exist.
+        Requires authentication via token or huggingface_hub login.
+        """
+        if self.rank == 0:
+            if adapter_name and self.training_model.adapters:
+                self.training_model.set_active_adapter(adapter_name)
+
+            if not hasattr(self.training_model.model, "push_to_hub"):
+                raise RuntimeError("Model does not support push_to_hub")
+
+            push_params = {
+                "repo_id": repo_id,
+                "token": token,
+                "private": private,
+                "commit_message": commit_message,
+                **push_kwargs,
+            }
+            if adapter_name and self.training_model.adapters:
+                push_params["adapter_name"] = adapter_name
+
+            self.training_model.model.push_to_hub(**push_params)
+
+            # Push tokenizer if available
+            if self.training_model.tokenizer is not None:
+                try:
+                    self.training_model.tokenizer.push_to_hub(
+                        repo_id=repo_id,
+                        token=token,
+                        private=private,
+                        commit_message=commit_message,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to push tokenizer: {e}")
+
+        # Wait for all ranks to complete
+        dist.barrier()
+        return self.rank == 0
+
     async def cleanup(self):
         dist.destroy_process_group()
         return self.rank == 0
 
     async def zero_grad(self):
-        """Clear all gradients and free memory."""
+        """Clear all gradients."""
         if self.training_model is None or self.training_model.model is None:
             logger.warning("Model not initialized yet, skipping zero_grad")
             return
@@ -341,15 +346,6 @@ class TrainingActor:
         ):
             if param.grad is not None:
                 param.grad = None
-        # Synchronize and clear cache to ensure memory is freed
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-
-        # Force garbage collection to help free memory
-        import gc
-
-        gc.collect()
-        torch.cuda.empty_cache()
 
     async def backward(self, loss):
         loss.backward()
@@ -364,20 +360,10 @@ class TrainingActor:
         optimizer = self._get_or_create_optimizer(optimizer_params)
         optimizer.step()
 
-        # Clear gradients after optimizer step to free memory
+        # Clear gradients after optimizer step
         # Only clear gradients for trainable parameters (LoRA adapters), not base model
         for param in (
             p for p in self.training_model.model.parameters() if p.requires_grad
         ):
             if param.grad is not None:
                 param.grad = None
-
-        # Synchronize and clear cache to ensure memory is freed
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-
-        # Force garbage collection to help free memory
-        import gc
-
-        gc.collect()
-        torch.cuda.empty_cache()

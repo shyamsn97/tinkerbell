@@ -8,12 +8,22 @@ from transformers import AutoTokenizer
 import datasets
 from typing import cast
 import wandb
+import os
 
 # MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 # MODEL_ID = "Qwen/Qwen3-8B-Base"
 MODEL_ID = "Qwen/Qwen3-0.6B-Base"
 GPU_TYPE = "H100"
 NUM_GPUS = 1
+# Filter by sequence length to save memory
+MAX_SEQUENCE_LENGTH = 512
+BATCH_SIZE = 64  # Reduced from 64 - start small and increase if stable
+GRADIENT_ACCUMULATION_STEPS = 1
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 0.0
+NUM_EPOCHS = 10
+CHECKPOINT_INTERVAL = 100
+HUGGINGFACE_REPO_ID = "shyamsn97/tinkerbell-chat-sft"
 
 deploy_config = ModalDeployConfig(
     gpu=GPU_TYPE, 
@@ -22,7 +32,6 @@ deploy_config = ModalDeployConfig(
     container_idle_timeout=600,
     max_inputs=200,
     max_wait_time=1200.0,
-    clock_cycle=1.0
 )
 
 # Define parallelization plan
@@ -100,8 +109,6 @@ datums = renderer.build_chat_samples(
     mask_value=-100,
 )
 
-# Filter by sequence length to save memory
-MAX_SEQUENCE_LENGTH = 512
 original_count = len(datums)
 # Use len(datum.model_input) since ModelInput has __len__ that returns input_ids length
 datums = [
@@ -112,12 +119,6 @@ filtered_count = len(datums)
 print(f"Filtered dataset: {original_count} -> {filtered_count} samples (keeping sequences <= {MAX_SEQUENCE_LENGTH} tokens)")
 if original_count > 0:
     print(f"Removed {original_count - filtered_count} samples ({100 * (original_count - filtered_count) / original_count:.1f}%)")
-
-BATCH_SIZE = 64  # Reduced from 64 - start small and increase if stable
-GRADIENT_ACCUMULATION_STEPS = 1
-LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 0.0
-NUM_EPOCHS = 10
 
 # Initialize wandb
 wandb.init(
@@ -138,15 +139,16 @@ wandb.init(
     }
 )
 
-# Enable gradient checkpointing via forward_kwargs
-# This significantly reduces memory usage at the cost of ~20% slower training
-forward_kwargs = {
-    "use_cache": False,  # Disable KV cache
-}
+# # Enable gradient checkpointing via forward_kwargs
+# # This significantly reduces memory usage at the cost of ~20% slower training
+# forward_kwargs = {
+#     "use_cache": False,  # Disable KV cache
+# }
 
 # training loop with gradient accumulation
 global_step = 0
-for epoch in tqdm(range(NUM_EPOCHS), desc="Epoch"):
+epoch_bar = tqdm(range(NUM_EPOCHS), desc="Epoch")
+for epoch in epoch_bar:
     dataloader = DataLoader(
         DatumDataset(datums), 
         batch_size=BATCH_SIZE, 
@@ -157,7 +159,14 @@ for epoch in tqdm(range(NUM_EPOCHS), desc="Epoch"):
     # Track accumulated loss for logging
     accumulated_losses = []
 
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch}", leave=False)):
+    batch_bar = tqdm(dataloader, desc=f"Epoch {epoch}", leave=False)
+    for batch_idx, batch in enumerate(batch_bar):
+        if batch_idx % CHECKPOINT_INTERVAL == 0:
+            training_client.push_to_hub(
+                repo_id=HUGGINGFACE_REPO_ID,
+                token=os.getenv("HF_TOKEN"),
+                private=False,
+            ).result()
         # Only zero gradients at the start of accumulation cycle
         if batch_idx % GRADIENT_ACCUMULATION_STEPS == 0:
             training_client.zero_grad().result()
@@ -165,7 +174,6 @@ for epoch in tqdm(range(NUM_EPOCHS), desc="Epoch"):
         # Forward and backward pass
         forward_backward_response = training_client.forward_backward(
             data=batch,
-            forward_kwargs=forward_kwargs,
         ).result()
 
         # Accumulate losses for logging
@@ -185,7 +193,7 @@ for epoch in tqdm(range(NUM_EPOCHS), desc="Epoch"):
             # Log accumulated losses
             if accumulated_losses:
                 avg_loss = sum(accumulated_losses) / len(accumulated_losses)
-                print(f"Epoch {epoch}, Step {global_step}, Loss: {avg_loss:.4f} (accumulated over {len(accumulated_losses)} samples)")
+                batch_bar.set_description(f"Epoch {epoch}, Step {global_step}, Loss: {avg_loss:.4f})")
 
                 # Log to wandb
                 log_dict = {

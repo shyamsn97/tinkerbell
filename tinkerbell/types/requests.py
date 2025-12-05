@@ -32,6 +32,18 @@ class SaveCheckpointRequest(StrictBase):
     adapter_name: Optional[str] = None  # Which LoRA adapter to save
 
 
+class PushToHubRequest(StrictBase):
+    model_id: str  # This is model_name for routing
+    repo_id: str  # Hugging Face Hub repository ID (e.g., "username/model-name")
+    adapter_name: Optional[str] = None  # Which LoRA adapter to push
+    token: Optional[str] = None  # Hugging Face token for authentication
+    private: bool = False  # Whether to create a private repository
+    commit_message: Optional[str] = None  # Commit message
+    push_kwargs: dict[str, Any] = Field(
+        default_factory=lambda: {}
+    )  # Additional push_to_hub kwargs
+
+
 class ActorRequest(StrictBase):
     request_id: str
 

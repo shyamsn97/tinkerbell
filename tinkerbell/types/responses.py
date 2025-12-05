@@ -54,6 +54,13 @@ class SaveCheckpointResponse(BaseModel):
     path: Optional[str] = None
 
 
+class PushToHubResponse(BaseModel):
+    model_id: str
+    success: bool
+    message: str | None = None
+    repo_id: Optional[str] = None
+
+
 class CreateSamplingActorResponse(BaseModel):
     success: bool
     message: str | None = None
