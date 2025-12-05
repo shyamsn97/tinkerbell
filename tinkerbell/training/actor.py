@@ -54,6 +54,8 @@ class TrainingActor:
         )
 
     def _get_optimizer(self, optimizer_config: dict[str, Any]) -> torch.optim.Optimizer:
+        # Make a copy to avoid mutating the original dict
+        optimizer_config = optimizer_config.copy()
         optimizer_name = optimizer_config.pop("name", "adam").lower()
         optimizer_dict = {
             "adamw": torch.optim.AdamW,
@@ -69,7 +71,44 @@ class TrainingActor:
         ]
         return optimizer_dict[optimizer_name](trainable_params, **optimizer_config)
 
+    def _get_or_create_optimizer(
+        self, optimizer_config: dict[str, Any]
+    ) -> torch.optim.Optimizer:
+        """Get existing optimizer or create a new one if trainable parameters changed."""
+        # Get current trainable parameters
+        current_trainable_params = [
+            p for p in self.training_model.model.parameters() if p.requires_grad
+        ]
+        current_param_ids = {id(p) for p in current_trainable_params}
+
+        # Check if we need to create a new optimizer
+        if self.optimizer is None:
+            self.optimizer = self._get_optimizer(optimizer_config)
+            self._last_param_ids = current_param_ids
+        else:
+            # Check if trainable parameters changed (e.g., adapter switch)
+            if (
+                not hasattr(self, "_last_param_ids")
+                or self._last_param_ids != current_param_ids
+            ):
+                # Parameters changed, need to recreate optimizer
+                logger.info("Trainable parameters changed, recreating optimizer")
+                del self.optimizer
+                self.optimizer = self._get_optimizer(optimizer_config)
+                self._last_param_ids = current_param_ids
+            else:
+                # Update learning rate if it changed
+                if "lr" in optimizer_config:
+                    for param_group in self.optimizer.param_groups:
+                        param_group["lr"] = optimizer_config["lr"]
+
+        return self.optimizer
+
     def _setup_distributed(self):
+        # Set PyTorch CUDA allocator to reduce memory fragmentation
+        if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
         os.environ["MASTER_ADDR"] = self.master_addr
         os.environ["MASTER_PORT"] = self.master_port
         os.environ["RANK"] = str(self.rank)
@@ -111,23 +150,17 @@ class TrainingActor:
     async def forward(
         self,
         data: list[Datum],
-        with_grad: bool = True,
         forward_kwargs: dict[str, Any] = {},
-        **kwargs,
     ) -> torch.Tensor:
         try:
             device = torch.cuda.current_device()
             padded = self.training_model.pad(data, device)
-            model_inputs = {
-                "input_ids": padded["input_ids"],
-                "attention_mask": padded["attention_mask"],
-                **padded.get("additional_inputs", {}),
-            }
-            return self.training_model.forward(
-                model_inputs=model_inputs,
-                with_grad=with_grad,
+            logits = self.training_model.forward(
+                model_inputs=padded["model_input"],
+                with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
+            return logits
         except Exception as e:
             logger.error(f"Forward error: {e}")
             raise
@@ -138,30 +171,107 @@ class TrainingActor:
         adapter_name: str | None = None,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
-        loss_fn: LossFnType = "cross_entropy",
+        loss_fns: list[LossFnType] = ["cross_entropy"],
         loss_fn_config: Dict[str, float] | None = None,
     ):
-        if loss_fn not in LOSSES:
-            raise ValueError(f"Unknown loss function: {loss_fn}")
+        try:
+            for loss_fn in loss_fns:
+                if loss_fn not in LOSSES:
+                    raise ValueError(f"Unknown loss function: {loss_fn}")
 
-        if adapter_name and self.training_model.adapters:
-            self.training_model.set_active_adapter(adapter_name)
+            if len(loss_fns) != len(data):
+                raise ValueError(
+                    f"Number of loss functions must match number of data points: {len(loss_fns)} != {len(data)}"
+                )
 
-        device = torch.cuda.current_device()
-        padded = self.training_model.pad(data, device)
-        logits = self.training_model.forward(
-            model_inputs=padded["model_input"],
-            with_grad=True,
-            forward_kwargs=forward_kwargs,
-        )
-        per_batch_losses = LOSSES[loss_fn](logits=logits, **padded["loss_fn_inputs"])
-        per_batch_losses.mean().backward()
+            if adapter_name and self.training_model.adapters:
+                self.training_model.set_active_adapter(adapter_name)
 
-        return (
-            {"loss": [loss.item() for loss in per_batch_losses]}
-            if self.rank == 0
-            else None
-        )
+            # Safety check: warn if gradients exist (but don't clear to support gradient accumulation)
+            # Only iterate over trainable parameters (LoRA adapters), not base model
+            has_existing_grads = False
+            for param in (
+                p for p in self.training_model.model.parameters() if p.requires_grad
+            ):
+                if param.grad is not None:
+                    has_existing_grads = True
+                    break
+            if has_existing_grads:
+                logger.debug(
+                    "Found existing gradients before forward_backward - this is expected for gradient accumulation"
+                )
+
+            self.training_model.train()
+            device = torch.cuda.current_device()
+            padded = self.training_model.pad(data, device)
+            logits = self.training_model.forward(
+                model_inputs=padded["model_input"],
+                with_grad=True,
+                forward_kwargs=forward_kwargs,
+            )
+
+            # Check if all loss functions are the same
+            if len(set(loss_fns)) == 1:
+                loss_fn = loss_fns[0]
+                per_batch_losses = LOSSES[loss_fn](
+                    logits=logits, **padded["loss_fn_inputs"]
+                )
+            else:
+                per_batch_losses = torch.stack(
+                    [
+                        LOSSES[loss_fn](
+                            logits=logits[i : i + 1],
+                            **{
+                                k: v[i : i + 1]
+                                for k, v in padded["loss_fn_inputs"].items()
+                            },
+                        )
+                        for i, loss_fn in enumerate(loss_fns)
+                    ]
+                ).squeeze()
+
+            loss_mean = per_batch_losses.mean()
+            loss_mean.backward()
+
+            # Extract loss values before cleaning up tensors
+            loss_values = (
+                [loss.item() for loss in per_batch_losses] if self.rank == 0 else None
+            )
+
+            # Clean up intermediate tensors to free memory
+            del logits, padded, per_batch_losses, loss_mean
+
+            sum_gradient = {}
+            with torch.no_grad():
+                for name, param in self.training_model.model.named_parameters():
+                    if param.requires_grad and param.grad is not None:
+                        # Use detach() to ensure we're not creating references
+                        # Only compute for parameters that actually have gradients
+                        grad_sum = param.grad.detach().sum().item()
+                        sum_gradient[name] = grad_sum
+
+            if self.rank == 0:
+                return {
+                    "loss": loss_values,
+                    "sum_gradient": sum_gradient,
+                }
+            else:
+                return None
+        except torch.cuda.OutOfMemoryError as e:
+            # Clear cache and re-raise with more context
+            torch.cuda.empty_cache()
+            logger.error(
+                f"CUDA out of memory error in forward_backward (rank {self.rank}): {e}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"CUDA out of memory during forward_backward: {str(e)}"
+            ) from e
+        except Exception as e:
+            logger.error(
+                f"Error in forward_backward (rank {self.rank}): {e}", exc_info=True
+            )
+            raise
 
     async def save_checkpoint(
         self, checkpoint_path: str, adapter_name: str | None = None
@@ -171,13 +281,71 @@ class TrainingActor:
         self.training_model.save_model(checkpoint_path, adapter_name=adapter_name)
         return self.rank == 0
 
+    async def push_to_hub(
+        self,
+        repo_id: str,
+        adapter_name: str | None = None,
+        token: str | None = None,
+        private: bool = False,
+        commit_message: str | None = None,
+        push_kwargs: dict[str, Any] = {},
+    ):
+        """Push model to Hugging Face Hub.
+
+        The repository will be created automatically if it doesn't exist.
+        Requires authentication via token or huggingface_hub login.
+        """
+        if self.rank == 0:
+            if adapter_name and self.training_model.adapters:
+                self.training_model.set_active_adapter(adapter_name)
+
+            if not hasattr(self.training_model.model, "push_to_hub"):
+                raise RuntimeError("Model does not support push_to_hub")
+
+            push_params = {
+                "repo_id": repo_id,
+                "token": token,
+                "private": private,
+                "commit_message": commit_message,
+                **push_kwargs,
+            }
+            if adapter_name and self.training_model.adapters:
+                push_params["adapter_name"] = adapter_name
+
+            self.training_model.model.push_to_hub(**push_params)
+
+            # Push tokenizer if available
+            if self.training_model.tokenizer is not None:
+                try:
+                    self.training_model.tokenizer.push_to_hub(
+                        repo_id=repo_id,
+                        token=token,
+                        private=private,
+                        commit_message=commit_message,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to push tokenizer: {e}")
+
+        # Wait for all ranks to complete
+        dist.barrier()
+        return self.rank == 0
+
     async def cleanup(self):
         dist.destroy_process_group()
         return self.rank == 0
 
     async def zero_grad(self):
-        for param in self.training_model.model.parameters():
-            param.grad = None
+        """Clear all gradients."""
+        if self.training_model is None or self.training_model.model is None:
+            logger.warning("Model not initialized yet, skipping zero_grad")
+            return
+
+        # Only clear gradients for trainable parameters (LoRA adapters), not base model
+        for param in (
+            p for p in self.training_model.model.parameters() if p.requires_grad
+        ):
+            if param.grad is not None:
+                param.grad = None
 
     async def backward(self, loss):
         loss.backward()
@@ -187,4 +355,15 @@ class TrainingActor:
     ):
         if adapter_name and self.training_model.adapters:
             self.training_model.set_active_adapter(adapter_name)
-        self._get_optimizer(optimizer_params).step()
+
+        # Reuse existing optimizer or create/update if needed
+        optimizer = self._get_or_create_optimizer(optimizer_params)
+        optimizer.step()
+
+        # Clear gradients after optimizer step
+        # Only clear gradients for trainable parameters (LoRA adapters), not base model
+        for param in (
+            p for p in self.training_model.model.parameters() if p.requires_grad
+        ):
+            if param.grad is not None:
+                param.grad = None

@@ -11,6 +11,7 @@ from tinkerbell.types.requests import (
     ActorStatusRequest,
     CreateSamplingActorRequest,
     ForwardRequest,
+    PushToHubRequest,
     SaveCheckpointRequest,
 )
 from tinkerbell.types.responses import (
@@ -18,6 +19,7 @@ from tinkerbell.types.responses import (
     CreateSamplingActorResponse,
     ForwardBackwardResponse,
     ForwardResponse,
+    PushToHubResponse,
     RemoteFuture,
     SaveCheckpointResponse,
 )
@@ -201,6 +203,7 @@ class TrainingClient(BaseClient):
             logprobs=result.get("logprobs"),
             outputs=result.get("outputs"),
             metrics=result.get("metrics"),
+            sum_gradient=result.get("sum_gradient"),
         )
 
     def forward_backward(
@@ -320,6 +323,70 @@ class TrainingClient(BaseClient):
             remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
             result_parser=lambda r: SaveCheckpointResponse(**r),
+            poll_interval=1.0,
+            timeout=self.timeout,
+        )
+
+    def push_to_hub(
+        self,
+        repo_id: str,
+        token: Optional[str] = None,
+        private: bool = False,
+        commit_message: Optional[str] = None,
+        push_kwargs: Optional[dict[str, Any]] = None,
+    ) -> TinkerbellFuture[PushToHubResponse]:
+        """Push model to Hugging Face Hub (or specific adapter if lora_enabled).
+
+        The repository will be created automatically if it doesn't exist.
+        Requires authentication via token or huggingface_hub login.
+        """
+        logger.info(f"Pushing model to Hugging Face Hub: {repo_id}")
+        request = PushToHubRequest(
+            model_id=self.model_name,
+            repo_id=repo_id,
+            adapter_name=self.adapter_name,
+            token=token,
+            private=private,
+            commit_message=commit_message,
+            push_kwargs=push_kwargs or {},
+        )
+        return self.create_future(
+            request=request,
+            endpoint="/push_to_hub",
+            parse_result_fn=lambda r: PushToHubResponse(**r),
+        )
+
+    async def push_to_hub_async(
+        self,
+        repo_id: str,
+        token: Optional[str] = None,
+        private: bool = False,
+        commit_message: Optional[str] = None,
+        push_kwargs: Optional[dict[str, Any]] = None,
+    ) -> AsyncTinkerbellFuture[PushToHubResponse]:
+        """Async: Push model to Hugging Face Hub.
+
+        The repository will be created automatically if it doesn't exist.
+        Requires authentication via token or huggingface_hub login.
+        """
+        logger.info(f"Pushing model to Hugging Face Hub: {repo_id}")
+        request = PushToHubRequest(
+            model_id=self.model_name,
+            repo_id=repo_id,
+            adapter_name=self.adapter_name,
+            token=token,
+            private=private,
+            commit_message=commit_message,
+            push_kwargs=push_kwargs or {},
+        )
+        response = await self.async_client.post(
+            "/push_to_hub", json=request.model_dump(exclude_none=True)
+        )
+        response.raise_for_status()
+        return AsyncTinkerbellFuture(
+            remote_future=RemoteFuture(**response.json()),
+            server_url=self.server_url,
+            result_parser=lambda r: PushToHubResponse(**r),
             poll_interval=1.0,
             timeout=self.timeout,
         )

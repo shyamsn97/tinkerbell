@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types.lora_config import LoraConfig
+from tinkerbell.types.loss_fn_type import LossFnType
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import get_actor_names_by_prefix, get_free_port
@@ -62,6 +63,7 @@ class ActorGroup:
     async def forward_backward(
         self,
         data: list[Any],
+        loss_fns: list[LossFnType],
         adapter_name: Optional[str] = None,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
@@ -70,6 +72,7 @@ class ActorGroup:
         refs = [
             worker.forward_backward.remote(
                 data=data,
+                loss_fns=loss_fns,
                 adapter_name=adapter_name,
                 forward_kwargs=forward_kwargs,
                 return_logprobs=return_logprobs,
@@ -101,6 +104,28 @@ class ActorGroup:
         if adapter_name:
             self.adapters[adapter_name] = checkpoint_path
 
+    async def push_to_hub(
+        self,
+        repo_id: str,
+        adapter_name: str | None = None,
+        token: str | None = None,
+        private: bool = False,
+        commit_message: str | None = None,
+        push_kwargs: dict[str, Any] = {},
+    ) -> None:
+        refs = [
+            worker.push_to_hub.remote(
+                repo_id=repo_id,
+                adapter_name=adapter_name,
+                token=token,
+                private=private,
+                commit_message=commit_message,
+                push_kwargs=push_kwargs,
+            )
+            for worker in self.workers
+        ]
+        await asyncio.gather(*refs)
+
     async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> None:
         refs = [
             worker.add_adapter.remote(adapter_name, lora_config)
@@ -117,11 +142,30 @@ class ActorGroup:
     def _restructure_outputs(
         self, outputs: list[dict[str, Any]], batch_size: int
     ) -> list[dict[str, Any]]:
-        rank_0_output = [o for o in outputs if o is not None][0]
-        return [
-            {key: rank_0_output[key][i] for key in rank_0_output}
-            for i in range(batch_size)
-        ]
+        # Find the first non-None output (should be from rank 0)
+        rank_0_output = None
+        for o in outputs:
+            if o is not None:
+                rank_0_output = o
+                break
+
+        if rank_0_output is None:
+            # All outputs are None, return empty list
+            return []
+
+        # Restructure outputs: some values are lists (per-item), others are batch-level (same for all)
+        result = []
+        for i in range(batch_size):
+            item_output = {}
+            for key, value in rank_0_output.items():
+                # If value is a list, index into it; otherwise use the same value for all items
+                if isinstance(value, list):
+                    item_output[key] = value[i] if i < len(value) else None
+                else:
+                    # For non-list values (like sum_gradient dict), use the same value for all items
+                    item_output[key] = value
+            result.append(item_output)
+        return result
 
     async def _check_initialization_complete(self) -> None:
         ready, _ = ray.wait(
@@ -143,10 +187,37 @@ class ActorGroup:
         cls, model_name: str, model_id: str, max_wait_time: float = 600.0
     ) -> ActorGroup:
         cleaned_name = model_name.replace("/", "_").replace(":", "_").lower()
+
+        # Get all actors and filter by namespace
+        # Handle different Ray API versions
+        try:
+            # Try newer API with all_namespaces
+            all_actors = ray.util.list_named_actors(all_namespaces=True)
+        except TypeError:
+            # Fall back to older API (no namespace filtering)
+            all_actors = ray.util.list_named_actors()
+
+        # Normalize actor format - handle both string and dict formats
+        actors_list = []
+        for actor in all_actors:
+            if isinstance(actor, str):
+                # String format - assume it's in the tinkerbell namespace
+                actors_list.append({"name": actor, "namespace": "tinkerbell"})
+            elif isinstance(actor, dict):
+                actors_list.append(actor)
+            else:
+                # Unknown format, skip
+                continue
+
         actor_names = get_actor_names_by_prefix(
             f"training_actor_{cleaned_name}",
-            ray.util.list_named_actors(namespace="tinkerbell"),
+            actors_list,
         )
+
+        if not actor_names:
+            # No existing actors found, raise exception to trigger creation
+            raise ValueError(f"No existing actors found for model {model_name}")
+
         workers = [
             ray.get_actor(name=name, namespace="tinkerbell") for name in actor_names
         ]
@@ -211,7 +282,7 @@ class TrainingManager:
     def __init__(
         self,
         max_wait_time: float = 600.0,
-        clock_cycle: float = 5.0,
+        clock_cycle: float = 0.0,
         global_store: GlobalStore = None,
     ):
         self.actor_groups: Dict[str, ActorGroup] = {}
@@ -225,10 +296,7 @@ class TrainingManager:
         if self.running:
             return
         self.running = True
-        if self.clock_cycle > 0.0:
-            self.batch_processor_task = asyncio.create_task(
-                self._batch_processor_loop()
-            )
+        self.batch_processor_task = asyncio.create_task(self._batch_processor_loop())
 
     async def stop(self):
         self.running = False
@@ -266,6 +334,7 @@ class TrainingManager:
         adapter_name: Optional[str] = None,
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
+        loss_fn: LossFnType = "cross_entropy",
     ) -> RemoteFuture:
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
@@ -274,6 +343,7 @@ class TrainingManager:
             data=data,
             forward_kwargs=forward_kwargs,
             return_logprobs=return_logprobs,
+            loss_fn=loss_fn,
         )
         return await self._queue_and_process(request, model_name)
 
@@ -295,6 +365,25 @@ class TrainingManager:
     ) -> None:
         await self._get_actor_group_or_raise(model_name).save_checkpoint(
             checkpoint_path, adapter_name
+        )
+
+    async def push_to_hub(
+        self,
+        model_name: str,
+        repo_id: str,
+        adapter_name: str | None = None,
+        token: str | None = None,
+        private: bool = False,
+        commit_message: str | None = None,
+        push_kwargs: dict[str, Any] = {},
+    ) -> None:
+        await self._get_actor_group_or_raise(model_name).push_to_hub(
+            repo_id=repo_id,
+            adapter_name=adapter_name,
+            token=token,
+            private=private,
+            commit_message=commit_message,
+            push_kwargs=push_kwargs,
         )
 
     async def set_active_adapter(self, model_name: str, adapter_name: str) -> None:
@@ -375,8 +464,6 @@ class TrainingManager:
         self, request: ForwardRequest | ForwardBackwardRequest, model_name: str
     ) -> RemoteFuture:
         await self.global_store.add_request_to_queue.remote(request=request)
-        if self.clock_cycle <= 0.0:
-            await self._process_batch(model_name)
         return RemoteFuture(request_id=request.request_id, model_id=model_name)
 
     async def _batch_processor_loop(self) -> None:
@@ -402,6 +489,7 @@ class TrainingManager:
         return parts[0], parts[1] if len(parts) > 1 and parts[1] else None
 
     async def _process_batch(self, queue_key: str) -> None:
+        requests = []
         try:
             model_name, adapter_name = self._parse_queue_key(queue_key)
             request_queue = await self.global_store.get_request_queue.remote()
@@ -411,12 +499,23 @@ class TrainingManager:
 
             await self.global_store.clear_request_queue.remote(queue_key=queue_key)
             if await self.get_actor_status(model_name) != ActorStatus.READY:
+                # Set error results for requests when actors aren't ready
+                error_result = {
+                    "success": False,
+                    "error": f"Actors for {model_name} are not ready",
+                    "error_type": "ActorNotReadyError",
+                }
+                for req in requests:
+                    await self.global_store.set_result.remote(
+                        request_id=req.request_id, result=error_result
+                    )
                 return
 
-            batch_data, request_sizes = [], []
+            batch_data, request_sizes, loss_fns = [], [], []
             for req in requests:
                 request_sizes.append(len(req.data))
                 batch_data.extend(req.data)
+                loss_fns.extend([req.loss_fn] * len(req.data))
 
             actor_group = self._get_actor_group_or_raise(model_name)
             output = await actor_group.forward_backward(
@@ -424,20 +523,59 @@ class TrainingManager:
                 adapter_name=adapter_name,
                 forward_kwargs=requests[0].forward_kwargs,
                 return_logprobs=getattr(requests[0], "return_logprobs", False),
+                loss_fns=loss_fns,
             )
 
             output_idx = 0
             for req, req_size in zip(requests, request_sizes):
                 req_outputs = output[output_idx : output_idx + req_size]
                 output_idx += req_size
-                if req_outputs:
-                    combined = {
-                        key: [o[key] for o in req_outputs]
-                        for key in req_outputs[0].keys()
-                    }
-                    await self.global_store.set_result.remote(
-                        request_id=req.request_id, result=combined
-                    )
+                if req_outputs and len(req_outputs) > 0:
+                    # Get keys from first output dict
+                    first_output = req_outputs[0]
+                    if isinstance(first_output, dict) and first_output:
+                        combined = {}
+                        for key in first_output.keys():
+                            # sum_gradient is the same for all items in the batch, so use the first one
+                            if key == "sum_gradient":
+                                combined[key] = first_output[key]
+                            else:
+                                # For other keys, create a list (one value per item)
+                                combined[key] = [
+                                    o[key]
+                                    for o in req_outputs
+                                    if isinstance(o, dict) and key in o
+                                ]
+                        await self.global_store.set_result.remote(
+                            request_id=req.request_id, result=combined
+                        )
+                    else:
+                        # Empty or invalid output, set error result
+                        error_result = {
+                            "success": False,
+                            "error": "Empty or invalid output from forward_backward",
+                            "error_type": "InvalidOutputError",
+                        }
+                        await self.global_store.set_result.remote(
+                            request_id=req.request_id, result=error_result
+                        )
         except Exception as e:
-            logger.error(f"Batch processing error for {queue_key}: {e}")
+            logger.error(f"Batch processing error for {queue_key}: {e}", exc_info=True)
+            # Set error results for all requests so clients don't hang
+            error_result = {
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "message": f"Error processing batch: {str(e)}",
+            }
+            for req in requests:
+                try:
+                    await self.global_store.set_result.remote(
+                        request_id=req.request_id, result=error_result
+                    )
+                except Exception as set_error:
+                    logger.error(
+                        f"Failed to set error result for request {req.request_id}: {set_error}"
+                    )
+            # Re-raise to ensure it's logged at higher levels
             raise

@@ -25,6 +25,7 @@ from tinkerbell.types import (
     LoadCheckpointRequest,
     PollResultRequest,
     PollResultResponse,
+    PushToHubRequest,
     RemoteFuture,
     SampleRequest,
     SaveCheckpointRequest,
@@ -92,7 +93,7 @@ class TinkerbellServiceDeployment:
         self,
         server_url: str,
         max_wait_time: float = 600.0,
-        clock_cycle: float = 10.0,
+        clock_cycle: float = 0.0,
     ):
         self.server_url = server_url
         logger.info(
@@ -252,6 +253,25 @@ class TinkerbellServiceDeployment:
             "success": True,
             "message": f"Checkpoint saved for {request.model_id}",
             "path": request.checkpoint_path,
+        }
+
+    @APP.post("/push_to_hub")
+    @returns_future
+    async def push_to_hub(self, request: PushToHubRequest) -> RemoteFuture:
+        await self.training_manager.push_to_hub(
+            model_name=request.model_id,
+            repo_id=request.repo_id,
+            adapter_name=request.adapter_name,
+            token=request.token,
+            private=request.private,
+            commit_message=request.commit_message,
+            push_kwargs=request.push_kwargs,
+        )
+        return {
+            "model_id": request.model_id,
+            "success": True,
+            "message": f"Model pushed to hub: {request.repo_id}",
+            "repo_id": request.repo_id,
         }
 
     @APP.post("/forward_backward")
@@ -457,7 +477,7 @@ def deploy_service(
 def deploy_on_modal(
     server_url: str = "https://0.0.0.0:8000",
     max_wait_time: float = 300.0,
-    clock_cycle: float = 10.0,
+    clock_cycle: float = 0.0,
     gpu: str = "H100",
     num_gpus: int = 1,
     timeout: int = 86400,

@@ -30,6 +30,7 @@ class ForwardBackwardResponse(BaseModel):
     logprobs: TensorData | None = None
     outputs: dict[str, TensorData] | None = None
     metrics: Optional[dict[str, float]] = None
+    sum_gradient: Optional[dict[str, float]] = None
 
 
 class ActorStatusResponse(BaseModel):
@@ -51,6 +52,13 @@ class SaveCheckpointResponse(BaseModel):
     success: bool
     message: str | None = None
     path: Optional[str] = None
+
+
+class PushToHubResponse(BaseModel):
+    model_id: str
+    success: bool
+    message: str | None = None
+    repo_id: Optional[str] = None
 
 
 class CreateSamplingActorResponse(BaseModel):
