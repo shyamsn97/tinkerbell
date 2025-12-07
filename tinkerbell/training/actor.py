@@ -155,12 +155,12 @@ class TrainingActor:
         try:
             device = torch.cuda.current_device()
             padded = self.training_model.pad(data, device)
-            logits = self.training_model.forward(
+            forward_output = self.training_model.forward(
                 model_inputs=padded["model_input"],
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
-            return logits
+            return forward_output["logprobs"]
         except Exception as e:
             logger.error(f"Forward error: {e}")
             raise
@@ -204,23 +204,24 @@ class TrainingActor:
             self.training_model.train()
             device = torch.cuda.current_device()
             padded = self.training_model.pad(data, device)
-            logits = self.training_model.forward(
+            forward_output = self.training_model.forward(
                 model_inputs=padded["model_input"],
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
+            logprobs = forward_output["logprobs"]
 
             # Check if all loss functions are the same
             if len(set(loss_fns)) == 1:
                 loss_fn = loss_fns[0]
                 per_batch_losses = LOSSES[loss_fn](
-                    logits=logits, **padded["loss_fn_inputs"]
+                    logprobs=logprobs, **padded["loss_fn_inputs"]
                 )
             else:
                 per_batch_losses = torch.stack(
                     [
                         LOSSES[loss_fn](
-                            logits=logits[i : i + 1],
+                            logprobs=logprobs[i : i + 1],
                             **{
                                 k: v[i : i + 1]
                                 for k, v in padded["loss_fn_inputs"].items()
@@ -239,7 +240,7 @@ class TrainingActor:
             )
 
             # Clean up intermediate tensors to free memory
-            del logits, padded, per_batch_losses, loss_mean
+            del forward_output, padded, per_batch_losses, loss_mean
 
             sum_gradient = {}
             with torch.no_grad():

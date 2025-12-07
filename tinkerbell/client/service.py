@@ -3,8 +3,10 @@ import time
 from typing import Any, Optional
 
 from tinkerbell.client.base import BaseClient, TinkerbellFuture
+from tinkerbell.client.sampling import SamplingClient
 from tinkerbell.client.training import TrainingClient
 from tinkerbell.types import (
+    CreateSamplingActorRequest,
     CreateTrainingActorsRequest,
     DeployConfig,
     GetRayActorsResponse,
@@ -13,6 +15,13 @@ from tinkerbell.types import (
 from tinkerbell.types.responses import RemoteFuture
 
 logger = logging.getLogger(__name__)
+
+# # Configure logging to ensure messages show up in terminal
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+#     force=True,  # Override any existing configuration
+# )
 
 
 class ServiceClient(BaseClient):
@@ -115,11 +124,12 @@ class ServiceClient(BaseClient):
                     return False
         return False
 
+    @classmethod
     def deploy(
-        self,
+        cls,
         deploy_config: DeployConfig,
-        redeploy: bool = False,
         wait_for_ready: bool = True,
+        timeout: float = 600.0,
     ) -> str:
         """Deploy the server.
 
@@ -131,13 +141,40 @@ class ServiceClient(BaseClient):
         Returns:
             Server URL
         """
-        if self.server_url is None or redeploy:
-            self.server_url = deploy_config.deploy()
+        return cls.deploy_or_connect(
+            deploy_config, wait_for_ready=wait_for_ready, redeploy=True, timeout=timeout
+        )
+
+    @classmethod
+    def deploy_or_connect(
+        cls,
+        deploy_config: DeployConfig,
+        redeploy: bool = False,
+        wait_for_ready: bool = True,
+        timeout: float = 600.0,
+    ) -> str:
+        """Deploy the server if not deployed, otherwise connect to the existing server."""
+        deploy = False
+        server_url = deploy_config.server_url
+        try:
+            logger.info("Trying to connect to existing server...")
+            if not redeploy:
+                server_url = deploy_config.connect()
+                logger.info(f"Connected to existing server at: {server_url}")
+        except Exception:
+            logger.info("No existing server found, deploying new one...")
+            deploy = True
+        if deploy or redeploy:
+            server_url = deploy_config.deploy()
+            print(f"Deployed new server at: {server_url}")
+        if server_url is None:
+            raise ValueError("Server URL is None. Please check the deploy config.")
+        service_client = cls(server_url=server_url, timeout=timeout)
 
         if wait_for_ready:
-            self.wait_until_ready()
+            service_client.wait_until_ready()
 
-        return self.server_url
+        return server_url
 
     def create_training_client(
         self,
@@ -151,7 +188,6 @@ class ServiceClient(BaseClient):
         lora_config: Optional[dict[str, Any]] = None,
         ray_worker_options: Optional[dict[str, Any]] = None,
         wait_until_ready: bool = False,
-        deploy_config: DeployConfig | None = None,
         initialize_random_weights: bool = False,
     ) -> TrainingClient:
         """Create training actors on the server.
@@ -163,8 +199,8 @@ class ServiceClient(BaseClient):
             adapter_name: Name for this LoRA adapter (for multi-LoRA)
             lora_config: LoRA configuration (None for full model training)
         """
-        if not self.is_deployed() and deploy_config is not None:
-            self.deploy(deploy_config)
+        if not self.is_deployed():
+            raise ValueError("Server is not deployed. Please deploy the server first.")
 
         model_name = model_name or model_id
 
@@ -202,3 +238,24 @@ class ServiceClient(BaseClient):
             lora_enabled=lora_config is not None,
             lora_config=lora_config_dict,
         )
+
+    def create_sampling_client(
+        self,
+        model_id: str,
+        tp_size: int,
+        model_name: Optional[str] = None,
+        engine_kwargs: Optional[dict[str, Any]] = None,
+    ) -> SamplingClient:
+        """Create sampling actors on the server."""
+        if not self.is_deployed():
+            raise ValueError("Server is not deployed. Please deploy the server first.")
+
+        request = CreateSamplingActorRequest(
+            model_id=model_id,
+            model_name=model_name,
+            tp_size=tp_size,
+            engine_kwargs=engine_kwargs or {},
+        )
+
+        response = self.client.post("/create_sampling_actor", json=request.model_dump())
+        response.raise_for_status()

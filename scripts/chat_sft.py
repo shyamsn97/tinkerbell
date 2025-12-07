@@ -9,7 +9,12 @@ import datasets
 from typing import cast
 import wandb
 import os
+import logging
 
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# )
 # MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 # MODEL_ID = "Qwen/Qwen3-8B-Base"
 MODEL_ID = "Qwen/Qwen3-0.6B-Base"
@@ -41,7 +46,6 @@ parallelize_plan = {
     "model.layers.*.self_attn.k_proj": "column",
     "model.layers.*.self_attn.v_proj": "column",
     "model.layers.*.self_attn.o_proj": "row",
-
     # MLP projections (all layers)
     "model.layers.*.mlp.gate_proj": "column",
     "model.layers.*.mlp.up_proj": "column",
@@ -52,9 +56,8 @@ parallelize_plan = {
 server_url = "https://jesterlabs--training-service.modal.run"
 service_client = ServiceClient(server_url=server_url, timeout=600.0)
 print("Service client initialized")
-print("Deploying server...")
-server_url = service_client.deploy(deploy_config, redeploy=True, wait_for_ready=True)
-print("Deployed to: ", server_url)
+server_url = service_client.deploy_or_connect(deploy_config)
+print("Server URL: ", server_url)
 
 lora_config_1 = LoraConfig(
     rank=64,

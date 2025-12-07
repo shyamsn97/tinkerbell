@@ -215,7 +215,7 @@ class LLM:
         model_inputs: dict[str, torch.Tensor],
         with_grad: bool = True,
         forward_kwargs: dict[str, Any] = {},
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         try:
             if with_grad:
                 self.model.train()
@@ -225,9 +225,12 @@ class LLM:
                 with torch.no_grad():
                     outputs = self.model(**model_inputs, **forward_kwargs)
             # Extract logits and explicitly delete outputs to free memory
-            logits = outputs.logits
+            output_dict = {
+                "logits": outputs.logits,
+                "logprobs": torch.nn.functional.log_softmax(outputs.logits, dim=-1),
+            }
             del outputs
-            return logits
+            return output_dict
         except Exception as e:
             logger.error(f"Forward error: {e}")
             raise

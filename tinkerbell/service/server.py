@@ -20,7 +20,6 @@ from tinkerbell.types import (
     CreateTrainingActorsRequest,
     CreateTrainingActorsResponse,
     ForwardBackwardRequest,
-    ForwardBackwardResponse,
     HealthResponse,
     LoadCheckpointRequest,
     PollResultRequest,
@@ -275,9 +274,7 @@ class TinkerbellServiceDeployment:
         }
 
     @APP.post("/forward_backward")
-    async def forward_backward(
-        self, request: ForwardBackwardRequest
-    ) -> ForwardBackwardResponse:
+    async def forward_backward(self, request: ForwardBackwardRequest) -> RemoteFuture:
         if not self.training_manager.running:
             await self.training_manager.start()
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
@@ -437,7 +434,7 @@ class TinkerbellServiceDeployment:
 def deploy_service(
     server_url: str,
     max_wait_time: float = 300.0,
-    clock_cycle: float = 10.0,
+    clock_cycle: float = 010.0,
     **deployment_kwargs,
 ):
     """Deploy the TinkerbellService with Ray Serve.
@@ -482,7 +479,7 @@ def deploy_on_modal(
     num_gpus: int = 1,
     timeout: int = 86400,
     container_idle_timeout: int = 600,
-    max_inputs: int = 100,
+    max_inputs: int = 1000,
 ):
     """Deploy the TinkerbellService on Modal.
 
@@ -502,15 +499,6 @@ def deploy_on_modal(
 
     # Check if server already exists
     print("Starting server deployment...")
-    try:
-        existing_function = modal.Function.from_name(
-            "tinkerbell-service", "deploy_on_modal.<locals>.serve"
-        )
-        existing_url = existing_function.web_url
-        logger.info(f"Server already exists at: {existing_url}")
-        return existing_url
-    except (modal.exception.NotFoundError, Exception):
-        logger.info("No existing server found, deploying new one...")
 
     app = modal.App(name="tinkerbell-service")
 

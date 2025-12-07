@@ -35,12 +35,12 @@ def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Proc
 class SGLangSamplingActor:
     def __init__(self, model_id: str, tp_size: int, engine_kwargs: dict = {}):
         try:
-            self._init_impl(model_id, tp_size, engine_kwargs)
+            self._setup(model_id, tp_size, engine_kwargs)
         except Exception as e:
             logger.error(f"FATAL: SGLangSamplingActor init failed: {e}")
             raise
 
-    def _init_impl(self, model_id: str, tp_size: int, engine_kwargs: dict):
+    def _setup(self, model_id: str, tp_size: int, engine_kwargs: dict):
         from sglang.srt.entrypoints.http_server import launch_server
         from sglang.srt.server_args import ServerArgs
 
@@ -58,7 +58,7 @@ class SGLangSamplingActor:
 
         if engine_kwargs.get("enable_lora", None) is not False:
             engine_kwargs["enable_lora"] = True
-            engine_kwargs.setdefault("max_loras_per_batch", 64)
+            engine_kwargs.setdefault("max_loras_per_batch", 256)
             engine_kwargs.setdefault("max_lora_rank", 256)
             engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
 

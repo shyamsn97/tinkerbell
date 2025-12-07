@@ -141,7 +141,7 @@ class SamplingClient(BaseClient):
         )
 
     def sample(self, *args, **kwargs) -> TinkerbellFuture[SampleResponse]:
-        """Sample text. Uses lora_path only if adapter_name is set (LoRA mode)."""
+        """Sample text. Uses lora_path only if adapter_name is set (LoRA mode). takes in args and kwargs like SampleRequest."""
         if "model_id" not in kwargs:
             kwargs["model_id"] = self.model_id
         # Only pass lora_path for LoRA adapters (when adapter_name is set)

@@ -6,6 +6,8 @@ from tinkerbell.types.data import TensorData
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.model_input import ModelInput
 
+MASK_TOKEN_ID = -100
+
 
 class TrainOnWhat(StrEnum):
     LAST_ASSISTANT_MESSAGE = "last_assistant_message"
@@ -82,14 +84,14 @@ class Renderer:
         self,
         messages: list[dict[str, str]],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
-        mask_value: int = -100,
+        mask_value: int = MASK_TOKEN_ID,
     ) -> Datum:
         """Build a single supervised training example from chat messages.
 
         Args:
             messages: List of chat messages with 'role' and 'content' keys
             train_on_what: Which parts of the conversation to train on
-            mask_value: Value to use for masked tokens (default: -100)
+            mask_value: Value to use for masked tokens (default: MASK_TOKEN_ID)
 
         Returns:
             Datum object with properly masked and shifted labels for next-token prediction
@@ -160,14 +162,14 @@ class Renderer:
         self,
         messages: list[list[dict[str, str]]] | list[dict[str, str]],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
-        mask_value: int = -100,
+        mask_value: int = MASK_TOKEN_ID,
     ) -> list[Datum]:
         """Build multiple training examples from a list of messages.
 
         Args:
             messages: List of messages, where each message is a list of messages
             train_on_what: Which parts of the conversation to train on
-            mask_value: Value to use for masked tokens (default: -100)
+            mask_value: Value to use for masked tokens (default: MASK_TOKEN_ID)
 
         Returns:
             List of Datum objects, one per message.
