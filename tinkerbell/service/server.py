@@ -190,23 +190,23 @@ class TinkerbellServiceDeployment:
     @APP.post("/zero_grad")
     @returns_future
     async def zero_grad(self, request: ZeroGradRequest) -> RemoteFuture:
-        await self.training_manager.zero_grad(model_name=request.model_id)
+        await self.training_manager.zero_grad(model_name=request.model_name)
         return {
-            "model_id": request.model_id,
-            "message": f"Gradients zeroed for {request.model_id}",
+            "model_name": request.model_name,
+            "message": f"Gradients zeroed for {request.model_name}",
         }
 
     @APP.post("/optim_step")
     @returns_future
     async def optim_step(self, request: OptimStepRequest) -> RemoteFuture:
         await self.training_manager.optim_step(
-            model_name=request.model_id,
+            model_name=request.model_name,
             adapter_name=request.adapter_name,
             optimizer_params=request.optimizer_params,
         )
         return {
-            "model_id": request.model_id,
-            "message": f"Optimizer stepped for {request.model_id}",
+            "model_name": request.model_name,
+            "message": f"Optimizer stepped for {request.model_name}",
         }
 
     @APP.get("/health")
@@ -223,7 +223,7 @@ class TinkerbellServiceDeployment:
     ) -> CreateTrainingActorsResponse:
         model_name = await self.training_manager.create_training_actors(
             world_size=request.world_size,
-            model_id=request.model_id,
+            base_model=request.base_model,
             model_name=request.model_name,
             adapter_name=request.adapter_name,
             model_kwargs=request.model_kwargs,
@@ -235,7 +235,7 @@ class TinkerbellServiceDeployment:
         )
         return CreateTrainingActorsResponse(
             success=True,
-            model_id=model_name,
+            model_name=model_name,
             message=f"Training actors for {model_name} created...",
         )
 
@@ -243,14 +243,14 @@ class TinkerbellServiceDeployment:
     @returns_future
     async def save_checkpoint(self, request: SaveCheckpointRequest) -> RemoteFuture:
         await self.training_manager.save_checkpoint(
-            model_name=request.model_id,
+            model_name=request.model_name,
             checkpoint_path=request.checkpoint_path,
             adapter_name=request.adapter_name,
         )
         return {
-            "model_id": request.model_id,
+            "model_name": request.model_name,
             "success": True,
-            "message": f"Checkpoint saved for {request.model_id}",
+            "message": f"Checkpoint saved for {request.model_name}",
             "path": request.checkpoint_path,
         }
 
@@ -258,7 +258,7 @@ class TinkerbellServiceDeployment:
     @returns_future
     async def push_to_hub(self, request: PushToHubRequest) -> RemoteFuture:
         await self.training_manager.push_to_hub(
-            model_name=request.model_id,
+            model_name=request.model_name,
             repo_id=request.repo_id,
             adapter_name=request.adapter_name,
             token=request.token,
@@ -267,7 +267,7 @@ class TinkerbellServiceDeployment:
             push_kwargs=request.push_kwargs,
         )
         return {
-            "model_id": request.model_id,
+            "model_name": request.model_name,
             "success": True,
             "message": f"Model pushed to hub: {request.repo_id}",
             "repo_id": request.repo_id,
@@ -278,7 +278,7 @@ class TinkerbellServiceDeployment:
         if not self.training_manager.running:
             await self.training_manager.start()
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
-            model_name=request.model_id,
+            model_name=request.model_name,
             adapter_name=request.adapter_name,
             data=request.data,
             forward_kwargs=request.forward_kwargs,
@@ -291,11 +291,11 @@ class TinkerbellServiceDeployment:
         self, request: ActorStatusRequest
     ) -> ActorStatusResponse:
         status = await self.training_manager.get_actor_status(
-            model_name=request.model_id
+            model_name=request.model_name
         )
         return ActorStatusResponse(
             status=status.value,
-            message=f"Actor status for {request.model_id}: {status.value}",
+            message=f"Actor status for {request.model_name}: {status.value}",
         )
 
     @APP.get("/get_store_keys")
@@ -331,7 +331,7 @@ class TinkerbellServiceDeployment:
         self, request: CreateSamplingActorRequest
     ) -> CreateSamplingActorResponse:
         key = self.sampling_manager.create_sampling_actor(
-            model_id=request.model_id,
+            base_model=request.base_model,
             model_name=request.model_name,
             tp_size=request.tp_size,
             engine_kwargs=request.engine_kwargs,
@@ -346,10 +346,12 @@ class TinkerbellServiceDeployment:
         self,
         request: ActorStatusRequest,
     ) -> RemoteFuture:
-        status = await self.sampling_manager.get_sampling_actor_status(request.model_id)
+        status = await self.sampling_manager.get_sampling_actor_status(
+            request.model_name
+        )
         result = {
             "status": status.value,
-            "message": f"Sampling actor status for model {request.model_id} is {status.value}",
+            "message": f"Sampling actor status for '{request.model_name}' is {status.value}",
         }
         return result
 
@@ -359,11 +361,11 @@ class TinkerbellServiceDeployment:
         self,
         request: SampleRequest,
     ) -> RemoteFuture:
-        sampling_actor = self.sampling_manager.get_sampling_actor(request.model_id)
+        sampling_actor = self.sampling_manager.get_sampling_actor(request.model_name)
         if sampling_actor is None:
-            raise ValueError(f"Sampling actor for model {request.model_id} not found")
+            raise ValueError(f"Sampling actor '{request.model_name}' not found")
 
-        request_dict = model_to_dict(request, exclude=["model_id"], exclude_none=True)
+        request_dict = model_to_dict(request, exclude=["model_name"], exclude_none=True)
 
         # Convert TensorData to list format after model_to_dict
         if isinstance(request.input_ids, TensorData):
@@ -392,18 +394,18 @@ class TinkerbellServiceDeployment:
     ) -> RemoteFuture:
         try:
             _ = await self.sampling_manager.load_checkpoint(
-                model_id=request.model_id,
+                model_name=request.model_name,
                 checkpoint_path=request.checkpoint_path,
                 pin_lora=request.pin_lora,
             )
             result = {
-                "model_id": request.model_id,
+                "model_name": request.model_name,
                 "success": True,
                 "message": f"Checkpoint loading started from {request.checkpoint_path}. Use get_sampling_actor_status to check when ready.",
             }
         except Exception as e:
             result = {
-                "model_id": request.model_id,
+                "model_name": request.model_name,
                 "success": False,
                 "message": f"Failed to start checkpoint loading: {str(e)}",
             }
@@ -416,15 +418,15 @@ class TinkerbellServiceDeployment:
         request: ShutdownSamplingActorRequest,
     ) -> RemoteFuture:
         try:
-            _ = await self.sampling_manager.shutdown(model_id=request.model_id)
+            _ = await self.sampling_manager.shutdown(model_name=request.model_name)
             result = {
-                "model_id": request.model_id,
+                "model_name": request.model_name,
                 "success": True,
-                "message": f"Sampling actor for model {request.model_id} shut down successfully",
+                "message": f"Sampling actor '{request.model_name}' shut down successfully",
             }
         except Exception as e:
             result = {
-                "model_id": request.model_id,
+                "model_name": request.model_name,
                 "success": False,
                 "message": f"Failed to shutdown sampling actor: {str(e)}",
             }

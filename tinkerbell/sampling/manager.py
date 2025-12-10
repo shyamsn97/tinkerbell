@@ -1,4 +1,5 @@
 import logging
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -28,52 +29,72 @@ class SamplingManager:
     def __init__(self, global_store: GlobalStore):
         self.actors: Dict[str, ActorState] = {}
         self.global_store = global_store
+        self._creation_lock = threading.Lock()
 
     def create_sampling_actor(
         self,
-        model_id: str,
-        model_name: str | None = None,
+        base_model: str,
+        model_name: str,
         tp_size: int = 1,
         engine_kwargs: dict[str, Any] = {},
     ) -> str:
-        key = model_name or model_id
-        if key in self.actors:
-            return key
+        """Create a sampling actor.
 
-        actor_name = self._get_actor_name(key)
-        actor = SGLangSamplingActor.options(
-            num_gpus=tp_size,
-            get_if_exists=True,
-            lifetime="detached",
-            name=actor_name,
-            namespace="tinkerbell",
-        ).remote(model_id=model_id, tp_size=tp_size, engine_kwargs=engine_kwargs)
+        Args:
+            base_model: HuggingFace model path to load (e.g., "Qwen/Qwen3-0.6B")
+            model_name: Actor group name for routing (e.g., "my_model")
+            tp_size: Tensor parallel size
+            engine_kwargs: SGLang engine kwargs
+        """
+        # Use lock to prevent race condition when multiple requests
+        # try to create the same actor simultaneously
+        with self._creation_lock:
+            if model_name in self.actors:
+                logger.info(f"Sampling actor '{model_name}' already exists, reusing")
+                return model_name
 
-        self.actors[key] = ActorState(
-            actor=actor,
-            status=SamplingActorStatus.PENDING,
-            pending_ref=actor.is_ready.remote(),
-        )
-        return key
+            actor_name = self._get_actor_name(model_name)
+            logger.info(
+                f"Creating sampling actor '{actor_name}' loading model '{base_model}'"
+            )
+            actor = SGLangSamplingActor.options(
+                num_gpus=tp_size,
+                get_if_exists=True,
+                lifetime="detached",
+                name=actor_name,
+                namespace="tinkerbell",
+            ).remote(
+                base_model=base_model, tp_size=tp_size, engine_kwargs=engine_kwargs
+            )
 
-    async def get_sampling_actor_status(self, model_id: str) -> SamplingActorStatus:
-        state = self.actors.get(model_id)
+            self.actors[model_name] = ActorState(
+                actor=actor,
+                status=SamplingActorStatus.PENDING,
+                pending_ref=actor.is_ready.remote(),
+            )
+            return model_name
+
+    async def get_sampling_actor_status(self, model_name: str) -> SamplingActorStatus:
+        """Get status of sampling actor by model_name."""
+        state = self.actors.get(model_name)
         if state is None:
             return SamplingActorStatus.NOT_PRESENT
         if state.status == SamplingActorStatus.PENDING:
-            await self._check_pending_status(model_id)
+            await self._check_pending_status(model_name)
         return self.actors.get(
-            model_id, ActorState(None, SamplingActorStatus.NOT_PRESENT)
+            model_name, ActorState(None, SamplingActorStatus.NOT_PRESENT)
         ).status
 
-    def get_sampling_actor(self, model_id: str) -> Optional[SGLangSamplingActor]:
-        state = self.actors.get(model_id)
+    def get_sampling_actor(self, model_name: str) -> Optional[SGLangSamplingActor]:
+        """Get sampling actor by model_name."""
+        state = self.actors.get(model_name)
         return state.actor if state else None
 
     async def load_checkpoint(
-        self, model_id: str, checkpoint_path: str, pin_lora: bool = False
+        self, model_name: str, checkpoint_path: str, pin_lora: bool = False
     ) -> bool:
-        state = self._get_state_or_raise(model_id)
+        """Load checkpoint into sampling actor identified by model_name."""
+        state = self._get_state_or_raise(model_name)
         state.status = SamplingActorStatus.PENDING
         state.pending_ref = state.actor.update_weights_from_disk.remote(
             checkpoint_path=checkpoint_path,
@@ -82,19 +103,20 @@ class SamplingManager:
         )
         return True
 
-    async def shutdown(self, model_id: str) -> bool:
-        state = self._get_state_or_raise(model_id)
+    async def shutdown(self, model_name: str) -> bool:
+        """Shutdown sampling actor identified by model_name."""
+        state = self._get_state_or_raise(model_name)
         result = await state.actor.shutdown.remote()
-        del self.actors[model_id]
+        del self.actors[model_name]
         return result
 
-    async def _check_pending_status(self, model_id: str) -> None:
-        state = self.actors.get(model_id)
+    async def _check_pending_status(self, model_name: str) -> None:
+        state = self.actors.get(model_name)
         if state is None or state.pending_ref is None:
             return
 
-        if self._is_actor_dead(model_id):
-            del self.actors[model_id]
+        if self._is_actor_dead(model_name):
+            del self.actors[model_name]
             return
 
         try:
@@ -104,14 +126,14 @@ class SamplingManager:
                 state.status = SamplingActorStatus.READY
                 state.pending_ref = None
         except ray.exceptions.RayActorError as e:
-            logger.error(f"Actor {model_id} crashed: {e}")
-            del self.actors[model_id]
+            logger.error(f"Actor {model_name} crashed: {e}")
+            del self.actors[model_name]
         except Exception as e:
-            logger.error(f"Error for {model_id}: {e}")
-            del self.actors[model_id]
+            logger.error(f"Error for {model_name}: {e}")
+            del self.actors[model_name]
 
-    def _is_actor_dead(self, model_id: str) -> bool:
-        state = self.actors.get(model_id)
+    def _is_actor_dead(self, model_name: str) -> bool:
+        state = self.actors.get(model_name)
         if state is None or state.actor is None:
             return False
         try:
@@ -120,13 +142,14 @@ class SamplingManager:
         except Exception:
             return False
 
-    def _get_state_or_raise(self, model_id: str) -> ActorState:
-        state = self.actors.get(model_id)
+    def _get_state_or_raise(self, model_name: str) -> ActorState:
+        state = self.actors.get(model_name)
         if state is None:
-            raise ValueError(f"Sampling actor {model_id} not found")
+            raise ValueError(f"Sampling actor '{model_name}' not found")
         return state
 
     @staticmethod
-    def _get_actor_name(model_id: str) -> str:
-        cleaned = model_id.replace("/", "_").replace(":", "_").lower()
+    def _get_actor_name(model_name: str) -> str:
+        """Convert model_name to Ray actor name."""
+        cleaned = model_name.replace("/", "_").replace(":", "_").lower()
         return f"sampling_actor_{cleaned}"

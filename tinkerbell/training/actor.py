@@ -23,7 +23,7 @@ class TrainingActor:
         world_size: int,
         master_addr: str,
         master_port: str,
-        model_id: str,
+        base_model: str,
         model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
         scheduler_params: dict[str, Any] = {},
@@ -40,7 +40,7 @@ class TrainingActor:
         self.world_size = world_size
         self.master_addr = master_addr
         self.master_port = master_port
-        self.model_id = model_id
+        self.base_model = base_model
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
@@ -123,7 +123,7 @@ class TrainingActor:
         self.training_model = LLM(
             rank=self.rank,
             world_size=self.world_size,
-            model_id=self.model_id,
+            base_model=self.base_model,
             model_kwargs=self.model_kwargs,
             parallelize_plan=self.parallelize_plan,
             lora_config=self.lora_config,

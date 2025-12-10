@@ -42,7 +42,7 @@ class LLM:
         self,
         rank: int,
         world_size: int,
-        model_id: str,
+        base_model: str,
         model_kwargs: dict[str, Any],
         parallelize_plan: dict[str, str],
         lora_config: LoraConfig | None = None,
@@ -52,7 +52,7 @@ class LLM:
     ):
         self.rank = rank
         self.world_size = world_size
-        self.model_id = model_id
+        self.base_model = base_model
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.lora_config = lora_config
@@ -70,7 +70,7 @@ class LLM:
 
         from tinkerbell.types.data import PaddingStrategy
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.base_model)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token or 0
 
@@ -88,7 +88,7 @@ class LLM:
         }
 
         self.model = self.create_model(
-            model_id=self.model_id, model_kwargs=self.model_kwargs
+            base_model=self.base_model, model_kwargs=self.model_kwargs
         )
 
         # Enable gradient checkpointing BEFORE PEFT wrapping (required for PEFT compatibility)
@@ -115,7 +115,7 @@ class LLM:
     def train(self) -> None:
         self.model.train()
 
-    def create_model(self, model_id: str, model_kwargs: dict[str, Any]) -> nn.Module:
+    def create_model(self, base_model: str, model_kwargs: dict[str, Any]) -> nn.Module:
         from transformers import AutoConfig, AutoModelForCausalLM
 
         # Remove gradient_checkpointing from kwargs - it's not a valid model init argument
@@ -124,10 +124,10 @@ class LLM:
             k: v for k, v in model_kwargs.items() if k != "gradient_checkpointing"
         }
 
-        config = AutoConfig.from_pretrained(model_id)
+        config = AutoConfig.from_pretrained(base_model)
         if self.initialize_random_weights:
             return AutoModelForCausalLM.from_config(config, **filtered_kwargs)
-        return AutoModelForCausalLM.from_pretrained(self.model_id, **filtered_kwargs)
+        return AutoModelForCausalLM.from_pretrained(self.base_model, **filtered_kwargs)
 
     def _build_target_modules(self, lora_config: LoraConfig) -> list[str]:
         target_modules = []

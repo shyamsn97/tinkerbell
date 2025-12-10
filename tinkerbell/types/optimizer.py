@@ -33,17 +33,17 @@ class AdamParams(StrictBase):
 
 
 class ZeroGradRequest(StrictBase):
-    model_id: str  # This is model_name for routing
+    model_name: str  # Actor group name for routing
     adapter_name: Optional[str] = None  # Which LoRA adapter
 
 
 class ZeroGradResponse(BaseModel):
-    model_id: str
+    model_name: str
     message: str
 
 
 class OptimStepRequest(StrictBase):
-    model_id: str  # This is model_name for routing
+    model_name: str  # Actor group name for routing
     adapter_name: Optional[str] = None  # Which LoRA adapter
     optimizer_params: dict[str, Any]
     adam_params: Optional[AdamParams] = None
@@ -52,6 +52,6 @@ class OptimStepRequest(StrictBase):
 
 
 class OptimStepResponse(BaseModel):
-    model_id: str
+    model_name: str
     message: str
     metrics: Optional[dict[str, float]] = None

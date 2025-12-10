@@ -69,7 +69,7 @@ lora_config_1 = LoraConfig(
 # Enable gradient checkpointing to save memory
 # This trades compute for memory by recomputing activations during backward
 training_client = service_client.create_training_client(
-    model_id=MODEL_ID,
+    base_model=MODEL_ID,
     model_name="qwen-lora",  # Give it a name for multi-adapter support
     tp_size=NUM_GPUS,
     parallelize_plan=parallelize_plan,
@@ -127,7 +127,7 @@ if original_count > 0:
 wandb.init(
     project="tinkerbell-chat-sft",
     config={
-        "model_id": MODEL_ID,
+        "base_model": MODEL_ID,
         "gpu_type": GPU_TYPE,
         "lora_rank": lora_config_1.rank,
         "batch_size": BATCH_SIZE,

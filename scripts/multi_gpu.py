@@ -34,11 +34,10 @@ parallelize_plan = {
 
 # Create training client and train
 server_url = "https://jesterlabs--training-service.modal.run"
-service_client = ServiceClient(server_url=server_url, timeout=600.0)
+service_client = ServiceClient.deploy(deploy_config, wait_for_ready=True, timeout=600.0)
 print("Service client initialized")
 print("Deploying server...")
-server_url = service_client.deploy(deploy_config, redeploy=True, wait_for_ready=True)
-print("Deployed to: ", server_url)
+print("Deployed to: ", service_client.server_url)
 
 print("Server health check:")
 health_response = service_client.get_health()
@@ -75,17 +74,16 @@ lora_config_1 = LoraConfig(
 )
 print(f"   Adapter 1: rank={lora_config_1.rank}, train_attn={lora_config_1.train_attn}, train_mlp={lora_config_1.train_mlp}")
 
+# model_name defaults to cleaned base_model ("qwen_qwen3-0.6b")
+# But for multi-LoRA, we explicitly set model_name so adapters share the same actor group
 training_client = service_client.create_training_client(
-    model_id=MODEL_NAME,
-    model_name="multi_lora_model",  # Give it a name for multi-adapter support
+    base_model=MODEL_NAME,
     tp_size=2,
-    parallelize_plan=parallelize_plan,
-    initialize_random_weights=False,
+    model_name="multi_lora_model",  # Explicit name for multi-adapter support
+    adapter_name="task1_attention",
     lora_config=lora_config_1.model_dump(),
-    adapter_name="task1_attention",  # Name the first adapter
-    model_kwargs={
-        "torch_dtype": "bfloat16",
-    }
+    parallelize_plan=parallelize_plan,
+    model_kwargs={"torch_dtype": "bfloat16"},
 )
 
 # Adapter 2: Low-rank adapter for MLP layers (efficient, task-specific)
@@ -99,32 +97,25 @@ lora_config_2 = LoraConfig(
 )
 print(f"   Adapter 2: rank={lora_config_2.rank}, train_attn={lora_config_2.train_attn}, train_mlp={lora_config_2.train_mlp}")
 
-# IMPORTANT: Use the SAME model_name to share the actor group!
-# This is what makes multi-LoRA work - multiple adapters on one base model
+# SAME model_name = shared actor group (multi-LoRA on one base model)
 training_client_2 = service_client.create_training_client(
-    model_id=MODEL_NAME,
-    model_name="multi_lora_model",  # SAME model name = shared actor group!
+    base_model=MODEL_NAME,
     tp_size=2,
-    parallelize_plan=parallelize_plan,
-    initialize_random_weights=False,
+    model_name="multi_lora_model",  # Same name = shared actors!
+    adapter_name="task2_mlp",
     lora_config=lora_config_2.model_dump(),
-    adapter_name="task2_mlp",  # Name the second adapter
-    model_kwargs={
-        "torch_dtype": "bfloat16",
-    }
+    parallelize_plan=parallelize_plan,
+    model_kwargs={"torch_dtype": "bfloat16"},
 )
 
 print("\n3. Creating full model training client (no LoRA)...")
+# Different model_name = separate actor group
 full_model_client = service_client.create_training_client(
-    model_id=MODEL_NAME,
-    model_name="full_model",
+    base_model=MODEL_NAME,
     tp_size=2,
+    model_name="full_model",  # Different name = separate actors
     parallelize_plan=parallelize_plan,
-    initialize_random_weights=False,
-    lora_config=None,  # No LoRA = train full model
-    model_kwargs={
-        "torch_dtype": "bfloat16",
-    }
+    model_kwargs={"torch_dtype": "bfloat16"},
 )
 
 training_client.wait_until_ready()
@@ -311,30 +302,32 @@ print("INFERENCE SETUP: Saving weights and creating sampling clients")
 print("=" * 70)
 
 # Save adapter 1
+# NOTE: Training actors are still running, so we reduce mem_fraction_static
+# to avoid OOM when allocating SGLang's KV cache
 print("\n1. Saving adapter 1 (task1_attention)...")
 lora_sampling_client = training_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/task1-attention-qwen",
     tp_size=1,
     wait_until_ready=False,
-    # engine_kwargs={"disable_cuda_graph": True}
+    engine_kwargs={"mem_fraction_static": 0.4}  # Reduce KV cache size since training actors still hold memory
 )
 
-# Save adapter 2
+# Save adapter 2 - reuses the same sampling actor as adapter 1!
 print("\n2. Saving adapter 2 (task2_mlp)...")
 lora_sampling_client_2 = training_client_2.save_weights_and_get_sampling_client(
     checkpoint_path="/models/task2-mlp-qwen",
     tp_size=1,
     wait_until_ready=False,
-    # engine_kwargs={"disable_cuda_graph": True}
+    engine_kwargs={"mem_fraction_static": 0.4}
 )
 
-# Save full model
+# Save full model - creates a separate sampling actor (different model_name)
 print("\n3. Saving full model (no LoRA)...")
 full_sampling_client = full_model_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/full-qwen",
     tp_size=1,
     wait_until_ready=False,
-    # engine_kwargs={"disable_cuda_graph": True}
+    engine_kwargs={"mem_fraction_static": 0.4}
 )
 
 lora_sampling_client.wait_until_ready()

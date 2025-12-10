@@ -27,13 +27,18 @@ from tinkerbell.types.responses import (
 logger = logging.getLogger(__name__)
 
 
+def _clean_name(name: str) -> str:
+    """Convert a model path to a clean actor name."""
+    return name.replace("/", "_").replace(":", "_").lower()
+
+
 class TrainingClient(BaseClient):
     """Client for interacting with the Tinkerbell training service."""
 
     def __init__(
         self,
         server_url: str,
-        model_id: str,
+        base_model: str,
         model_name: Optional[str] = None,
         adapter_name: Optional[str] = None,
         timeout: float = 600.0,
@@ -41,8 +46,8 @@ class TrainingClient(BaseClient):
         lora_config: Optional[dict[str, Any]] = None,
     ):
         super().__init__(server_url, timeout)
-        self.model_id = model_id
-        self.model_name = model_name or model_id
+        self.base_model = base_model
+        self.model_name = model_name if model_name else _clean_name(base_model)
         self.adapter_name = adapter_name
         self.lora_enabled = lora_enabled
         self.lora_config = lora_config
@@ -52,7 +57,7 @@ class TrainingClient(BaseClient):
         from transformers import AutoTokenizer
 
         if self._tokenizer is None:
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token or 0
         return self._tokenizer
@@ -73,7 +78,7 @@ class TrainingClient(BaseClient):
 
     def get_actor_status(self) -> ActorStatusResponse:
         """Get the status of training actors."""
-        request = ActorStatusRequest(model_id=self.model_name)
+        request = ActorStatusRequest(model_name=self.model_name)
         response = self.client.post(
             "/get_actor_status", json=request.model_dump(exclude_none=True)
         )
@@ -86,7 +91,7 @@ class TrainingClient(BaseClient):
         """Zero out gradients."""
         return self.create_future(
             request=ZeroGradRequest(
-                model_id=self.model_name, adapter_name=self.adapter_name
+                model_name=self.model_name, adapter_name=self.adapter_name
             ),
             endpoint="/zero_grad",
         )
@@ -94,7 +99,7 @@ class TrainingClient(BaseClient):
     async def zero_grad_async(self) -> AsyncTinkerbellFuture[dict[str, Any]]:
         """Async: Zero out gradients."""
         request = ZeroGradRequest(
-            model_id=self.model_name, adapter_name=self.adapter_name
+            model_name=self.model_name, adapter_name=self.adapter_name
         )
         response = await self.async_client.post(
             "/zero_grad", json=request.model_dump(exclude_none=True)
@@ -116,7 +121,7 @@ class TrainingClient(BaseClient):
     ) -> ForwardRequest:
         """Build forward request."""
         return ForwardRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             inputs=inputs,
             forward_kwargs=forward_kwargs or {},
             request_id=request_id,
@@ -127,7 +132,7 @@ class TrainingClient(BaseClient):
     ) -> ForwardResponse:
         """Parse forward result into response object."""
         return ForwardResponse(
-            model_id=initial.model_id,
+            model_name=initial.model_name,
             request_id=initial.request_id,
             logprobs=result.get("logprobs"),
             outputs=result.get("outputs"),
@@ -149,7 +154,7 @@ class TrainingClient(BaseClient):
         parse = lambda result: self._parse_forward_response(initial, result)
         return self.create_future_from_request_id(
             remote_future=RemoteFuture(
-                request_id=initial.request_id, model_id=initial.model_id
+                request_id=initial.request_id, model_name=initial.model_name
             ),
             parse_result_fn=parse,
         )
@@ -169,7 +174,7 @@ class TrainingClient(BaseClient):
         parse = lambda result: self._parse_forward_response(initial, result)
         return AsyncTinkerbellFuture(
             remote_future=RemoteFuture(
-                request_id=initial.request_id, model_id=initial.model_id
+                request_id=initial.request_id, model_name=initial.model_name
             ),
             server_url=self.server_url,
             result_parser=parse,
@@ -185,7 +190,7 @@ class TrainingClient(BaseClient):
     ) -> dict[str, Any]:
         """Build forward_backward request payload."""
         return {
-            "model_id": self.model_name,
+            "model_name": self.model_name,
             "adapter_name": self.adapter_name,
             "data": [datum.model_dump() for datum in data],
             "forward_kwargs": forward_kwargs or {},
@@ -197,7 +202,7 @@ class TrainingClient(BaseClient):
     ) -> ForwardBackwardResponse:
         """Parse forward_backward result into response object."""
         return ForwardBackwardResponse(
-            model_id=initial.model_id,
+            model_name=initial.model_name,
             request_id=initial.request_id,
             loss=result.get("loss"),
             logprobs=result.get("logprobs"),
@@ -223,7 +228,7 @@ class TrainingClient(BaseClient):
         parse = lambda result: self._parse_forward_backward_response(initial, result)
         return self.create_future_from_request_id(
             remote_future=RemoteFuture(
-                request_id=initial.request_id, model_id=initial.model_id
+                request_id=initial.request_id, model_name=initial.model_name
             ),
             parse_result_fn=parse,
         )
@@ -245,7 +250,7 @@ class TrainingClient(BaseClient):
         parse = lambda result: self._parse_forward_backward_response(initial, result)
         return AsyncTinkerbellFuture(
             remote_future=RemoteFuture(
-                request_id=initial.request_id, model_id=initial.model_id
+                request_id=initial.request_id, model_name=initial.model_name
             ),
             server_url=self.server_url,
             result_parser=parse,
@@ -256,7 +261,7 @@ class TrainingClient(BaseClient):
     def get_result(self, request_id: str) -> TinkerbellFuture[dict[str, Any]]:
         """Get the result of an async forward/backward request (deprecated)."""
         return self.create_future_from_request_id(
-            RemoteFuture(request_id=request_id, model_id=self.model_name)
+            RemoteFuture(request_id=request_id, model_name=self.model_name)
         )
 
     def optim_step(
@@ -264,7 +269,7 @@ class TrainingClient(BaseClient):
     ) -> TinkerbellFuture[dict[str, Any]]:
         """Perform optimizer step for this client's adapter."""
         request = OptimStepRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             adapter_name=self.adapter_name,
             optimizer_params=optimizer_params or {},
         )
@@ -275,7 +280,7 @@ class TrainingClient(BaseClient):
     ) -> AsyncTinkerbellFuture[dict[str, Any]]:
         """Async: Perform optimizer step for this client's adapter."""
         request = OptimStepRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             adapter_name=self.adapter_name,
             optimizer_params=optimizer_params or {},
         )
@@ -296,7 +301,7 @@ class TrainingClient(BaseClient):
     ) -> TinkerbellFuture[SaveCheckpointResponse]:
         """Save model checkpoint (or specific adapter if lora_enabled)."""
         request = SaveCheckpointRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             checkpoint_path=checkpoint_path,
             adapter_name=self.adapter_name,
         )
@@ -311,7 +316,7 @@ class TrainingClient(BaseClient):
     ) -> AsyncTinkerbellFuture[SaveCheckpointResponse]:
         """Async: Save model checkpoint."""
         request = SaveCheckpointRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             checkpoint_path=checkpoint_path,
             adapter_name=self.adapter_name,
         )
@@ -342,7 +347,7 @@ class TrainingClient(BaseClient):
         """
         logger.info(f"Pushing model to Hugging Face Hub: {repo_id}")
         request = PushToHubRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             repo_id=repo_id,
             adapter_name=self.adapter_name,
             token=token,
@@ -371,7 +376,7 @@ class TrainingClient(BaseClient):
         """
         logger.info(f"Pushing model to Hugging Face Hub: {repo_id}")
         request = PushToHubRequest(
-            model_id=self.model_name,
+            model_name=self.model_name,
             repo_id=repo_id,
             adapter_name=self.adapter_name,
             token=token,
@@ -412,15 +417,15 @@ class TrainingClient(BaseClient):
 
         if is_lora:
             # LoRA: Create actor with base model, then load adapter
-            actor_model_id = self.model_id
+            actor_base_model = self.base_model
         else:
             # Full model: Create actor directly with checkpoint (SGLang converts HF format)
             # Disable LoRA mode since it's not needed
-            actor_model_id = checkpoint_path
+            actor_base_model = checkpoint_path
             final_engine_kwargs = {**final_engine_kwargs, "enable_lora": False}
 
         request = CreateSamplingActorRequest(
-            model_id=actor_model_id,
+            base_model=actor_base_model,
             model_name=self.model_name,
             tp_size=tp_size or 1,
             engine_kwargs=final_engine_kwargs,
@@ -433,7 +438,8 @@ class TrainingClient(BaseClient):
 
         sampling_client = SamplingClient(
             server_url=self.server_url,
-            model_id=self.model_name,
+            base_model=self.base_model,  # HF model path for tokenizer
+            model_name=self.model_name,  # Actor name for routing
             adapter_name=self.adapter_name,
             timeout=self.timeout,
         )

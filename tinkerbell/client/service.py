@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import time
 from typing import Any, Optional
@@ -12,9 +14,18 @@ from tinkerbell.types import (
     GetRayActorsResponse,
     HealthResponse,
 )
-from tinkerbell.types.responses import RemoteFuture
+from tinkerbell.types.responses import CreateSamplingActorResponse, RemoteFuture
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_name(name: str) -> str:
+    """Convert a model path to a clean actor name.
+
+    e.g., "Qwen/Qwen3-0.6B" -> "qwen_qwen3-0.6b"
+    """
+    return name.replace("/", "_").replace(":", "_").lower()
+
 
 # # Configure logging to ensure messages show up in terminal
 # logging.basicConfig(
@@ -130,7 +141,7 @@ class ServiceClient(BaseClient):
         deploy_config: DeployConfig,
         wait_for_ready: bool = True,
         timeout: float = 600.0,
-    ) -> str:
+    ) -> ServiceClient:
         """Deploy the server.
 
         Args:
@@ -152,7 +163,7 @@ class ServiceClient(BaseClient):
         redeploy: bool = False,
         wait_for_ready: bool = True,
         timeout: float = 600.0,
-    ) -> str:
+    ) -> ServiceClient:
         """Deploy the server if not deployed, otherwise connect to the existing server."""
         deploy = False
         server_url = deploy_config.server_url
@@ -174,11 +185,11 @@ class ServiceClient(BaseClient):
         if wait_for_ready:
             service_client.wait_until_ready()
 
-        return server_url
+        return service_client
 
     def create_training_client(
         self,
-        model_id: str,
+        base_model: str,
         tp_size: int,
         model_name: Optional[str] = None,
         adapter_name: Optional[str] = None,
@@ -193,19 +204,22 @@ class ServiceClient(BaseClient):
         """Create training actors on the server.
 
         Args:
-            model_id: HuggingFace model ID
+            base_model: HuggingFace model path (e.g., "Qwen/Qwen3-0.6B")
             tp_size: Tensor parallel size (world_size)
-            model_name: Group name for actor sharing. Same model_name = shared actors.
+            model_name: Actor group name for routing. Same model_name = shared actors.
+                        Defaults to cleaned base_model (e.g., "qwen_qwen3-0.6b")
             adapter_name: Name for this LoRA adapter (for multi-LoRA)
             lora_config: LoRA configuration (None for full model training)
         """
         if not self.is_deployed():
             raise ValueError("Server is not deployed. Please deploy the server first.")
 
-        model_name = model_name or model_id
+        # Default model_name to cleaned base_model
+        if model_name is None:
+            model_name = _clean_name(base_model)
 
         request = CreateTrainingActorsRequest(
-            model_id=model_id,
+            base_model=base_model,
             model_name=model_name,
             adapter_name=adapter_name,
             world_size=tp_size,
@@ -231,7 +245,7 @@ class ServiceClient(BaseClient):
 
         return TrainingClient(
             server_url=self.server_url,
-            model_id=model_id,
+            base_model=base_model,
             model_name=model_name,
             adapter_name=adapter_name,
             timeout=self.timeout,
@@ -241,21 +255,69 @@ class ServiceClient(BaseClient):
 
     def create_sampling_client(
         self,
-        model_id: str,
-        tp_size: int,
+        base_model: str,
+        tp_size: int = 1,
         model_name: Optional[str] = None,
+        adapter_name: Optional[str] = None,
+        checkpoint_path: Optional[str] = None,
         engine_kwargs: Optional[dict[str, Any]] = None,
+        wait_until_ready: bool = False,
     ) -> SamplingClient:
-        """Create sampling actors on the server."""
+        """Create sampling actors on the server.
+
+        Args:
+            base_model: HuggingFace model path (e.g., "Qwen/Qwen3-0.6B")
+            tp_size: Tensor parallel size
+            model_name: Actor group name for routing. Defaults to cleaned base_model.
+            adapter_name: LoRA adapter name (optional)
+            checkpoint_path: Path to checkpoint/LoRA adapter to load
+            engine_kwargs: SGLang engine kwargs
+            wait_until_ready: If True, wait for actor to be ready before returning
+        """
         if not self.is_deployed():
             raise ValueError("Server is not deployed. Please deploy the server first.")
 
+        # Default model_name to cleaned base_model
+        if model_name is None:
+            model_name = _clean_name(base_model)
+
+        is_lora = adapter_name is not None
+        final_engine_kwargs = engine_kwargs or {}
+
+        if is_lora:
+            # LoRA: Create actor with base model, then load adapter
+            actor_base_model = base_model
+        else:
+            # Full model: Create actor directly with checkpoint (SGLang converts HF format)
+            # If checkpoint_path is None, fall back to base_model
+            actor_base_model = checkpoint_path or base_model
+            final_engine_kwargs = {**final_engine_kwargs, "enable_lora": False}
+
         request = CreateSamplingActorRequest(
-            model_id=model_id,
+            base_model=actor_base_model,
             model_name=model_name,
             tp_size=tp_size,
-            engine_kwargs=engine_kwargs or {},
+            engine_kwargs=final_engine_kwargs,
         )
-
         response = self.client.post("/create_sampling_actor", json=request.model_dump())
         response.raise_for_status()
+        result = CreateSamplingActorResponse(**response.json())
+        if not result.success:
+            raise RuntimeError(f"Failed to create sampling actor: {result.message}")
+
+        sampling_client = SamplingClient(
+            server_url=self.server_url,
+            base_model=base_model,
+            model_name=model_name,
+            adapter_name=adapter_name,
+            timeout=self.timeout,
+        )
+
+        if wait_until_ready:
+            sampling_client.wait_until_ready()
+
+        # Only load checkpoint for LoRA (full model already loaded from checkpoint path)
+        if is_lora and checkpoint_path:
+            sampling_client.load_checkpoint(checkpoint_path).result()
+
+        return sampling_client
