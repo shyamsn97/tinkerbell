@@ -50,7 +50,7 @@ def importance_sampling_loss(
     """Compute importance sampling loss for causal language modeling.
 
     Args:
-        logprobs: Model log probabilities of shape [batch_size, seq_len, vocab_size]
+        logprobs: Model log probabilities of size batch_size, seq_len]
         labels: Target labels of shape [batch_size, seq_len]
         sampling_logprobs: Log probabilities from the sampling/behavior policy
             of shape [batch_size, seq_len]
@@ -61,31 +61,21 @@ def importance_sampling_loss(
     """
     batch_size = logprobs.shape[0]
     seq_len = logprobs.shape[1]
-    vocab_size = logprobs.shape[-1]
 
     # Ensure logprobs are float32
-    if logprobs.dtype != torch.float32:
-        logprobs = logprobs.float()
+    logprobs = logprobs.float()
+    sampling_logprobs = sampling_logprobs.float()
+    advantages = advantages.float()
 
-    # Flatten for indexing
-    logprobs_flat = logprobs.view(-1, vocab_size)
-    labels_flat = labels.view(-1)
-    labels_flat = labels_flat.to(logprobs.device)
-    labels_flat_expanded = labels_flat.unsqueeze(-1)  # [batch*seq, 1]
-    target_logprobs_flat = logprobs_flat.gather(
-        dim=-1, index=labels_flat_expanded
-    ).squeeze(
-        -1
-    )  # [batch*seq]
-    target_logprobs = target_logprobs_flat.view(batch_size, seq_len)
-    sampling_logprobs_flat = sampling_logprobs.view(batch_size, seq_len)
-    advantages_flat = advantages.view(batch_size, seq_len)
-    prob_ratio = torch.exp(target_logprobs - sampling_logprobs_flat)
+    target_logprobs = logprobs.view(batch_size, seq_len)
+    sampling_logprobs = sampling_logprobs.view(batch_size, seq_len)
+    advantages = advantages.view(batch_size, seq_len)
+    prob_ratio = torch.exp(target_logprobs - sampling_logprobs)
 
     # Mask out ignored tokens (where labels == mask_token_id)
     mask = (labels != mask_token_id).float()
     prob_ratio = prob_ratio * mask
-    advantages_masked = advantages_flat * mask
+    advantages_masked = advantages * mask
 
     loss = -(prob_ratio * advantages_masked).sum(dim=-1)
     return loss

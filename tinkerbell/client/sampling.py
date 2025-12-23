@@ -6,7 +6,8 @@ from typing import Any
 import torch
 
 from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
-from tinkerbell.types.data import TensorData
+
+# from tinkerbell.types.data import TensorData
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,
@@ -34,12 +35,14 @@ def make_logprobs_tensor(logprobs: list[list[list]], vocab_size: int) -> torch.T
         vocab_size: Size of the vocabulary
 
     Returns:
-        Tensor of shape (vocab_size, num_tokens) containing logprob values
+        Tensor of shape (seq_len, vocab_size) containing logprob values
         at the correct token_id positions, with -inf elsewhere
     """
-    num_tokens = len(logprobs)
-    # Initialize tensor with -inf (logprob of 0 probability)
-    result = torch.full((vocab_size, num_tokens), float("-inf"), dtype=torch.float32)
+    seq_len = len(logprobs)
+    # Initialize with -inf (log(0) = no probability mass).
+    # NOTE: For importance sampling, ensure you request logprobs for the actual
+    # sampled tokens via token_ids_logprob, otherwise exp(x - (-inf)) = inf!
+    result = torch.full((seq_len, vocab_size), float("-inf"), dtype=torch.float32)
 
     # Fill in the logprobs at the correct token_id positions
     for token_pos_idx, token_position in enumerate(logprobs):
@@ -50,7 +53,7 @@ def make_logprobs_tensor(logprobs: list[list[list]], vocab_size: int) -> torch.T
                 token_id = entry[1]
                 # Place logprob at the correct position
                 if isinstance(token_id, int) and 0 <= token_id < vocab_size:
-                    result[token_id, token_pos_idx] = logprob_value
+                    result[token_pos_idx, token_id] = logprob_value
     return result
 
 
@@ -61,21 +64,22 @@ def parse_sample_response(result: dict[str, Any], vocab_size: int) -> SampleResp
     # Extract output_token_ids if available - wrap in list for batch format
     output_token_ids = None
     output_token_logprobs = meta_info.get("output_token_logprobs")
+
     if output_token_logprobs:
         # Single sequence: wrap in a list to match list[list[int]] type
-        output_token_ids = [[item[1] for item in output_token_logprobs]]
+        logprobs = [item[0] for item in output_token_logprobs]
+        output_token_ids = [item[1] for item in output_token_logprobs]
 
     # Extract logprobs - try output_top_logprobs first, fall back to top-level logprobs
-    logprobs = None
     raw_logprobs = meta_info.get("output_top_logprobs") or result.get("logprobs")
-    if raw_logprobs is not None:
-        logprobs = TensorData.from_torch(make_logprobs_tensor(raw_logprobs, vocab_size))
+    # if raw_logprobs is not None:
+    #     logprobs = TensorData.from_torch(make_logprobs_tensor(raw_logprobs, vocab_size))
 
     return SampleResponse(
         outputs=result.get("outputs", []),
         tokens_generated=result.get("tokens_generated"),
         logprobs=logprobs,
-        top_logprobs=result.get("top_logprobs"),
+        top_logprobs=raw_logprobs,
         output_token_ids=output_token_ids,
         finish_reasons=result.get("finish_reasons"),
         meta_info=meta_info or None,

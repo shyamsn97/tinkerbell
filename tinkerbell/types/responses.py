@@ -70,11 +70,11 @@ class SampleResponse(BaseModel):
     outputs: list[str]
     tokens_generated: int | None = None
     # Logprobs for each token in the output. Can be logits if logprobs not available from backend
-    logprobs: list[list[float]] | None = None
+    logprobs: TensorData | list[float] | None = None
     # Top k logprobs for each position (if requested)
-    top_logprobs: list[dict[str, float]] | None = None
+    top_logprobs: list[tuple[float, int, Any] | Any] | None = None
     # Token IDs for the generated text
-    output_token_ids: list[list[int]] | None = None
+    output_token_ids: list[int] | None = None
     # Finish reasons for each sequence
     finish_reasons: list[str] | None = None
     # Metadata about the sampling process

@@ -105,7 +105,8 @@ class SampleRequest(StrictBase):
     # By default, this value is "-1", which means it will only return logprobs for output tokens.
     logprob_start_len: Optional[Union[List[int], int]] = None
     # If return logprobs, the number of top logprobs to return at each position.
-    top_logprobs_num: Optional[Union[List[int], int]] = None
+    # Default to 1 to ensure output_top_logprobs is returned (needed for make_logprobs_tensor)
+    top_logprobs_num: Optional[Union[List[int], int]] = 100
     # If return logprobs, the token ids to return logprob for.
     token_ids_logprob: Optional[Union[List[List[int]], List[int]]] = None
     # Whether to detokenize tokens in text in the returned logprobs.

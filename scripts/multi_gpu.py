@@ -448,3 +448,8 @@ print(f"Total requests: {len(all_prompts) * 3}")
 print(f"Total time: {elapsed:.2f}s")
 print(f"Avg time per request: {elapsed / (len(all_prompts) * 3):.3f}s")
 print("=" * 70)
+
+print("Logprobs:")
+print(lora1_results[0].logprobs.to_numpy()[0])
+# print(lora2_results[0].logprobs)
+# print(full_results[0].logprobs)

@@ -57,7 +57,9 @@ class ModalDeployConfig(DeployConfig):
                     f"Found Modal function but server is not responding: {e}. "
                     "Treating as if no server exists."
                 )
-                return self.server_url
+                raise ConnectionError(
+                    f"Modal function exists but server is not responding: {e}"
+                ) from e
         except Exception as e:
             raise e
 

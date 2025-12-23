@@ -54,12 +54,23 @@ class SamplingManager:
                 return model_name
 
             actor_name = self._get_actor_name(model_name)
+
+            # Check if a detached actor with this name already exists and is healthy
+            existing_actor = self._try_get_existing_actor(actor_name, model_name)
+            if existing_actor is not None:
+                self.actors[model_name] = ActorState(
+                    actor=existing_actor,
+                    status=SamplingActorStatus.READY,  # Already verified healthy
+                    pending_ref=None,
+                )
+                return model_name
+
             logger.info(
                 f"Creating sampling actor '{actor_name}' loading model '{base_model}'"
             )
             actor = SGLangSamplingActor.options(
                 num_gpus=tp_size,
-                get_if_exists=True,
+                get_if_exists=False,  # Create fresh actor - we already checked for existing
                 lifetime="detached",
                 name=actor_name,
                 namespace="tinkerbell",
@@ -73,6 +84,49 @@ class SamplingManager:
                 pending_ref=actor.is_ready.remote(),
             )
             return model_name
+
+    def _try_get_existing_actor(
+        self, actor_name: str, model_name: str
+    ) -> Optional[SGLangSamplingActor]:
+        """Try to get an existing detached actor and verify it's healthy.
+
+        Returns the actor if it exists and is healthy, None otherwise.
+        If the actor exists but is unhealthy, it will be killed.
+        """
+        try:
+            # Try to get the existing actor by name
+            actor = ray.get_actor(actor_name, namespace="tinkerbell")
+
+            # Verify the actor is healthy by checking if the SGLang server is alive
+            try:
+                is_alive = ray.get(actor.is_server_alive.remote(), timeout=5.0)
+                if is_alive:
+                    logger.info(
+                        f"Reusing existing healthy sampling actor '{actor_name}'"
+                    )
+                    return actor
+                else:
+                    logger.warning(
+                        f"Existing actor '{actor_name}' has dead SGLang server, killing it"
+                    )
+                    ray.kill(actor)
+                    return None
+            except Exception as e:
+                logger.warning(
+                    f"Existing actor '{actor_name}' is unresponsive ({e}), killing it"
+                )
+                try:
+                    ray.kill(actor)
+                except Exception:
+                    pass
+                return None
+
+        except ValueError:
+            # Actor doesn't exist
+            return None
+        except Exception as e:
+            logger.warning(f"Error checking for existing actor '{actor_name}': {e}")
+            return None
 
     async def get_sampling_actor_status(self, model_name: str) -> SamplingActorStatus:
         """Get status of sampling actor by model_name."""
