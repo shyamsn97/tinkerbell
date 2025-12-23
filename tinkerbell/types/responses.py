@@ -11,12 +11,12 @@ class HealthResponse(BaseModel):
 
 class CreateTrainingActorsResponse(BaseModel):
     success: bool
-    model_id: str
+    model_name: str  # Actor group name
     message: str
 
 
 class ForwardResponse(BaseModel):
-    model_id: str
+    model_name: str  # Actor group name
     request_id: str | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, Any] | None = None
@@ -24,7 +24,7 @@ class ForwardResponse(BaseModel):
 
 
 class ForwardBackwardResponse(BaseModel):
-    model_id: str
+    model_name: str  # Actor group name
     request_id: str | None = None
     loss: float | list[float] | None = None
     logprobs: TensorData | None = None
@@ -40,7 +40,7 @@ class ActorStatusResponse(BaseModel):
 
 class RemoteFuture(BaseModel):
     request_id: str
-    model_id: str | None = None
+    model_name: str | None = None  # Actor group name (optional, for context)
 
 
 class GetRayActorsResponse(BaseModel):
@@ -48,14 +48,14 @@ class GetRayActorsResponse(BaseModel):
 
 
 class SaveCheckpointResponse(BaseModel):
-    model_id: str
+    model_name: str  # Actor group name
     success: bool
     message: str | None = None
     path: Optional[str] = None
 
 
 class PushToHubResponse(BaseModel):
-    model_id: str
+    model_name: str  # Actor group name
     success: bool
     message: str | None = None
     repo_id: Optional[str] = None
@@ -70,11 +70,11 @@ class SampleResponse(BaseModel):
     outputs: list[str]
     tokens_generated: int | None = None
     # Logprobs for each token in the output. Can be logits if logprobs not available from backend
-    logprobs: list[list[float]] | None = None
+    logprobs: TensorData | list[float] | None = None
     # Top k logprobs for each position (if requested)
-    top_logprobs: list[dict[str, float]] | None = None
+    top_logprobs: list[tuple[float, int, Any] | Any] | None = None
     # Token IDs for the generated text
-    output_token_ids: list[list[int]] | None = None
+    output_token_ids: list[int] | None = None
     # Finish reasons for each sequence
     finish_reasons: list[str] | None = None
     # Metadata about the sampling process
@@ -82,13 +82,13 @@ class SampleResponse(BaseModel):
 
 
 class LoadCheckpointResponse(BaseModel):
-    model_id: str
+    model_name: str  # Actor group name
     success: bool
     message: str | None = None
 
 
 class ShutdownSamplingActorResponse(BaseModel):
-    model_id: str
+    model_name: str  # Actor group name
     success: bool
     message: str | None = None
 

@@ -30,14 +30,14 @@ class ActorGroup:
     def __init__(
         self,
         workers: list[Any],
-        model_id: str,
+        base_model: str,
         model_name: str,
         status: ActorStatus = ActorStatus.PENDING,
         max_wait_time: float = 600.0,
     ):
         self.workers = workers
         self.setup_refs = [worker.setup.remote() for worker in self.workers]
-        self.model_id = model_id
+        self.base_model = base_model
         self.model_name = model_name
         self.adapters: dict[str, str] = {}
         self.status = status
@@ -179,12 +179,12 @@ class ActorGroup:
         if self.status != ActorStatus.READY:
             if not await self.wait_until_ready():
                 raise HTTPException(
-                    status_code=503, detail=f"Actors for {self.model_id} not ready"
+                    status_code=503, detail=f"Actors for {self.base_model} not ready"
                 )
 
     @classmethod
     def try_reconnect_to_existing_actors(
-        cls, model_name: str, model_id: str, max_wait_time: float = 600.0
+        cls, model_name: str, base_model: str, max_wait_time: float = 600.0
     ) -> ActorGroup:
         cleaned_name = model_name.replace("/", "_").replace(":", "_").lower()
 
@@ -223,7 +223,7 @@ class ActorGroup:
         ]
         return cls(
             workers=workers,
-            model_id=model_id,
+            base_model=base_model,
             model_name=model_name,
             status=ActorStatus.PENDING,
             max_wait_time=max_wait_time,
@@ -233,7 +233,7 @@ class ActorGroup:
     def create_actor_group(
         cls,
         world_size: int,
-        model_id: str,
+        base_model: str,
         model_name: str,
         model_kwargs: dict[str, Any],
         parallelize_plan: dict[str, str],
@@ -260,7 +260,7 @@ class ActorGroup:
                 world_size=world_size,
                 master_addr=master_addr,
                 master_port=master_port,
-                model_id=model_id,
+                base_model=base_model,
                 model_kwargs=model_kwargs,
                 parallelize_plan=parallelize_plan,
                 scheduler_params=scheduler_params,
@@ -271,7 +271,7 @@ class ActorGroup:
             workers.append(worker)
         return cls(
             workers=workers,
-            model_id=model_id,
+            base_model=base_model,
             model_name=model_name,
             status=ActorStatus.PENDING,
             max_wait_time=max_wait_time,
@@ -321,7 +321,7 @@ class TrainingManager:
     ) -> RemoteFuture:
         request = ForwardRequest(
             request_id=str(uuid.uuid4()),
-            model_id=model_name,
+            model_name=model_name,
             data=data,
             forward_kwargs=forward_kwargs,
         )
@@ -338,7 +338,7 @@ class TrainingManager:
     ) -> RemoteFuture:
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
-            model_id=model_name,
+            model_name=model_name,
             adapter_name=adapter_name,
             data=data,
             forward_kwargs=forward_kwargs,
@@ -399,7 +399,7 @@ class TrainingManager:
     async def create_training_actors(
         self,
         world_size: int,
-        model_id: str,
+        base_model: str,
         model_name: Optional[str] = None,
         adapter_name: Optional[str] = None,
         model_kwargs: dict[str, Any] = {},
@@ -410,7 +410,9 @@ class TrainingManager:
         initialize_random_weights: bool = False,
     ) -> str:
         await self.start()
-        model_name = model_name or model_id
+        model_name = (
+            model_name or base_model.replace("/", "_").replace(":", "_").lower()
+        )
         lora_config_dict = (
             lora_config
             if isinstance(lora_config, dict)
@@ -426,7 +428,7 @@ class TrainingManager:
 
         try:
             existing = ActorGroup.try_reconnect_to_existing_actors(
-                model_name, model_id, self.max_wait_time
+                model_name, base_model, self.max_wait_time
             )
             self.actor_groups[model_name] = existing
             if adapter_name and lora_config_dict:
@@ -437,7 +439,7 @@ class TrainingManager:
 
         self.actor_groups[model_name] = ActorGroup.create_actor_group(
             world_size=world_size,
-            model_id=model_id,
+            base_model=base_model,
             model_name=model_name,
             model_kwargs=model_kwargs,
             parallelize_plan=parallelize_plan,
@@ -451,11 +453,11 @@ class TrainingManager:
         return model_name
 
     def _get_actor_group_or_raise(
-        self, model_name: str, model_id: str = ""
+        self, model_name: str, base_model: str = ""
     ) -> ActorGroup:
         if model_name not in self.actor_groups:
             existing = ActorGroup.try_reconnect_to_existing_actors(
-                model_name, model_id or model_name, self.max_wait_time
+                model_name, base_model or model_name, self.max_wait_time
             )
             self.actor_groups[model_name] = existing
         return self.actor_groups[model_name]
@@ -464,7 +466,7 @@ class TrainingManager:
         self, request: ForwardRequest | ForwardBackwardRequest, model_name: str
     ) -> RemoteFuture:
         await self.global_store.add_request_to_queue.remote(request=request)
-        return RemoteFuture(request_id=request.request_id, model_id=model_name)
+        return RemoteFuture(request_id=request.request_id, model_name=model_name)
 
     async def _batch_processor_loop(self) -> None:
         while self.running:

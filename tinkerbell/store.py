@@ -26,7 +26,7 @@ class GlobalStore:
 
     async def add_request_to_queue(self, request: ActorRequest):
         adapter_name = getattr(request, "adapter_name", None) or ""
-        queue_key = f"{request.model_id}:{adapter_name}"
+        queue_key = f"{request.model_name}:{adapter_name}"
         if queue_key not in self.request_queue:
             self.request_queue[queue_key] = []
         self.request_queue[queue_key].append(request)

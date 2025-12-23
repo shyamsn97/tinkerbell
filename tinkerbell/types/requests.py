@@ -12,8 +12,8 @@ from .optimizer import DEFAULT_SCHEDULER_PARAMS
 
 class CreateTrainingActorsRequest(StrictBase):
     world_size: int
-    model_id: str
-    model_name: Optional[str] = None  # Groups actors; defaults to model_id
+    base_model: str  # HuggingFace model path (e.g., "Qwen/Qwen3-0.6B")
+    model_name: Optional[str] = None  # Actor group name; defaults to cleaned base_model
     adapter_name: Optional[str] = None  # For multi-LoRA: names the adapter
     model_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     parallelize_plan: dict[str, str] = Field(default_factory=lambda: {})
@@ -27,13 +27,13 @@ class CreateTrainingActorsRequest(StrictBase):
 
 
 class SaveCheckpointRequest(StrictBase):
-    model_id: str  # This is model_name for routing
+    model_name: str  # Actor group name for routing
     checkpoint_path: str
     adapter_name: Optional[str] = None  # Which LoRA adapter to save
 
 
 class PushToHubRequest(StrictBase):
-    model_id: str  # This is model_name for routing
+    model_name: str  # Actor group name for routing
     repo_id: str  # Hugging Face Hub repository ID (e.g., "username/model-name")
     adapter_name: Optional[str] = None  # Which LoRA adapter to push
     token: Optional[str] = None  # Hugging Face token for authentication
@@ -49,14 +49,14 @@ class ActorRequest(StrictBase):
 
 
 class ForwardRequest(StrictBase):
-    model_id: str
+    model_name: str  # Actor group name for routing
     request_id: Optional[str] = None
     data: list[Datum] = Field(default_factory=lambda: [])
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 
 
 class ForwardBackwardRequest(StrictBase):
-    model_id: str  # This is model_name for routing
+    model_name: str  # Actor group name for routing
     request_id: Optional[str] = None
     adapter_name: Optional[str] = None  # Which LoRA adapter to use
     data: list[Datum] = Field(default_factory=lambda: [])
@@ -66,18 +66,18 @@ class ForwardBackwardRequest(StrictBase):
 
 
 class ActorStatusRequest(StrictBase):
-    model_id: str
+    model_name: str  # Actor group name for routing
 
 
 class CreateSamplingActorRequest(StrictBase):
-    model_id: str  # HF model path for loading
-    model_name: Optional[str] = None  # Actor key (defaults to model_id)
+    base_model: str  # HuggingFace model path (e.g., "Qwen/Qwen3-0.6B")
+    model_name: Optional[str] = None  # Actor group name; defaults to cleaned base_model
     tp_size: int
     engine_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 
 
 class SampleRequest(StrictBase):
-    model_id: Optional[str] = None
+    model_name: Optional[str] = None  # Actor group name for routing
     # The input prompt. It can be a single prompt or a batch of prompts.
     text: Optional[Union[List[str], str]] = None
     # The token ids for text; one can specify either text or input_ids
@@ -100,12 +100,13 @@ class SampleRequest(StrictBase):
     # The sampling_params. See descriptions below.
     sampling_params: Optional[Union[List[Dict], Dict]] = None
     # Whether to return logprobs.
-    return_logprob: Optional[Union[List[bool], bool]] = None
+    return_logprob: Optional[Union[List[bool], bool]] = True
     # If return logprobs, the start location in the prompt for returning logprobs.
     # By default, this value is "-1", which means it will only return logprobs for output tokens.
     logprob_start_len: Optional[Union[List[int], int]] = None
     # If return logprobs, the number of top logprobs to return at each position.
-    top_logprobs_num: Optional[Union[List[int], int]] = None
+    # Default to 1 to ensure output_top_logprobs is returned (needed for make_logprobs_tensor)
+    top_logprobs_num: Optional[Union[List[int], int]] = 100
     # If return logprobs, the token ids to return logprob for.
     token_ids_logprob: Optional[Union[List[List[int]], List[int]]] = None
     # Whether to detokenize tokens in text in the returned logprobs.
@@ -170,15 +171,15 @@ class SampleRequest(StrictBase):
 
 
 class LoadCheckpointRequest(StrictBase):
-    model_id: str
+    model_name: str  # Actor group name for routing
     checkpoint_path: str
     pin_lora: bool = False
 
 
 class ShutdownSamplingActorRequest(StrictBase):
-    model_id: str
+    model_name: str  # Actor group name for routing
 
 
 class PollResultRequest(BaseModel):
     request_id: str
-    model_id: Optional[str] = None
+    model_name: Optional[str] = None  # Actor group name (optional, for context)

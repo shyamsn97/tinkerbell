@@ -23,7 +23,7 @@ class TrainingActor:
         world_size: int,
         master_addr: str,
         master_port: str,
-        model_id: str,
+        base_model: str,
         model_kwargs: dict[str, Any] = {},
         parallelize_plan: dict[str, str] = {},
         scheduler_params: dict[str, Any] = {},
@@ -40,7 +40,7 @@ class TrainingActor:
         self.world_size = world_size
         self.master_addr = master_addr
         self.master_port = master_port
-        self.model_id = model_id
+        self.base_model = base_model
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
@@ -123,7 +123,7 @@ class TrainingActor:
         self.training_model = LLM(
             rank=self.rank,
             world_size=self.world_size,
-            model_id=self.model_id,
+            base_model=self.base_model,
             model_kwargs=self.model_kwargs,
             parallelize_plan=self.parallelize_plan,
             lora_config=self.lora_config,
@@ -155,12 +155,12 @@ class TrainingActor:
         try:
             device = torch.cuda.current_device()
             padded = self.training_model.pad(data, device)
-            logits = self.training_model.forward(
+            forward_output = self.training_model.forward(
                 model_inputs=padded["model_input"],
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
-            return logits
+            return forward_output["logprobs"]
         except Exception as e:
             logger.error(f"Forward error: {e}")
             raise
@@ -204,23 +204,24 @@ class TrainingActor:
             self.training_model.train()
             device = torch.cuda.current_device()
             padded = self.training_model.pad(data, device)
-            logits = self.training_model.forward(
+            forward_output = self.training_model.forward(
                 model_inputs=padded["model_input"],
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
+            logprobs = forward_output["logprobs"]
 
             # Check if all loss functions are the same
             if len(set(loss_fns)) == 1:
                 loss_fn = loss_fns[0]
                 per_batch_losses = LOSSES[loss_fn](
-                    logits=logits, **padded["loss_fn_inputs"]
+                    logprobs=logprobs, **padded["loss_fn_inputs"]
                 )
             else:
                 per_batch_losses = torch.stack(
                     [
                         LOSSES[loss_fn](
-                            logits=logits[i : i + 1],
+                            logprobs=logprobs[i : i + 1],
                             **{
                                 k: v[i : i + 1]
                                 for k, v in padded["loss_fn_inputs"].items()
@@ -239,7 +240,7 @@ class TrainingActor:
             )
 
             # Clean up intermediate tensors to free memory
-            del logits, padded, per_batch_losses, loss_mean
+            del forward_output, padded, per_batch_losses, loss_mean
 
             sum_gradient = {}
             with torch.no_grad():

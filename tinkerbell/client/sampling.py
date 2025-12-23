@@ -1,8 +1,13 @@
+import functools
 import logging
 import time
 from typing import Any
 
+import torch
+
 from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
+
+# from tinkerbell.types.data import TensorData
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,
@@ -20,20 +25,109 @@ from tinkerbell.types.responses import (
 logger = logging.getLogger(__name__)
 
 
+def make_logprobs_tensor(logprobs: list[list[list]], vocab_size: int) -> torch.Tensor:
+    """
+    Convert logprobs from format [[logprob, token_id, None], ...] to a tensor.
+
+    Args:
+        logprobs: List of lists, where each inner list contains top-k logprobs
+                in format [logprob_value, token_id, None]
+        vocab_size: Size of the vocabulary
+
+    Returns:
+        Tensor of shape (seq_len, vocab_size) containing logprob values
+        at the correct token_id positions, with -inf elsewhere
+    """
+    seq_len = len(logprobs)
+    # Initialize with -inf (log(0) = no probability mass).
+    # NOTE: For importance sampling, ensure you request logprobs for the actual
+    # sampled tokens via token_ids_logprob, otherwise exp(x - (-inf)) = inf!
+    result = torch.full((seq_len, vocab_size), float("-inf"), dtype=torch.float32)
+
+    # Fill in the logprobs at the correct token_id positions
+    for token_pos_idx, token_position in enumerate(logprobs):
+        for entry in token_position:
+            if isinstance(entry, list) and len(entry) >= 2:
+                # Extract logprob value (first element) and token_id (second element)
+                logprob_value = entry[0]
+                token_id = entry[1]
+                # Place logprob at the correct position
+                if isinstance(token_id, int) and 0 <= token_id < vocab_size:
+                    result[token_pos_idx, token_id] = logprob_value
+    return result
+
+
+def parse_sample_response(result: dict[str, Any], vocab_size: int) -> SampleResponse:
+    """Parse the sample response."""
+    meta_info = result.get("meta_info") or {}
+
+    # Extract output_token_ids if available - wrap in list for batch format
+    output_token_ids = None
+    output_token_logprobs = meta_info.get("output_token_logprobs")
+
+    if output_token_logprobs:
+        # Single sequence: wrap in a list to match list[list[int]] type
+        logprobs = [item[0] for item in output_token_logprobs]
+        output_token_ids = [item[1] for item in output_token_logprobs]
+
+    # Extract logprobs - try output_top_logprobs first, fall back to top-level logprobs
+    raw_logprobs = meta_info.get("output_top_logprobs") or result.get("logprobs")
+    # if raw_logprobs is not None:
+    #     logprobs = TensorData.from_torch(make_logprobs_tensor(raw_logprobs, vocab_size))
+
+    return SampleResponse(
+        outputs=result.get("outputs", []),
+        tokens_generated=result.get("tokens_generated"),
+        logprobs=logprobs,
+        top_logprobs=raw_logprobs,
+        output_token_ids=output_token_ids,
+        finish_reasons=result.get("finish_reasons"),
+        meta_info=meta_info or None,
+    )
+
+
+def _clean_name(name: str) -> str:
+    """Convert a model path to a clean actor name."""
+    return name.replace("/", "_").replace(":", "_").lower()
+
+
 class SamplingClient(BaseClient):
     """Client for interacting with the Tinkerbell sampling service."""
 
     def __init__(
         self,
         server_url: str,
-        model_id: str,
+        base_model: str,
+        model_name: str | None = None,
         adapter_name: str | None = None,
         timeout: float = 600.0,
     ):
+        """Initialize sampling client.
+
+        Args:
+            server_url: URL of the tinkerbell server
+            base_model: HuggingFace model path (e.g., "Qwen/Qwen3-0.6B") - for tokenizer
+            model_name: Actor group name for routing. Defaults to cleaned base_model.
+            adapter_name: LoRA adapter name (optional)
+            timeout: Request timeout in seconds
+        """
         super().__init__(server_url, timeout)
-        self.model_id = model_id
+        self.base_model = base_model  # HF model path for tokenizer
+        self.model_name = (
+            model_name if model_name else _clean_name(base_model)
+        )  # Actor name for routing
         self.adapter_name = adapter_name
         self.lora_path: str | None = None  # Set after load_checkpoint
+        self._tokenizer = None
+
+    def get_tokenizer(self):
+        from transformers import AutoTokenizer
+
+        if self._tokenizer is None:
+            self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token or 0
+        return self._tokenizer
 
     def wait_until_ready(
         self,
@@ -54,14 +148,15 @@ class SamplingClient(BaseClient):
         last_print_time = start_time
 
         # Compute actor name for debugging
-        actor_name = self.model_id.replace("/", "_").replace(":", "_").lower()
+        actor_name = self.model_name.replace("/", "_").replace(":", "_").lower()
         actor_name = f"sampling_actor_{actor_name}"
 
         if verbose:
             logger.info("=" * 80)
             logger.info("Waiting for sampling actor to be ready...")
-            logger.info(f"  Model: {self.model_id}")
-            logger.info(f"  Actor name: {actor_name}")
+            logger.info(f"  Base model: {self.base_model}")
+            logger.info(f"  Actor name (model_name): {self.model_name}")
+            logger.info(f"  Ray actor name: {actor_name}")
             logger.info(f"  Timeout: {timeout}s")
             logger.info(f"To check actor logs: ray logs {actor_name}")
             logger.info("=" * 80)
@@ -123,7 +218,7 @@ class SamplingClient(BaseClient):
             TinkerbellFuture[ActorStatusResponse] - call .result() to poll for the status
         """
         # Send request immediately
-        request = ActorStatusRequest(model_id=self.model_id)
+        request = ActorStatusRequest(model_name=self.model_name)
         response = self.client.post(
             "/get_sampling_actor_status",
             json=request.model_dump(exclude_none=True),
@@ -142,8 +237,8 @@ class SamplingClient(BaseClient):
 
     def sample(self, *args, **kwargs) -> TinkerbellFuture[SampleResponse]:
         """Sample text. Uses lora_path only if adapter_name is set (LoRA mode)."""
-        if "model_id" not in kwargs:
-            kwargs["model_id"] = self.model_id
+        if "model_name" not in kwargs:
+            kwargs["model_name"] = self.model_name
         # Only pass lora_path for LoRA adapters (when adapter_name is set)
         if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
             kwargs["lora_path"] = self.lora_path
@@ -154,17 +249,23 @@ class SamplingClient(BaseClient):
         )
         response.raise_for_status()
 
+        tokenizer = self.get_tokenizer()
+        partial_parse_sample_response = functools.partial(
+            parse_sample_response,
+            vocab_size=tokenizer.vocab_size,
+        )
+
         return self.create_future_from_request_id(
             remote_future=RemoteFuture(**response.json()),
-            parse_result_fn=lambda result: SampleResponse(**result),
+            parse_result_fn=partial_parse_sample_response,
         )
 
     async def sample_async(
         self, *args, **kwargs
     ) -> AsyncTinkerbellFuture[SampleResponse]:
         """Async: Sample text. Uses lora_path only if adapter_name is set."""
-        if "model_id" not in kwargs:
-            kwargs["model_id"] = self.model_id
+        if "model_name" not in kwargs:
+            kwargs["model_name"] = self.model_name
         if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
             kwargs["lora_path"] = self.lora_path
 
@@ -174,10 +275,16 @@ class SamplingClient(BaseClient):
         )
         response.raise_for_status()
 
+        tokenizer = self.get_tokenizer()
+        partial_parse_sample_response = functools.partial(
+            parse_sample_response,
+            vocab_size=tokenizer.vocab_size,
+        )
+
         return AsyncTinkerbellFuture(
             remote_future=RemoteFuture(**response.json()),
             server_url=self.server_url,
-            result_parser=lambda result: SampleResponse(**result),
+            result_parser=partial_parse_sample_response,
             poll_interval=1.0,
             timeout=self.timeout,
         )
@@ -189,7 +296,9 @@ class SamplingClient(BaseClient):
         import os
 
         request = LoadCheckpointRequest(
-            model_id=self.model_id, checkpoint_path=checkpoint_path, pin_lora=pin_lora
+            model_name=self.model_name,
+            checkpoint_path=checkpoint_path,
+            pin_lora=pin_lora,
         )
         response = self.client.post(
             "/load_checkpoint", json=request.model_dump(exclude_none=True)
@@ -211,7 +320,9 @@ class SamplingClient(BaseClient):
         import os
 
         request = LoadCheckpointRequest(
-            model_id=self.model_id, checkpoint_path=checkpoint_path, pin_lora=pin_lora
+            model_name=self.model_name,
+            checkpoint_path=checkpoint_path,
+            pin_lora=pin_lora,
         )
         response = await self.async_client.post(
             "/load_checkpoint", json=request.model_dump(exclude_none=True)
@@ -231,13 +342,12 @@ class SamplingClient(BaseClient):
 
     def shutdown(self) -> TinkerbellFuture[ShutdownSamplingActorResponse]:
         """
-                Shutdown the sampling actor.
+        Shutdown the sampling actor.
 
-                Returns:
-        TinkerbellFuture[ShutdownSamplingActorResponse] - call .result() to poll for the response
+        Returns:
+            TinkerbellFuture[ShutdownSamplingActorResponse] - call .result() to poll for the response
         """
-        # Send request immediately
-        request = ShutdownSamplingActorRequest(model_id=self.model_id)
+        request = ShutdownSamplingActorRequest(model_name=self.model_name)
 
         response = self.client.post(
             "/shutdown_sampling_actor",

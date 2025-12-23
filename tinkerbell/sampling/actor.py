@@ -33,32 +33,32 @@ def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Proc
 
 @ray.remote
 class SGLangSamplingActor:
-    def __init__(self, model_id: str, tp_size: int, engine_kwargs: dict = {}):
+    def __init__(self, base_model: str, tp_size: int, engine_kwargs: dict = {}):
         try:
-            self._init_impl(model_id, tp_size, engine_kwargs)
+            self._setup(base_model, tp_size, engine_kwargs)
         except Exception as e:
             logger.error(f"FATAL: SGLangSamplingActor init failed: {e}")
             raise
 
-    def _init_impl(self, model_id: str, tp_size: int, engine_kwargs: dict):
+    def _setup(self, base_model: str, tp_size: int, engine_kwargs: dict):
         from sglang.srt.entrypoints.http_server import launch_server
         from sglang.srt.server_args import ServerArgs
 
-        print(f"🚀 Initializing SGLang: model={model_id}, tp={tp_size}", flush=True)
+        print(f"🚀 Initializing SGLang: model={base_model}, tp={tp_size}", flush=True)
 
         self.client = None
         self.server_process = None
         self.port = self._find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
 
-        engine_kwargs["model_path"] = model_id
+        engine_kwargs["model_path"] = base_model
         engine_kwargs["tp_size"] = tp_size
         engine_kwargs["port"] = self.port
         engine_kwargs["host"] = "127.0.0.1"
 
         if engine_kwargs.get("enable_lora", None) is not False:
             engine_kwargs["enable_lora"] = True
-            engine_kwargs.setdefault("max_loras_per_batch", 64)
+            engine_kwargs.setdefault("max_loras_per_batch", 8)
             engine_kwargs.setdefault("max_lora_rank", 256)
             engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
 
