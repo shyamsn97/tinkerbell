@@ -1,4 +1,3 @@
-# import asyncio
 import asyncio
 import logging
 import uuid
@@ -77,8 +76,8 @@ def returns_future(func):
                 )
 
         _ = asyncio.create_task(_execute())
-        # Small yield to let the task start
-        await asyncio.sleep(0.1)
+        # Minimal yield to let the task start
+        await asyncio.sleep(0)
         return RemoteFuture(request_id=request_id)
 
     return wrapper
@@ -92,7 +91,7 @@ class TinkerbellServiceDeployment:
         self,
         server_url: str,
         max_wait_time: float = 600.0,
-        clock_cycle: float = 0.0,
+        clock_cycle: float = 2.0,
     ):
         self.server_url = server_url
         logger.info(
@@ -130,61 +129,39 @@ class TinkerbellServiceDeployment:
         Query parameters:
             delete_after_retrieval: If true, delete the result after returning it (default: true)
         """
-        # Manually parse the request body
         body = await http_request.json()
-        logger.info(f"[poll_result] ENDPOINT HIT! Body: {body}")
         request = PollResultRequest(**body)
-
-        # Check if we should delete after retrieval (default: true for backward compatibility)
         delete_after = body.get("delete_after_retrieval", True)
 
-        logger.debug(f"[poll_result] Polling for request_id: {request.request_id}")
-        results = await self.global_store.get_result.remote(
-            request_id=request.request_id
-        )
-        logger.debug(
-            f"[poll_result] Result for {request.request_id}: {results is not None}"
-        )
+        # Use pop_result to get and delete in one Ray call (faster)
+        if delete_after:
+            results = await self.global_store.pop_result.remote(
+                request_id=request.request_id
+            )
+        else:
+            results = await self.global_store.get_result.remote(
+                request_id=request.request_id
+            )
+
         if results is None:
             return PollResultResponse(
-                status="pending",
-                request_id=request.request_id,
-                result=None,
+                status="pending", request_id=request.request_id, result=None
             )
 
-        # Check if the result indicates an error
-        if isinstance(results, dict) and results.get("success") is False:
+        # Determine status based on result
+        is_error = isinstance(results, dict) and results.get("success") is False
+        status = "error" if is_error else "completed"
+
+        if is_error:
             logger.error(
-                f"[poll_result] Returning error result for request_id: {request.request_id}, error: {results.get('error')}"
-            )
-            # Clean up the error result from store if requested
-            if delete_after:
-                await self.global_store.delete_result.remote(
-                    request_id=request.request_id
-                )
-                logger.debug(
-                    f"[poll_result] Deleted error result for request_id: {request.request_id}"
-                )
-            return PollResultResponse(
-                status="error",
-                request_id=request.request_id,
-                result=results,
-                error=results.get("error", "Unknown error"),
+                f"[poll_result] Error for {request.request_id}: {results.get('error')}"
             )
 
-        logger.info(
-            f"[poll_result] Returning completed result for request_id: {request.request_id}"
-        )
-        # Clean up the completed result from store if requested
-        if delete_after:
-            await self.global_store.delete_result.remote(request_id=request.request_id)
-            logger.debug(
-                f"[poll_result] Deleted completed result for request_id: {request.request_id}"
-            )
         return PollResultResponse(
-            status="completed",
+            status=status,
             request_id=request.request_id,
             result=results,
+            error=results.get("error") if is_error else None,
         )
 
     @APP.post("/zero_grad")
@@ -197,17 +174,15 @@ class TinkerbellServiceDeployment:
         }
 
     @APP.post("/optim_step")
-    @returns_future
     async def optim_step(self, request: OptimStepRequest) -> RemoteFuture:
-        await self.training_manager.optim_step(
+        if not self.training_manager.running:
+            await self.training_manager.start()
+        return await self.training_manager.optim_step(
             model_name=request.model_name,
             adapter_name=request.adapter_name,
             optimizer_params=request.optimizer_params,
+            immediate=request.immediate,
         )
-        return {
-            "model_name": request.model_name,
-            "message": f"Optimizer stepped for {request.model_name}",
-        }
 
     @APP.get("/health")
     async def health(self) -> HealthResponse:
@@ -277,13 +252,38 @@ class TinkerbellServiceDeployment:
     async def forward_backward(self, request: ForwardBackwardRequest) -> RemoteFuture:
         if not self.training_manager.running:
             await self.training_manager.start()
+
+        # Zero gradients if requested (default True for convenience, False for gradient accumulation)
+        if request.zero_grad:
+            await self.training_manager.zero_grad(model_name=request.model_name)
+
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
             model_name=request.model_name,
             adapter_name=request.adapter_name,
             data=request.data,
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
+            immediate=request.immediate,
         )
+
+        # If optimizer_params provided, wait for forward_backward and run optim_step
+        if request.optimizer_params is not None:
+            # Wait for forward_backward to complete
+            while True:
+                result = await self.global_store.get_result.remote(
+                    request_id=remote_future.request_id
+                )
+                if result is not None:
+                    break
+                await asyncio.sleep(0.005)
+
+            # Run optimizer step
+            await self.training_manager.optim_step(
+                model_name=request.model_name,
+                adapter_name=request.adapter_name,
+                optimizer_params=request.optimizer_params,
+            )
+
         return remote_future
 
     @APP.post("/get_actor_status")
@@ -386,6 +386,12 @@ class TinkerbellServiceDeployment:
         }
         return result
 
+    def _make_result(
+        self, model_name: str, success: bool, message: str
+    ) -> dict[str, Any]:
+        """Create a standard result dict."""
+        return {"model_name": model_name, "success": success, "message": message}
+
     @APP.post("/load_checkpoint")
     @returns_future
     async def load_checkpoint(
@@ -393,23 +399,20 @@ class TinkerbellServiceDeployment:
         request: LoadCheckpointRequest,
     ) -> RemoteFuture:
         try:
-            _ = await self.sampling_manager.load_checkpoint(
+            await self.sampling_manager.load_checkpoint(
                 model_name=request.model_name,
                 checkpoint_path=request.checkpoint_path,
                 pin_lora=request.pin_lora,
             )
-            result = {
-                "model_name": request.model_name,
-                "success": True,
-                "message": f"Checkpoint loading started from {request.checkpoint_path}. Use get_sampling_actor_status to check when ready.",
-            }
+            return self._make_result(
+                request.model_name,
+                True,
+                f"Checkpoint loading started from {request.checkpoint_path}. Use get_sampling_actor_status to check when ready.",
+            )
         except Exception as e:
-            result = {
-                "model_name": request.model_name,
-                "success": False,
-                "message": f"Failed to start checkpoint loading: {str(e)}",
-            }
-        return result
+            return self._make_result(
+                request.model_name, False, f"Failed to start checkpoint loading: {e}"
+            )
 
     @APP.post("/shutdown_sampling_actor")
     @returns_future
@@ -418,25 +421,22 @@ class TinkerbellServiceDeployment:
         request: ShutdownSamplingActorRequest,
     ) -> RemoteFuture:
         try:
-            _ = await self.sampling_manager.shutdown(model_name=request.model_name)
-            result = {
-                "model_name": request.model_name,
-                "success": True,
-                "message": f"Sampling actor '{request.model_name}' shut down successfully",
-            }
+            await self.sampling_manager.shutdown(model_name=request.model_name)
+            return self._make_result(
+                request.model_name,
+                True,
+                f"Sampling actor '{request.model_name}' shut down successfully",
+            )
         except Exception as e:
-            result = {
-                "model_name": request.model_name,
-                "success": False,
-                "message": f"Failed to shutdown sampling actor: {str(e)}",
-            }
-        return result
+            return self._make_result(
+                request.model_name, False, f"Failed to shutdown sampling actor: {e}"
+            )
 
 
 def deploy_service(
     server_url: str,
     max_wait_time: float = 300.0,
-    clock_cycle: float = 010.0,
+    clock_cycle: float = 2.0,
     **deployment_kwargs,
 ):
     """Deploy the TinkerbellService with Ray Serve.
@@ -455,7 +455,6 @@ def deploy_service(
     host, port = get_host_and_port(server_url)
     serve.start(detached=True, http_options={"host": host, "port": port})
 
-    # Apply any custom deployment options if provided
     deployment_kwargs["ray_actor_options"] = {"num_gpus": 0}
 
     deployment = serve.deployment(**deployment_kwargs)(
@@ -476,68 +475,42 @@ def deploy_service(
 def deploy_on_modal(
     server_url: str = "https://0.0.0.0:8000",
     max_wait_time: float = 300.0,
-    clock_cycle: float = 0.0,
+    clock_cycle: float = 2.0,
     gpu: str = "H100",
     num_gpus: int = 1,
     timeout: int = 86400,
     container_idle_timeout: int = 600,
     max_inputs: int = 1000,
 ):
-    """Deploy the TinkerbellService on Modal.
+    """Deploy the TinkerbellService on Modal."""
+    import os
+    import sys
 
-    Args:
-        server_url: URL of the backend training server
-        **deployment_kwargs: Optional Modal deployment configurations
-            (e.g., num_replicas, ray_actor_options, autoscaling_config)
-    """
     try:
-        import os
-        import sys
-
         import modal
         from modal import runner
     except ImportError:
         raise ImportError("Modal is not installed. Install it with: pip install modal")
 
-    # Check if server already exists
     print("Starting server deployment...")
-
     app = modal.App(name="tinkerbell-service")
-
     env_variables = {
         "HF_TOKEN": os.environ.get("HF_TOKEN", None),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
-        "NCCL_DEBUG": "INFO",  # For debugging NCCL issues
-        "TORCH_DISTRIBUTED_BACKEND": "nccl",  # Prefer NCCL
-        # Add these for better visibility:
-        "TORCH_DISTRIBUTED_DEBUG": "INFO",  # Shows distributed init details
-        "TORCH_SHOW_CPP_STACKTRACES": "1",  # If it crashes
-        "SGLANG_LOG_LEVEL": "DEBUG",  # If SGLang respects this
-        "TRANSFORMERS_VERBOSITY": "info",  # See model loading progress
+        "NCCL_DEBUG": "INFO",
+        "TORCH_DISTRIBUTED_BACKEND": "nccl",
         "RAY_DEDUP_LOGS": "0",
     }
-
-    # Define Modal image with required dependencies
     image = (
         modal.Image.from_registry(
             "nvidia/cuda:12.6.0-devel-ubuntu22.04",
             add_python=f"{sys.version_info.major}.{sys.version_info.minor}",
         )
         .apt_install("libnuma-dev", "build-essential", "clang")
-        .env({"CUDA_HOME": "/usr/local/cuda"})  # Add this line
+        .env({"CUDA_HOME": "/usr/local/cuda"})
         .pip_install(
-            "torch==2.4.0",
-            extra_index_url="https://download.pytorch.org/whl/cu126",
+            "torch==2.4.0", extra_index_url="https://download.pytorch.org/whl/cu126"
         )
-        # .pip_install(
-        #     "packaging",
-        #     "ninja",
-        #     "wheel",
-        #     "setuptools",
-        # )
-        # .run_commands(
-        #     "pip install flash-attn==2.8.3 --no-build-isolation",
-        # )
         .uv_pip_install(
             "pybase64",
             "zmq",
@@ -546,10 +519,10 @@ def deploy_on_modal(
             "numpy",
             "fastapi",
             "uvicorn",
-            "pydantic",
+            "pydantic>=2.0",
             "cloudpickle",
             "dill",
-            "flashinfer-python",  # Install FlashInfer first
+            "flashinfer-python",
             "sglang[all]>=0.5.3",
             "sgl-kernel",
             "huggingface_hub",
@@ -559,10 +532,8 @@ def deploy_on_modal(
             "peft",
         )
         .env(env_variables)
+        .add_local_python_source("tinkerbell")
     )
-    image = image.add_local_python_source("tinkerbell")
-
-    # Create a volume for model checkpoints if needed
     volume = modal.Volume.from_name("tinkerbell-checkpoints", create_if_missing=True)
 
     @app.function(
@@ -574,22 +545,15 @@ def deploy_on_modal(
         serialized=True,
     )
     @modal.concurrent(max_inputs=max_inputs)
-    @modal.web_server(
-        8000,
-        label="training-service",
-    )
+    @modal.web_server(8000, label="training-service")
     def serve():
-        # Use Ray Serve within Modal
         deploy_service(
-            server_url=server_url,
-            max_wait_time=max_wait_time,
-            clock_cycle=clock_cycle,
+            server_url=server_url, max_wait_time=max_wait_time, clock_cycle=clock_cycle
         )
 
     print("Deploying server on Modal...")
     with modal.enable_output():
         runner.deploy_app(app)
-
     return modal.Function.from_name(
         "tinkerbell-service", "deploy_on_modal.<locals>.serve"
     ).get_web_url()

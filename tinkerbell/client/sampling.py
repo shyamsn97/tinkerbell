@@ -21,6 +21,7 @@ from tinkerbell.types.responses import (
     SampleResponse,
     ShutdownSamplingActorResponse,
 )
+from tinkerbell.utils import clean_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +87,6 @@ def parse_sample_response(result: dict[str, Any], vocab_size: int) -> SampleResp
     )
 
 
-def _clean_name(name: str) -> str:
-    """Convert a model path to a clean actor name."""
-    return name.replace("/", "_").replace(":", "_").lower()
-
-
 class SamplingClient(BaseClient):
     """Client for interacting with the Tinkerbell sampling service."""
 
@@ -111,23 +107,12 @@ class SamplingClient(BaseClient):
             adapter_name: LoRA adapter name (optional)
             timeout: Request timeout in seconds
         """
-        super().__init__(server_url, timeout)
-        self.base_model = base_model  # HF model path for tokenizer
+        super().__init__(server_url=server_url, timeout=timeout, base_model=base_model)
         self.model_name = (
-            model_name if model_name else _clean_name(base_model)
+            model_name if model_name else clean_model_name(base_model)
         )  # Actor name for routing
         self.adapter_name = adapter_name
         self.lora_path: str | None = None  # Set after load_checkpoint
-        self._tokenizer = None
-
-    def get_tokenizer(self):
-        from transformers import AutoTokenizer
-
-        if self._tokenizer is None:
-            self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
-            if self._tokenizer.pad_token is None:
-                self._tokenizer.pad_token = self._tokenizer.eos_token or 0
-        return self._tokenizer
 
     def wait_until_ready(
         self,
@@ -230,85 +215,68 @@ class SamplingClient(BaseClient):
         def _parse_result(result: dict[str, Any]) -> ActorStatusResponse:
             return ActorStatusResponse(**result)
 
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             remote_future=RemoteFuture(**remote_future_dict),
             parse_result_fn=_parse_result,
         )
 
-    def sample(self, *args, **kwargs) -> TinkerbellFuture[SampleResponse]:
-        """Sample text. Uses lora_path only if adapter_name is set (LoRA mode)."""
+    def _sample_request(self, *args, **kwargs) -> SampleRequest:
         if "model_name" not in kwargs:
             kwargs["model_name"] = self.model_name
-        # Only pass lora_path for LoRA adapters (when adapter_name is set)
         if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
             kwargs["lora_path"] = self.lora_path
+        return SampleRequest(*args, **kwargs)
 
-        request = SampleRequest(*args, **kwargs)
+    def _sample_parser(self):
+        return functools.partial(
+            parse_sample_response, vocab_size=self.get_tokenizer().vocab_size
+        )
+
+    def sample(self, *args, **kwargs) -> TinkerbellFuture[SampleResponse]:
+        """Sample text. Uses lora_path only if adapter_name is set (LoRA mode)."""
+        request = self._sample_request(*args, **kwargs)
         response = self.client.post(
             "/sample", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-
-        tokenizer = self.get_tokenizer()
-        partial_parse_sample_response = functools.partial(
-            parse_sample_response,
-            vocab_size=tokenizer.vocab_size,
-        )
-
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             remote_future=RemoteFuture(**response.json()),
-            parse_result_fn=partial_parse_sample_response,
+            parse_result_fn=self._sample_parser(),
         )
 
     async def sample_async(
         self, *args, **kwargs
     ) -> AsyncTinkerbellFuture[SampleResponse]:
         """Async: Sample text. Uses lora_path only if adapter_name is set."""
-        if "model_name" not in kwargs:
-            kwargs["model_name"] = self.model_name
-        if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
-            kwargs["lora_path"] = self.lora_path
-
-        request = SampleRequest(*args, **kwargs)
-        response = await self.async_client.post(
-            "/sample", json=request.model_dump(exclude_none=True)
-        )
-        response.raise_for_status()
-
-        tokenizer = self.get_tokenizer()
-        partial_parse_sample_response = functools.partial(
-            parse_sample_response,
-            vocab_size=tokenizer.vocab_size,
+        return await self.create_async_future(
+            request=self._sample_request(*args, **kwargs),
+            endpoint="/sample",
+            parse_result_fn=self._sample_parser(),
         )
 
-        return AsyncTinkerbellFuture(
-            remote_future=RemoteFuture(**response.json()),
-            server_url=self.server_url,
-            result_parser=partial_parse_sample_response,
-            poll_interval=1.0,
-            timeout=self.timeout,
+    def _load_checkpoint_request(
+        self, checkpoint_path: str, pin_lora: bool = False
+    ) -> LoadCheckpointRequest:
+        import os
+
+        # Store lora_name (basename) for sample requests - SGLang uses basename as adapter name
+        self.lora_path = os.path.basename(os.path.normpath(checkpoint_path))
+        return LoadCheckpointRequest(
+            model_name=self.model_name,
+            checkpoint_path=checkpoint_path,
+            pin_lora=pin_lora,
         )
 
     def load_checkpoint(
         self, checkpoint_path: str, pin_lora: bool = False
     ) -> TinkerbellFuture[LoadCheckpointResponse]:
         """Load checkpoint from disk. Stores lora_name for subsequent samples."""
-        import os
-
-        request = LoadCheckpointRequest(
-            model_name=self.model_name,
-            checkpoint_path=checkpoint_path,
-            pin_lora=pin_lora,
-        )
+        request = self._load_checkpoint_request(checkpoint_path, pin_lora)
         response = self.client.post(
             "/load_checkpoint", json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-
-        # Store lora_name (basename) for sample requests - SGLang uses basename as adapter name
-        self.lora_path = os.path.basename(os.path.normpath(checkpoint_path))
-
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             remote_future=RemoteFuture(**response.json()),
             parse_result_fn=lambda result: LoadCheckpointResponse(**result),
         )
@@ -317,27 +285,10 @@ class SamplingClient(BaseClient):
         self, checkpoint_path: str, pin_lora: bool = False
     ) -> AsyncTinkerbellFuture[LoadCheckpointResponse]:
         """Async: Load checkpoint. First await submits, second await gets result."""
-        import os
-
-        request = LoadCheckpointRequest(
-            model_name=self.model_name,
-            checkpoint_path=checkpoint_path,
-            pin_lora=pin_lora,
-        )
-        response = await self.async_client.post(
-            "/load_checkpoint", json=request.model_dump(exclude_none=True)
-        )
-        response.raise_for_status()
-
-        # Store lora_name (basename) for sample requests
-        self.lora_path = os.path.basename(os.path.normpath(checkpoint_path))
-
-        return AsyncTinkerbellFuture(
-            remote_future=RemoteFuture(**response.json()),
-            server_url=self.server_url,
-            result_parser=lambda result: LoadCheckpointResponse(**result),
-            poll_interval=1.0,
-            timeout=self.timeout,
+        return await self.create_async_future(
+            request=self._load_checkpoint_request(checkpoint_path, pin_lora),
+            endpoint="/load_checkpoint",
+            parse_result_fn=lambda result: LoadCheckpointResponse(**result),
         )
 
     def shutdown(self) -> TinkerbellFuture[ShutdownSamplingActorResponse]:
@@ -360,37 +311,7 @@ class SamplingClient(BaseClient):
         def _parse_result(result: dict[str, Any]) -> ShutdownSamplingActorResponse:
             return ShutdownSamplingActorResponse(**result)
 
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             remote_future=RemoteFuture(**remote_future_dict),
             parse_result_fn=_parse_result,
         )
-
-    def close(self):
-        """Close the HTTP client."""
-        self.client.close()
-        if self._async_client is not None:
-            import warnings
-
-            warnings.warn(
-                "Async client not closed. Use 'async with' or call await client.aclose()",
-                ResourceWarning,
-            )
-
-    async def aclose(self):
-        """Close both sync and async HTTP clients."""
-        self.client.close()
-        if self._async_client is not None:
-            await self._async_client.aclose()
-            self._async_client = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.aclose()

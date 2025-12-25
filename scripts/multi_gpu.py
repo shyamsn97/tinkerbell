@@ -309,7 +309,6 @@ lora_sampling_client = training_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/task1-attention-qwen",
     tp_size=1,
     wait_until_ready=False,
-    engine_kwargs={"mem_fraction_static": 0.4}  # Reduce KV cache size since training actors still hold memory
 )
 
 # Save adapter 2 - reuses the same sampling actor as adapter 1!
@@ -318,7 +317,6 @@ lora_sampling_client_2 = training_client_2.save_weights_and_get_sampling_client(
     checkpoint_path="/models/task2-mlp-qwen",
     tp_size=1,
     wait_until_ready=False,
-    engine_kwargs={"mem_fraction_static": 0.4}
 )
 
 # Save full model - creates a separate sampling actor (different model_name)
@@ -327,7 +325,6 @@ full_sampling_client = full_model_client.save_weights_and_get_sampling_client(
     checkpoint_path="/models/full-qwen",
     tp_size=1,
     wait_until_ready=False,
-    engine_kwargs={"mem_fraction_static": 0.4}
 )
 
 lora_sampling_client.wait_until_ready()
@@ -450,6 +447,6 @@ print(f"Avg time per request: {elapsed / (len(all_prompts) * 3):.3f}s")
 print("=" * 70)
 
 print("Logprobs:")
-print(lora1_results[0].logprobs.to_numpy()[0])
+print(lora1_results[0].logprobs[0])
 # print(lora2_results[0].logprobs)
 # print(full_results[0].logprobs)

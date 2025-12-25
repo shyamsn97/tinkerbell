@@ -1,7 +1,5 @@
 from typing import Any, Optional
 
-from typing_extensions import Literal
-
 from ._models import BaseModel, StrictBase
 
 DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
@@ -11,30 +9,12 @@ DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
     "eps": 1e-8,
     "weight_decay": 0.01,
 }
-DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {
-    "scheduler": "cosine",
-}
-
-
-class AdamParams(StrictBase):
-    """Adam optimizer parameters."""
-
-    learning_rate: float = 0.0001
-    """Learning rate for the optimizer"""
-
-    beta1: float = 0.9
-    """Coefficient used for computing running averages of gradient"""
-
-    beta2: float = 0.95
-    """Coefficient used for computing running averages of gradient square"""
-
-    eps: float = 1e-12
-    """Term added to the denominator to improve numerical stability"""
+DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {"scheduler": "cosine"}
 
 
 class ZeroGradRequest(StrictBase):
-    model_name: str  # Actor group name for routing
-    adapter_name: Optional[str] = None  # Which LoRA adapter
+    model_name: str
+    adapter_name: Optional[str] = None
 
 
 class ZeroGradResponse(BaseModel):
@@ -43,12 +23,11 @@ class ZeroGradResponse(BaseModel):
 
 
 class OptimStepRequest(StrictBase):
-    model_name: str  # Actor group name for routing
-    adapter_name: Optional[str] = None  # Which LoRA adapter
-    optimizer_params: dict[str, Any]
-    adam_params: Optional[AdamParams] = None
-    seq_id: Optional[int] = None
-    type: Optional[Literal["optim_step"]] = None
+    model_name: str
+    request_id: Optional[str] = None
+    adapter_name: Optional[str] = None
+    optimizer_params: dict[str, Any] = {}
+    immediate: bool = False  # If True, process the batch queue immediately
 
 
 class OptimStepResponse(BaseModel):

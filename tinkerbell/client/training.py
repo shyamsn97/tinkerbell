@@ -23,13 +23,9 @@ from tinkerbell.types.responses import (
     RemoteFuture,
     SaveCheckpointResponse,
 )
+from tinkerbell.utils import clean_model_name
 
 logger = logging.getLogger(__name__)
-
-
-def _clean_name(name: str) -> str:
-    """Convert a model path to a clean actor name."""
-    return name.replace("/", "_").replace(":", "_").lower()
 
 
 class TrainingClient(BaseClient):
@@ -45,22 +41,11 @@ class TrainingClient(BaseClient):
         lora_enabled: bool = False,
         lora_config: Optional[dict[str, Any]] = None,
     ):
-        super().__init__(server_url, timeout)
-        self.base_model = base_model
-        self.model_name = model_name if model_name else _clean_name(base_model)
+        super().__init__(server_url=server_url, timeout=timeout, base_model=base_model)
+        self.model_name = model_name if model_name else clean_model_name(base_model)
         self.adapter_name = adapter_name
         self.lora_enabled = lora_enabled
         self.lora_config = lora_config
-        self._tokenizer = None
-
-    def get_tokenizer(self):
-        from transformers import AutoTokenizer
-
-        if self._tokenizer is None:
-            self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
-            if self._tokenizer.pad_token is None:
-                self._tokenizer.pad_token = self._tokenizer.eos_token or 0
-        return self._tokenizer
 
     def wait_until_ready(
         self, poll_interval: float = 2.0, verbose: bool = True
@@ -87,30 +72,21 @@ class TrainingClient(BaseClient):
 
     # ===== Training operations =====
 
+    def _zero_grad_request(self) -> ZeroGradRequest:
+        return ZeroGradRequest(
+            model_name=self.model_name, adapter_name=self.adapter_name
+        )
+
     def zero_grad(self) -> TinkerbellFuture[dict[str, Any]]:
         """Zero out gradients."""
         return self.create_future(
-            request=ZeroGradRequest(
-                model_name=self.model_name, adapter_name=self.adapter_name
-            ),
-            endpoint="/zero_grad",
+            request=self._zero_grad_request(), endpoint="/zero_grad"
         )
 
     async def zero_grad_async(self) -> AsyncTinkerbellFuture[dict[str, Any]]:
         """Async: Zero out gradients."""
-        request = ZeroGradRequest(
-            model_name=self.model_name, adapter_name=self.adapter_name
-        )
-        response = await self.async_client.post(
-            "/zero_grad", json=request.model_dump(exclude_none=True)
-        )
-        response.raise_for_status()
-        return AsyncTinkerbellFuture(
-            remote_future=RemoteFuture(**response.json()),
-            server_url=self.server_url,
-            result_parser=lambda x: x,
-            poll_interval=1.0,
-            timeout=self.timeout,
+        return await self.create_async_future(
+            request=self._zero_grad_request(), endpoint="/zero_grad"
         )
 
     def _build_forward_request(
@@ -152,7 +128,7 @@ class TrainingClient(BaseClient):
         initial = ForwardResponse(**response.json())
 
         parse = lambda result: self._parse_forward_response(initial, result)
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             remote_future=RemoteFuture(
                 request_id=initial.request_id, model_name=initial.model_name
             ),
@@ -171,15 +147,13 @@ class TrainingClient(BaseClient):
         response.raise_for_status()
         initial = ForwardResponse(**response.json())
 
-        parse = lambda result: self._parse_forward_response(initial, result)
-        return AsyncTinkerbellFuture(
+        return self.create_async_future_from_request_id(
             remote_future=RemoteFuture(
                 request_id=initial.request_id, model_name=initial.model_name
             ),
-            server_url=self.server_url,
-            result_parser=parse,
-            poll_interval=1.0,
-            timeout=self.timeout,
+            parse_result_fn=lambda result: self._parse_forward_response(
+                initial, result
+            ),
         )
 
     def _build_forward_backward_request(
@@ -187,15 +161,23 @@ class TrainingClient(BaseClient):
         data: list[Datum],
         forward_kwargs: Optional[dict[str, Any]],
         return_logprobs: bool,
+        zero_grad: bool,
+        optimizer_params: Optional[dict[str, Any]],
+        immediate: bool = False,
     ) -> dict[str, Any]:
         """Build forward_backward request payload."""
-        return {
+        payload = {
             "model_name": self.model_name,
             "adapter_name": self.adapter_name,
             "data": [datum.model_dump() for datum in data],
             "forward_kwargs": forward_kwargs or {},
             "return_logprobs": return_logprobs,
+            "zero_grad": zero_grad,
+            "immediate": immediate,
         }
+        if optimizer_params is not None:
+            payload["optimizer_params"] = optimizer_params
+        return payload
 
     def _parse_forward_backward_response(
         self, initial: ForwardBackwardResponse, result: dict[str, Any]
@@ -216,17 +198,36 @@ class TrainingClient(BaseClient):
         data: list[Datum],
         forward_kwargs: Optional[dict[str, Any]] = None,
         return_logprobs: bool = False,
+        zero_grad: bool = True,
+        optimizer_params: Optional[dict[str, Any]] = None,
+        immediate: bool = False,
     ) -> TinkerbellFuture[ForwardBackwardResponse]:
-        """Perform forward and backward pass."""
+        """Perform forward and backward pass, optionally with optimizer step.
+
+        Args:
+            data: List of Datum objects to process
+            forward_kwargs: Additional kwargs for forward pass
+            return_logprobs: Whether to return logprobs
+            zero_grad: Whether to zero gradients before forward/backward (default True).
+                      Set to False for gradient accumulation.
+            optimizer_params: If provided, run optim_step after backward (single round trip).
+                            Example: {"name": "adam", "lr": 1e-4}
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
         request_data = self._build_forward_backward_request(
-            data, forward_kwargs, return_logprobs
+            data,
+            forward_kwargs,
+            return_logprobs,
+            zero_grad,
+            optimizer_params,
+            immediate,
         )
         response = self.client.post("/forward_backward", json=request_data)
         response.raise_for_status()
         initial = ForwardBackwardResponse(**response.json())
 
         parse = lambda result: self._parse_forward_backward_response(initial, result)
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             remote_future=RemoteFuture(
                 request_id=initial.request_id, model_name=initial.model_name
             ),
@@ -238,75 +239,105 @@ class TrainingClient(BaseClient):
         data: list[Datum],
         forward_kwargs: Optional[dict[str, Any]] = None,
         return_logprobs: bool = False,
+        zero_grad: bool = True,
+        optimizer_params: Optional[dict[str, Any]] = None,
+        immediate: bool = False,
     ) -> AsyncTinkerbellFuture[ForwardBackwardResponse]:
-        """Async: Perform forward and backward pass. First await submits request, second await gets result."""
+        """Async: Perform forward and backward pass, optionally with optimizer step.
+
+        Args:
+            data: List of Datum objects to process
+            forward_kwargs: Additional kwargs for forward pass
+            return_logprobs: Whether to return logprobs
+            zero_grad: Whether to zero gradients before forward/backward (default True).
+                      Set to False for gradient accumulation.
+            optimizer_params: If provided, run optim_step after backward (single round trip).
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
         request_data = self._build_forward_backward_request(
-            data, forward_kwargs, return_logprobs
+            data,
+            forward_kwargs,
+            return_logprobs,
+            zero_grad,
+            optimizer_params,
+            immediate,
         )
         response = await self.async_client.post("/forward_backward", json=request_data)
         response.raise_for_status()
         initial = ForwardBackwardResponse(**response.json())
 
-        parse = lambda result: self._parse_forward_backward_response(initial, result)
-        return AsyncTinkerbellFuture(
+        return self.create_async_future_from_request_id(
             remote_future=RemoteFuture(
                 request_id=initial.request_id, model_name=initial.model_name
             ),
-            server_url=self.server_url,
-            result_parser=parse,
-            poll_interval=1.0,
-            timeout=self.timeout,
+            parse_result_fn=lambda result: self._parse_forward_backward_response(
+                initial, result
+            ),
         )
 
     def get_result(self, request_id: str) -> TinkerbellFuture[dict[str, Any]]:
         """Get the result of an async forward/backward request (deprecated)."""
-        return self.create_future_from_request_id(
+        return self.create_future_from_remote(
             RemoteFuture(request_id=request_id, model_name=self.model_name)
         )
 
-    def optim_step(
-        self, optimizer_params: Optional[dict[str, Any]] = None
-    ) -> TinkerbellFuture[dict[str, Any]]:
-        """Perform optimizer step for this client's adapter."""
-        request = OptimStepRequest(
+    def _optim_step_request(
+        self,
+        optimizer_params: Optional[dict[str, Any]] = None,
+        immediate: bool = False,
+    ) -> OptimStepRequest:
+        return OptimStepRequest(
             model_name=self.model_name,
             adapter_name=self.adapter_name,
             optimizer_params=optimizer_params or {},
+            immediate=immediate,
         )
-        return self.create_future(request=request, endpoint="/optim_step")
+
+    def optim_step(
+        self,
+        optimizer_params: Optional[dict[str, Any]] = None,
+        immediate: bool = False,
+    ) -> TinkerbellFuture[dict[str, Any]]:
+        """Perform optimizer step for this client's adapter.
+
+        Args:
+            optimizer_params: Optimizer configuration (e.g. {"name": "adam", "lr": 1e-4})
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
+        return self.create_future(
+            request=self._optim_step_request(optimizer_params, immediate),
+            endpoint="/optim_step",
+        )
 
     async def optim_step_async(
-        self, optimizer_params: Optional[dict[str, Any]] = None
+        self,
+        optimizer_params: Optional[dict[str, Any]] = None,
+        immediate: bool = False,
     ) -> AsyncTinkerbellFuture[dict[str, Any]]:
-        """Async: Perform optimizer step for this client's adapter."""
-        request = OptimStepRequest(
+        """Async: Perform optimizer step for this client's adapter.
+
+        Args:
+            optimizer_params: Optimizer configuration (e.g. {"name": "adam", "lr": 1e-4})
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
+        return await self.create_async_future(
+            request=self._optim_step_request(optimizer_params, immediate),
+            endpoint="/optim_step",
+        )
+
+    def _save_checkpoint_request(self, checkpoint_path: str) -> SaveCheckpointRequest:
+        return SaveCheckpointRequest(
             model_name=self.model_name,
+            checkpoint_path=checkpoint_path,
             adapter_name=self.adapter_name,
-            optimizer_params=optimizer_params or {},
-        )
-        response = await self.async_client.post(
-            "/optim_step", json=request.model_dump(exclude_none=True)
-        )
-        response.raise_for_status()
-        return AsyncTinkerbellFuture(
-            remote_future=RemoteFuture(**response.json()),
-            server_url=self.server_url,
-            result_parser=lambda x: x,
-            poll_interval=1.0,
-            timeout=self.timeout,
         )
 
     def save_checkpoint(
         self, checkpoint_path: str
     ) -> TinkerbellFuture[SaveCheckpointResponse]:
         """Save model checkpoint (or specific adapter if lora_enabled)."""
-        request = SaveCheckpointRequest(
-            model_name=self.model_name,
-            checkpoint_path=checkpoint_path,
-            adapter_name=self.adapter_name,
-        )
         return self.create_future(
-            request=request,
+            request=self._save_checkpoint_request(checkpoint_path),
             endpoint="/save_checkpoint",
             parse_result_fn=lambda r: SaveCheckpointResponse(**r),
         )
@@ -315,21 +346,28 @@ class TrainingClient(BaseClient):
         self, checkpoint_path: str
     ) -> AsyncTinkerbellFuture[SaveCheckpointResponse]:
         """Async: Save model checkpoint."""
-        request = SaveCheckpointRequest(
+        return await self.create_async_future(
+            request=self._save_checkpoint_request(checkpoint_path),
+            endpoint="/save_checkpoint",
+            parse_result_fn=lambda r: SaveCheckpointResponse(**r),
+        )
+
+    def _push_to_hub_request(
+        self,
+        repo_id: str,
+        token: Optional[str] = None,
+        private: bool = False,
+        commit_message: Optional[str] = None,
+        push_kwargs: Optional[dict[str, Any]] = None,
+    ) -> PushToHubRequest:
+        return PushToHubRequest(
             model_name=self.model_name,
-            checkpoint_path=checkpoint_path,
+            repo_id=repo_id,
             adapter_name=self.adapter_name,
-        )
-        response = await self.async_client.post(
-            "/save_checkpoint", json=request.model_dump(exclude_none=True)
-        )
-        response.raise_for_status()
-        return AsyncTinkerbellFuture(
-            remote_future=RemoteFuture(**response.json()),
-            server_url=self.server_url,
-            result_parser=lambda r: SaveCheckpointResponse(**r),
-            poll_interval=1.0,
-            timeout=self.timeout,
+            token=token,
+            private=private,
+            commit_message=commit_message,
+            push_kwargs=push_kwargs or {},
         )
 
     def push_to_hub(
@@ -340,23 +378,12 @@ class TrainingClient(BaseClient):
         commit_message: Optional[str] = None,
         push_kwargs: Optional[dict[str, Any]] = None,
     ) -> TinkerbellFuture[PushToHubResponse]:
-        """Push model to Hugging Face Hub (or specific adapter if lora_enabled).
-
-        The repository will be created automatically if it doesn't exist.
-        Requires authentication via token or huggingface_hub login.
-        """
+        """Push model to Hugging Face Hub. Auto-creates repo if needed."""
         logger.info(f"Pushing model to Hugging Face Hub: {repo_id}")
-        request = PushToHubRequest(
-            model_name=self.model_name,
-            repo_id=repo_id,
-            adapter_name=self.adapter_name,
-            token=token,
-            private=private,
-            commit_message=commit_message,
-            push_kwargs=push_kwargs or {},
-        )
         return self.create_future(
-            request=request,
+            request=self._push_to_hub_request(
+                repo_id, token, private, commit_message, push_kwargs
+            ),
             endpoint="/push_to_hub",
             parse_result_fn=lambda r: PushToHubResponse(**r),
         )
@@ -369,31 +396,14 @@ class TrainingClient(BaseClient):
         commit_message: Optional[str] = None,
         push_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncTinkerbellFuture[PushToHubResponse]:
-        """Async: Push model to Hugging Face Hub.
-
-        The repository will be created automatically if it doesn't exist.
-        Requires authentication via token or huggingface_hub login.
-        """
+        """Async: Push model to Hugging Face Hub. Auto-creates repo if needed."""
         logger.info(f"Pushing model to Hugging Face Hub: {repo_id}")
-        request = PushToHubRequest(
-            model_name=self.model_name,
-            repo_id=repo_id,
-            adapter_name=self.adapter_name,
-            token=token,
-            private=private,
-            commit_message=commit_message,
-            push_kwargs=push_kwargs or {},
-        )
-        response = await self.async_client.post(
-            "/push_to_hub", json=request.model_dump(exclude_none=True)
-        )
-        response.raise_for_status()
-        return AsyncTinkerbellFuture(
-            remote_future=RemoteFuture(**response.json()),
-            server_url=self.server_url,
-            result_parser=lambda r: PushToHubResponse(**r),
-            poll_interval=1.0,
-            timeout=self.timeout,
+        return await self.create_async_future(
+            request=self._push_to_hub_request(
+                repo_id, token, private, commit_message, push_kwargs
+            ),
+            endpoint="/push_to_hub",
+            parse_result_fn=lambda r: PushToHubResponse(**r),
         )
 
     def save_weights_and_get_sampling_client(
@@ -447,40 +457,9 @@ class TrainingClient(BaseClient):
         if wait_until_ready:
             sampling_client.wait_until_ready()
 
-        # Only load checkpoint for LoRA (full model already loaded from checkpoint path)
-        if is_lora:
-            sampling_client.load_checkpoint(checkpoint_path).result()
+        # Always load checkpoint - handles both:
+        # - LoRA: loads adapter into base model
+        # - Full model: updates weights (needed if actor was reconnected with old weights)
+        sampling_client.load_checkpoint(checkpoint_path).result()
 
         return sampling_client
-
-    # ===== Cleanup =====
-
-    def close(self):
-        """Close the HTTP client."""
-        self.client.close()
-        if self._async_client is not None:
-            import warnings
-
-            warnings.warn(
-                "Async client not closed. Use 'async with' or call await client.aclose()",
-                ResourceWarning,
-            )
-
-    async def aclose(self):
-        """Close both sync and async HTTP clients."""
-        self.client.close()
-        if self._async_client is not None:
-            await self._async_client.aclose()
-            self._async_client = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.aclose()

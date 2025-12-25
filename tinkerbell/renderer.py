@@ -1,3 +1,5 @@
+# adapted from https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/renderers.py
+
 from enum import StrEnum
 
 from transformers import AutoTokenizer
@@ -18,7 +20,7 @@ class TrainOnWhat(StrEnum):
 
 
 class Renderer:
-    """Helper class to render chat messages into training examples with proper masking."""
+    """Render chat messages into training examples with proper masking."""
 
     def __init__(self, tokenizer: AutoTokenizer):
         self.tokenizer = tokenizer
@@ -26,19 +28,13 @@ class Renderer:
     def _get_message_token_ranges(
         self, messages: list[dict[str, str]]
     ) -> list[tuple[int, int]]:
-        """Get token ranges (start, end) for each message.
-
-        Returns list of (start_idx, end_idx) tuples where message i spans tokens [start:end].
-        """
+        """Get token ranges (start, end) for each message."""
         ranges = []
         for i in range(len(messages)):
-            # Tokenize up to current message
             text_so_far = self.tokenizer.apply_chat_template(
                 messages[: i + 1], tokenize=False, add_generation_prompt=False
             )
             tokens_so_far = self.tokenizer.encode(text_so_far, add_special_tokens=True)
-
-            # Tokenize up to previous message
             if i > 0:
                 text_before = self.tokenizer.apply_chat_template(
                     messages[:i], tokenize=False, add_generation_prompt=True
@@ -49,7 +45,6 @@ class Renderer:
                 ranges.append((len(tokens_before), len(tokens_so_far)))
             else:
                 ranges.append((0, len(tokens_so_far)))
-
         return ranges
 
     def _create_labels(
@@ -59,25 +54,16 @@ class Renderer:
         train_roles: set[str] | None,
         mask_value: int,
     ) -> list[int]:
-        """Create labels by masking tokens not in train_roles.
-
-        Args:
-            messages: List of messages
-            full_ids: Full token IDs
-            train_roles: Set of roles to train on, or None to train on all
-            mask_value: Value to use for masked tokens
-        """
+        """Create labels by masking tokens not in train_roles."""
         if train_roles is None:
             return full_ids.copy()
-
         labels = [mask_value] * len(full_ids)
-        ranges = self._get_message_token_ranges(messages)
-
-        for msg, (start, end) in zip(messages, ranges):
+        for msg, (start, end) in zip(
+            messages, self._get_message_token_ranges(messages)
+        ):
             if msg["role"] in train_roles:
                 for j in range(start, min(end, len(labels))):
                     labels[j] = full_ids[j]
-
         return labels
 
     def build_message_samples(
@@ -86,62 +72,32 @@ class Renderer:
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
         mask_value: int = MASK_TOKEN_ID,
     ) -> Datum:
-        """Build a single supervised training example from chat messages.
-
-        Args:
-            messages: List of chat messages with 'role' and 'content' keys
-            train_on_what: Which parts of the conversation to train on
-            mask_value: Value to use for masked tokens (default: MASK_TOKEN_ID)
-
-        Returns:
-            Datum object with properly masked and shifted labels for next-token prediction
-
-        Example:
-            >>> messages = [
-            ...     {"role": "user", "content": "What is 2+2?"},
-            ...     {"role": "assistant", "content": "The answer is 4."},
-            ... ]
-            >>> datum = renderer.build_single_message_sample(
-            ...     messages,
-            ...     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE
-            ... )
-        """
-        # Tokenize full conversation
+        """Build a supervised training example from chat messages."""
         full_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False
         )
         full_ids = self.tokenizer.encode(full_text, add_special_tokens=True)
 
-        # Determine which roles to train on
-        if train_on_what == TrainOnWhat.ALL_TOKENS:
-            train_roles = None  # Train on everything
-        elif train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
-            # Special case: only train on last assistant message
+        train_roles = None
+        if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
             labels = [mask_value] * len(full_ids)
             if messages and messages[-1]["role"] == "assistant":
-                ranges = self._get_message_token_ranges(messages)
-                start, end = ranges[-1]
+                start, end = self._get_message_token_ranges(messages)[-1]
                 for j in range(start, min(end, len(labels))):
                     labels[j] = full_ids[j]
             else:
                 labels = full_ids.copy()
         elif train_on_what == TrainOnWhat.ALL_ASSISTANT_MESSAGES:
             train_roles = {"assistant"}
-        elif train_on_what == TrainOnWhat.ALL_MESSAGES:
-            train_roles = None  # Train on everything
         elif train_on_what == TrainOnWhat.ALL_USER_AND_SYSTEM_MESSAGES:
             train_roles = {"user", "system"}
-        else:
+        elif train_on_what not in (TrainOnWhat.ALL_TOKENS, TrainOnWhat.ALL_MESSAGES):
             raise ValueError(f"Unknown train_on_what mode: {train_on_what}")
 
-        # Create labels (except for LAST_ASSISTANT_MESSAGE which is handled above)
         if train_on_what != TrainOnWhat.LAST_ASSISTANT_MESSAGE:
             labels = self._create_labels(messages, full_ids, train_roles, mask_value)
 
-        # Shift labels for next-token prediction: labels[i] = full_ids[i+1]
         labels = labels[1:] + [mask_value]
-
-        # Create attention mask (all ones since all tokens are valid)
         attention_mask = [1] * len(full_ids)
 
         return Datum(
@@ -164,35 +120,9 @@ class Renderer:
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
         mask_value: int = MASK_TOKEN_ID,
     ) -> list[Datum]:
-        """Build multiple training examples from a list of messages.
-
-        Args:
-            messages: List of messages, where each message is a list of messages
-            train_on_what: Which parts of the conversation to train on
-            mask_value: Value to use for masked tokens (default: MASK_TOKEN_ID)
-
-        Returns:
-            List of Datum objects, one per message.
-
-        Example:
-            >>> messages = [
-            ...     [
-            ...         {"role": "user", "content": "What is 2+2?"},
-            ...         {"role": "assistant", "content": "4"},
-            ...     ],
-            ...     [
-            ...         {"role": "user", "content": "What is 3+3?"},
-            ...         {"role": "assistant", "content": "6"},
-            ...     ],
-            ... ]
-            >>> data = renderer.build_chat_samples(
-            ...     conversations,
-            ...     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE
-            ... )
-        """
+        """Build training examples from messages (single or batch)."""
         if isinstance(messages[0], dict):
             messages = [messages]
         return [
-            self.build_message_samples(message, train_on_what, mask_value)
-            for message in messages
+            self.build_message_samples(m, train_on_what, mask_value) for m in messages
         ]

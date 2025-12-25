@@ -18,8 +18,9 @@ class BaseFuture(ABC, Generic[T]):
         remote_future: RemoteFuture,
         server_url: str,
         result_parser: Callable[[dict[str, Any]], T],
-        poll_interval: float = 1.0,
+        poll_interval: float = 0.005,  # 5ms default poll interval
         timeout: float | None = None,
+        client: httpx.Client | None = None,  # Reuse existing client
     ):
         self._remote_future = remote_future
         self._server_url = server_url
@@ -28,6 +29,7 @@ class BaseFuture(ABC, Generic[T]):
         self._timeout = timeout
         self._result = None
         self._resolved = False
+        self._shared_client = client  # Reuse connection
 
     @property
     def done(self) -> bool:
@@ -39,8 +41,8 @@ class BaseFuture(ABC, Generic[T]):
 
     def _get_client_config(self) -> tuple[httpx.Timeout, httpx.Limits]:
         """Get HTTP client configuration."""
-        timeout_config = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
-        limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
+        timeout_config = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+        limits = httpx.Limits(max_connections=10, max_keepalive_connections=5)
         return timeout_config, limits
 
     def _handle_poll_response(self, status: str, data: dict[str, Any]) -> T | None:
@@ -69,66 +71,80 @@ class BaseFuture(ABC, Generic[T]):
 class TinkerbellFuture(BaseFuture[T]):
     """Sync future for Tinkerbell operations."""
 
+    def _poll_once(self, client: httpx.Client) -> T | None:
+        """Single poll attempt. Returns result if ready, None if pending."""
+        response = client.post("/poll_result", json=self._make_poll_payload())
+        response.raise_for_status()
+        data = response.json()
+        return self._handle_poll_response(data.get("status", "pending"), data)
+
     def result(self) -> T:
         if self._resolved:
             return self._result
 
         start_time = time.time()
-        time.sleep(0.1)
 
+        # Reuse shared client if available (faster - keeps connection alive)
+        if self._shared_client is not None:
+            while True:
+                self._check_timeout(start_time)
+                result = self._poll_once(self._shared_client)
+                if result is not None:
+                    return result
+                time.sleep(self._poll_interval)
+
+        # Fallback: create new client (slower but works without shared client)
         timeout_config, limits = self._get_client_config()
-
         with httpx.Client(
             base_url=self._server_url, timeout=timeout_config, limits=limits
         ) as client:
             while True:
-                if self._resolved:
-                    return self._result
-
                 self._check_timeout(start_time)
-
-                response = client.post("/poll_result", json=self._make_poll_payload())
-                response.raise_for_status()
-                data = response.json()
-
-                result = self._handle_poll_response(data.get("status", "pending"), data)
+                result = self._poll_once(client)
                 if result is not None:
                     return result
-
                 time.sleep(self._poll_interval)
 
 
 class AsyncTinkerbellFuture(BaseFuture[T]):
     """Async future for Tinkerbell operations. Usage: future = await client.op_async(); result = await future"""
 
+    def __init__(self, *args, async_client: httpx.AsyncClient | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._shared_async_client = async_client
+
+    async def _poll_once(self, client: httpx.AsyncClient) -> T | None:
+        """Single poll attempt. Returns result if ready, None if pending."""
+        response = await client.post("/poll_result", json=self._make_poll_payload())
+        response.raise_for_status()
+        data = response.json()
+        return self._handle_poll_response(data.get("status", "pending"), data)
+
     async def _poll_for_result(self) -> T:
         if self._resolved:
             return self._result
 
         start_time = time.time()
-        await asyncio.sleep(0.1)
 
+        # Reuse shared client if available
+        if self._shared_async_client is not None:
+            while True:
+                self._check_timeout(start_time)
+                result = await self._poll_once(self._shared_async_client)
+                if result is not None:
+                    return result
+                await asyncio.sleep(self._poll_interval)
+
+        # Fallback: create new client
         timeout_config, limits = self._get_client_config()
-
         async with httpx.AsyncClient(
             base_url=self._server_url, timeout=timeout_config, limits=limits
         ) as client:
             while True:
-                if self._resolved:
-                    return self._result
-
                 self._check_timeout(start_time)
-
-                response = await client.post(
-                    "/poll_result", json=self._make_poll_payload()
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                result = self._handle_poll_response(data.get("status", "pending"), data)
+                result = await self._poll_once(client)
                 if result is not None:
                     return result
-
                 await asyncio.sleep(self._poll_interval)
 
     def __await__(self):
@@ -136,11 +152,18 @@ class AsyncTinkerbellFuture(BaseFuture[T]):
 
 
 class BaseClient:
-    def __init__(self, server_url: str | None = None, timeout: float = 600.0):
+    def __init__(
+        self,
+        server_url: str | None = None,
+        timeout: float = 600.0,
+        base_model: str | None = None,
+    ):
         self.server_url = server_url
         self.timeout = timeout
+        self.base_model = base_model
         self._client = None
         self._async_client = None
+        self._tokenizer = None
 
     @property
     def client(self) -> httpx.Client:
@@ -158,31 +181,50 @@ class BaseClient:
             self._async_client = self._create_async_client()
         return self._async_client
 
-    def _create_client(self) -> httpx.Client:
-        timeout_config = httpx.Timeout(
-            connect=30.0, read=self.timeout, write=30.0, pool=30.0
-        )
+    def _get_client_config(self):
+        timeout = httpx.Timeout(connect=30.0, read=self.timeout, write=30.0, pool=30.0)
         limits = httpx.Limits(max_connections=200, max_keepalive_connections=100)
-        transport = httpx.HTTPTransport(retries=3, limits=limits)
+        return timeout, limits
+
+    def _create_client(self) -> httpx.Client:
+        timeout, limits = self._get_client_config()
         return httpx.Client(
             base_url=self.server_url,
-            timeout=timeout_config,
-            transport=transport,
+            timeout=timeout,
+            http2=True,
+            transport=httpx.HTTPTransport(retries=3, limits=limits),
             follow_redirects=True,
         )
 
     def _create_async_client(self) -> httpx.AsyncClient:
-        timeout_config = httpx.Timeout(
-            connect=30.0, read=self.timeout, write=30.0, pool=30.0
-        )
-        limits = httpx.Limits(max_connections=200, max_keepalive_connections=100)
-        transport = httpx.AsyncHTTPTransport(retries=3, limits=limits)
+        timeout, limits = self._get_client_config()
         return httpx.AsyncClient(
             base_url=self.server_url,
-            timeout=timeout_config,
-            transport=transport,
+            timeout=timeout,
+            http2=True,
+            transport=httpx.AsyncHTTPTransport(retries=3, limits=limits),
             follow_redirects=True,
         )
+
+    def _make_future(self, remote_future: RemoteFuture, parse_fn, is_async=False):
+        if is_async:
+            return AsyncTinkerbellFuture(
+                remote_future=remote_future,
+                server_url=self.server_url,
+                result_parser=parse_fn or (lambda x: x),
+                poll_interval=0.005,  # 5ms polling
+                timeout=self.timeout,
+                async_client=self._async_client,  # Reuse connection
+            )
+        else:
+            return TinkerbellFuture(
+                remote_future=remote_future,
+                server_url=self.server_url,
+                result_parser=parse_fn or (lambda x: x),
+                poll_interval=0.005,  # 5ms polling
+                timeout=self.timeout,
+                client=self._client,  # Reuse connection
+            )
 
     def create_future(
         self,
@@ -190,30 +232,78 @@ class BaseClient:
         endpoint: str,
         parse_result_fn: Callable[[dict[str, Any]], Any] | None = None,
     ) -> TinkerbellFuture[Any]:
-        if parse_result_fn is None:
-            parse_result_fn = lambda x: x
-
         response = self.client.post(
             endpoint, json=request.model_dump(exclude_none=True)
         )
         response.raise_for_status()
-        remote_future = RemoteFuture(**response.json())
-        return self.create_future_from_request_id(
-            remote_future=remote_future, parse_result_fn=parse_result_fn
-        )
+        return self._make_future(RemoteFuture(**response.json()), parse_result_fn)
 
-    def create_future_from_request_id(
+    def create_future_from_remote(
         self,
         remote_future: RemoteFuture,
         parse_result_fn: Callable[[dict[str, Any]], Any] | None = None,
     ) -> TinkerbellFuture[Any]:
-        if parse_result_fn is None:
-            parse_result_fn = lambda x: x
+        return self._make_future(remote_future, parse_result_fn)
 
-        return TinkerbellFuture(
-            remote_future=remote_future,
-            server_url=self.server_url,
-            result_parser=parse_result_fn,
-            poll_interval=1.0,
-            timeout=self.timeout,
+    async def create_async_future(
+        self,
+        request: Any,
+        endpoint: str,
+        parse_result_fn: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> AsyncTinkerbellFuture[Any]:
+        response = await self.async_client.post(
+            endpoint, json=request.model_dump(exclude_none=True)
         )
+        response.raise_for_status()
+        return self._make_future(
+            RemoteFuture(**response.json()), parse_result_fn, is_async=True
+        )
+
+    def create_async_future_from_request_id(
+        self,
+        remote_future: RemoteFuture,
+        parse_result_fn: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> AsyncTinkerbellFuture[Any]:
+        return self._make_future(remote_future, parse_result_fn, is_async=True)
+
+    def get_tokenizer(self):
+        """Get or create a tokenizer for the base model."""
+        if self.base_model is None:
+            raise ValueError("base_model is required to get tokenizer")
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
+
+            self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token or 0
+        return self._tokenizer
+
+    def close(self):
+        """Close the HTTP client."""
+        self.client.close()
+        if self._async_client is not None:
+            import warnings
+
+            warnings.warn(
+                "Async client not closed. Use 'async with' or call await client.aclose()",
+                ResourceWarning,
+            )
+
+    async def aclose(self):
+        """Close both sync and async HTTP clients."""
+        self.client.close()
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()

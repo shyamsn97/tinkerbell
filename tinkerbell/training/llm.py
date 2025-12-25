@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import shutil
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -19,20 +19,8 @@ from torch.distributed.tensor.parallel import (
 )
 
 from tinkerbell.types.datum import Datum
-from tinkerbell.types.lora_config import LoraConfig
+from tinkerbell.types.lora_config import SUPPORTED_LORA_TARGET_MODULES, LoraConfig
 from tinkerbell.utils import get_submodules_with_wildcard
-
-SUPPORTED_LORA_TARGET_MODULES = [
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-    "qkv_proj",
-    "gate_up_proj",
-]
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +32,8 @@ class LLM:
         world_size: int,
         base_model: str,
         model_kwargs: dict[str, Any],
-        parallelize_plan: dict[str, str],
-        lora_config: LoraConfig | None = None,
+        parallelize_plan: Optional[dict[str, str]] = None,
+        lora_config: Optional[LoraConfig] = None,
         adapter_name: str | None = None,
         initialize_random_weights: bool = False,
         enable_gradient_checkpointing: bool = True,
@@ -273,9 +261,9 @@ class LLM:
         dist.barrier()
 
     def parallelize(
-        self, model: nn.Module, parallelize_plan: dict[str, str]
+        self, model: nn.Module, parallelize_plan: Optional[dict[str, str]] = None
     ) -> nn.Module:
-        if not parallelize_plan:
+        if parallelize_plan is None:
             return model.cuda()
 
         strategies = {"column": ColwiseParallel, "row": RowwiseParallel}

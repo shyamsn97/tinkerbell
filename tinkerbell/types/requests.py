@@ -2,11 +2,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import Field
 
-from ._models import BaseModel, StrictBase
+from ._models import BaseModel, LossFnType, StrictBase
 from .data import MultimodalDataInputFormat, TensorData
 from .datum import Datum
 from .lora_config import LoraConfig
-from .loss_fn_type import LossFnType
 from .optimizer import DEFAULT_SCHEDULER_PARAMS
 
 
@@ -44,10 +43,6 @@ class PushToHubRequest(StrictBase):
     )  # Additional push_to_hub kwargs
 
 
-class ActorRequest(StrictBase):
-    request_id: str
-
-
 class ForwardRequest(StrictBase):
     model_name: str  # Actor group name for routing
     request_id: Optional[str] = None
@@ -63,6 +58,15 @@ class ForwardBackwardRequest(StrictBase):
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     loss_fn: LossFnType = "cross_entropy"
     return_logprobs: bool = False
+    zero_grad: bool = (
+        True  # Zero gradients before forward/backward (set False for gradient accumulation)
+    )
+    optimizer_params: Optional[dict[str, Any]] = (
+        None  # If provided, run optim_step after backward (combines into single round trip)
+    )
+    immediate: bool = (
+        False  # If True, process the batch queue immediately instead of waiting for clock cycle
+    )
 
 
 class ActorStatusRequest(StrictBase):

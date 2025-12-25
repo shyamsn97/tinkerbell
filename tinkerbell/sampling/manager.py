@@ -140,9 +140,28 @@ class SamplingManager:
         ).status
 
     def get_sampling_actor(self, model_name: str) -> Optional[SGLangSamplingActor]:
-        """Get sampling actor by model_name."""
+        """Get sampling actor by model_name.
+
+        If the actor isn't in the in-memory registry, attempts to reconnect
+        to an existing detached Ray actor.
+        """
         state = self.actors.get(model_name)
-        return state.actor if state else None
+        if state:
+            return state.actor
+
+        # Try to reconnect to an existing detached actor
+        actor_name = self._get_actor_name(model_name)
+        existing_actor = self._try_get_existing_actor(actor_name, model_name)
+        if existing_actor is not None:
+            self.actors[model_name] = ActorState(
+                actor=existing_actor,
+                status=SamplingActorStatus.READY,
+                pending_ref=None,
+            )
+            logger.info(f"Reconnected to existing sampling actor '{model_name}'")
+            return existing_actor
+
+        return None
 
     async def load_checkpoint(
         self, model_name: str, checkpoint_path: str, pin_lora: bool = False
