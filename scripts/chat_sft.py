@@ -10,6 +10,7 @@ from typing import cast
 import wandb
 import os
 import logging
+import time
 
 # logging.basicConfig(
 #     level=logging.INFO,
@@ -22,7 +23,7 @@ GPU_TYPE = "H100"
 NUM_GPUS = 1
 # Filter by sequence length to save memory
 MAX_SEQUENCE_LENGTH = 512
-BATCH_SIZE = 64  # Reduced from 64 - start small and increase if stable
+BATCH_SIZE = 64
 GRADIENT_ACCUMULATION_STEPS = 1
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 0.0
@@ -38,19 +39,6 @@ deploy_config = ModalDeployConfig(
     max_inputs=200,
     max_wait_time=1200.0,
 )
-
-# Define parallelization plan
-parallelize_plan = {
-    # Attention projections (all layers)
-    "model.layers.*.self_attn.q_proj": "column",
-    "model.layers.*.self_attn.k_proj": "column",
-    "model.layers.*.self_attn.v_proj": "column",
-    "model.layers.*.self_attn.o_proj": "row",
-    # MLP projections (all layers)
-    "model.layers.*.mlp.gate_proj": "column",
-    "model.layers.*.mlp.up_proj": "column",
-    "model.layers.*.mlp.down_proj": "row",
-}
 
 # Create training client and train
 server_url = "https://jesterlabs--training-service.modal.run"
@@ -72,7 +60,6 @@ training_client = service_client.create_training_client(
     base_model=MODEL_ID,
     model_name="qwen-lora",  # Give it a name for multi-adapter support
     tp_size=NUM_GPUS,
-    parallelize_plan=parallelize_plan,
     initialize_random_weights=False,
     lora_config=lora_config_1.model_dump(),
     adapter_name="task1_attention",  # Name the first adapter
@@ -148,8 +135,14 @@ wandb.init(
 #     "use_cache": False,  # Disable KV cache
 # }
 
-# training loop with gradient accumulation
+# training loop with gradient accumulation support
 global_step = 0
+optimizer_params = {
+    "name": "adam",
+    "lr": LEARNING_RATE,
+    "weight_decay": WEIGHT_DECAY,
+}
+
 epoch_bar = tqdm(range(NUM_EPOCHS), desc="Epoch")
 for epoch in epoch_bar:
     dataloader = DataLoader(
@@ -170,68 +163,63 @@ for epoch in epoch_bar:
                 token=os.getenv("HF_TOKEN"),
                 private=False,
             ).result()
-        # Only zero gradients at the start of accumulation cycle
+
+        # Start timing at beginning of accumulation cycle
         if batch_idx % GRADIENT_ACCUMULATION_STEPS == 0:
-            training_client.zero_grad().result()
+            step_start_time = time.time()
 
         # Forward and backward pass
-        forward_backward_response = training_client.forward_backward(
+        # zero_grad=True only at the start of each accumulation cycle
+        should_zero_grad = (batch_idx % GRADIENT_ACCUMULATION_STEPS == 0)
+        response = training_client.forward_backward(
             data=batch,
+            zero_grad=should_zero_grad,
+            immediate=True,
         ).result()
 
         # Accumulate losses for logging
-        if forward_backward_response.loss:
-            accumulated_losses.extend(forward_backward_response.loss)
+        if response.loss:
+            accumulated_losses.extend(response.loss)
 
-        # Only optimize after accumulating gradients
+        # Optimizer step after accumulating gradients
         if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
-            training_client.optim_step(
-                optimizer_params={
-                    "name": "adam",
-                    "lr": LEARNING_RATE,
-                    "weight_decay": WEIGHT_DECAY,
-                }
-            ).result()
+            training_client.optim_step(optimizer_params=optimizer_params, immediate=True).result()
 
-            # Log accumulated losses
+            step_time = time.time() - step_start_time
+
             if accumulated_losses:
                 avg_loss = sum(accumulated_losses) / len(accumulated_losses)
-                batch_bar.set_description(f"Epoch {epoch}, Step {global_step}, Loss: {avg_loss:.4f})")
+                batch_bar.set_description(f"Epoch {epoch}, Step {global_step}, Loss: {avg_loss:.4f}, Time: {step_time:.2f}s")
 
-                # Log to wandb
                 log_dict = {
                     "loss": avg_loss,
                     "epoch": epoch,
                     "step": global_step,
+                    "time_per_step": step_time,
                 }
 
-                # Log gradient sums if available (from last batch in accumulation)
-                if forward_backward_response.sum_gradient:
-                    for param_name, grad_sum in forward_backward_response.sum_gradient.items():
+                if response.sum_gradient:
+                    for param_name, grad_sum in response.sum_gradient.items():
                         log_dict[f"gradients/{param_name}"] = grad_sum
-                
+
                 wandb.log(log_dict)
-                accumulated_losses = []  # Reset for next accumulation cycle
-            
+                accumulated_losses = []
+
             global_step += 1
-    
+
     # Handle remaining batches that don't complete an accumulation cycle
     if accumulated_losses:
-        training_client.optim_step(
-            optimizer_params={
-                "name": "adam",
-                "lr": LEARNING_RATE,
-                "weight_decay": WEIGHT_DECAY,
-            }
-        ).result()
-        
+        training_client.optim_step(optimizer_params=optimizer_params, immediate=True).result()
+
+        step_time = time.time() - step_start_time
         avg_loss = sum(accumulated_losses) / len(accumulated_losses)
-        print(f"Epoch {epoch}, Step {global_step}, Loss: {avg_loss:.4f} (final batch)")
-        
+        print(f"Epoch {epoch}, Step {global_step}, Loss: {avg_loss:.4f}, Time: {step_time:.2f}s (final batch)")
+
         log_dict = {
             "loss": avg_loss,
             "epoch": epoch,
             "step": global_step,
+            "time_per_step": step_time,
         }
         wandb.log(log_dict)
         global_step += 1

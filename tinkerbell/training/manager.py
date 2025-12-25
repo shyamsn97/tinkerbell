@@ -11,11 +11,12 @@ from fastapi import HTTPException
 
 from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
+from tinkerbell.types._models import LossFnType
 from tinkerbell.types.lora_config import LoraConfig
-from tinkerbell.types.loss_fn_type import LossFnType
+from tinkerbell.types.optimizer import OptimStepRequest
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
-from tinkerbell.utils import get_actor_names_by_prefix, get_free_port
+from tinkerbell.utils import clean_model_name, get_actor_names_by_prefix, get_free_port
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,21 @@ class ActorStatus(Enum):
     READY = "ready"
     PENDING = "pending"
     NOT_PRESENT = "not_present"
+
+
+def _make_error_result(error: str | Exception, error_type: str | None = None) -> dict:
+    """Create standardized error result dict."""
+    err_str = str(error)
+    return {
+        "success": False,
+        "error": err_str,
+        "error_type": (
+            error_type or type(error).__name__
+            if isinstance(error, Exception)
+            else "Error"
+        ),
+        "message": f"Error: {err_str}",
+    }
 
 
 class ActorGroup:
@@ -56,9 +72,13 @@ class ActorGroup:
             await asyncio.sleep(1.0)
         return False
 
+    async def _broadcast(self, method: str, *args, **kwargs) -> list[Any]:
+        """Broadcast a method call to all workers and gather results."""
+        refs = [getattr(w, method).remote(*args, **kwargs) for w in self.workers]
+        return await asyncio.gather(*refs)
+
     async def zero_grad(self) -> None:
-        refs = [worker.zero_grad.remote() for worker in self.workers]
-        await asyncio.gather(*refs)
+        await self._broadcast("zero_grad")
 
     async def forward_backward(
         self,
@@ -69,38 +89,31 @@ class ActorGroup:
         return_logprobs: bool = False,
     ) -> list[dict[str, Any]]:
         await self._ensure_ready()
-        refs = [
-            worker.forward_backward.remote(
-                data=data,
-                loss_fns=loss_fns,
-                adapter_name=adapter_name,
-                forward_kwargs=forward_kwargs,
-                return_logprobs=return_logprobs,
-            )
-            for worker in self.workers
-        ]
-        outputs = await asyncio.gather(*refs)
+        outputs = await asyncio.gather(
+            *[
+                w.forward_backward.remote(
+                    data=data,
+                    loss_fns=loss_fns,
+                    adapter_name=adapter_name,
+                    forward_kwargs=forward_kwargs,
+                    return_logprobs=return_logprobs,
+                )
+                for w in self.workers
+            ]
+        )
         return self._restructure_outputs(outputs, len(data))
 
     async def optim_step(
         self, adapter_name: Optional[str] = None, optimizer_params: dict[str, Any] = {}
     ) -> None:
-        refs = [
-            worker.optim_step.remote(
-                adapter_name=adapter_name, optimizer_params=optimizer_params
-            )
-            for worker in self.workers
-        ]
-        await asyncio.gather(*refs)
+        await self._broadcast(
+            "optim_step", adapter_name=adapter_name, optimizer_params=optimizer_params
+        )
 
     async def save_checkpoint(
         self, checkpoint_path: str, adapter_name: str | None = None
     ) -> None:
-        refs = [
-            worker.save_checkpoint.remote(checkpoint_path, adapter_name)
-            for worker in self.workers
-        ]
-        await asyncio.gather(*refs)
+        await self._broadcast("save_checkpoint", checkpoint_path, adapter_name)
         if adapter_name:
             self.adapters[adapter_name] = checkpoint_path
 
@@ -113,59 +126,35 @@ class ActorGroup:
         commit_message: str | None = None,
         push_kwargs: dict[str, Any] = {},
     ) -> None:
-        refs = [
-            worker.push_to_hub.remote(
-                repo_id=repo_id,
-                adapter_name=adapter_name,
-                token=token,
-                private=private,
-                commit_message=commit_message,
-                push_kwargs=push_kwargs,
-            )
-            for worker in self.workers
-        ]
-        await asyncio.gather(*refs)
+        await self._broadcast(
+            "push_to_hub",
+            repo_id=repo_id,
+            adapter_name=adapter_name,
+            token=token,
+            private=private,
+            commit_message=commit_message,
+            push_kwargs=push_kwargs,
+        )
 
     async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> None:
-        refs = [
-            worker.add_adapter.remote(adapter_name, lora_config)
-            for worker in self.workers
-        ]
-        await asyncio.gather(*refs)
+        await self._broadcast("add_adapter", adapter_name, lora_config)
 
     async def set_active_adapter(self, adapter_name: str) -> None:
-        refs = [
-            worker.set_active_adapter.remote(adapter_name) for worker in self.workers
-        ]
-        await asyncio.gather(*refs)
+        await self._broadcast("set_active_adapter", adapter_name)
 
     def _restructure_outputs(
         self, outputs: list[dict[str, Any]], batch_size: int
     ) -> list[dict[str, Any]]:
-        # Find the first non-None output (should be from rank 0)
-        rank_0_output = None
-        for o in outputs:
-            if o is not None:
-                rank_0_output = o
-                break
-
+        rank_0_output = next((o for o in outputs if o is not None), None)
         if rank_0_output is None:
-            # All outputs are None, return empty list
             return []
-
-        # Restructure outputs: some values are lists (per-item), others are batch-level (same for all)
-        result = []
-        for i in range(batch_size):
-            item_output = {}
-            for key, value in rank_0_output.items():
-                # If value is a list, index into it; otherwise use the same value for all items
-                if isinstance(value, list):
-                    item_output[key] = value[i] if i < len(value) else None
-                else:
-                    # For non-list values (like sum_gradient dict), use the same value for all items
-                    item_output[key] = value
-            result.append(item_output)
-        return result
+        return [
+            {
+                k: (v[i] if isinstance(v, list) and i < len(v) else v)
+                for k, v in rank_0_output.items()
+            }
+            for i in range(batch_size)
+        ]
 
     async def _check_initialization_complete(self) -> None:
         ready, _ = ray.wait(
@@ -186,36 +175,21 @@ class ActorGroup:
     def try_reconnect_to_existing_actors(
         cls, model_name: str, base_model: str, max_wait_time: float = 600.0
     ) -> ActorGroup:
-        cleaned_name = model_name.replace("/", "_").replace(":", "_").lower()
-
-        # Get all actors and filter by namespace
-        # Handle different Ray API versions
+        cleaned_name = clean_model_name(model_name)
         try:
-            # Try newer API with all_namespaces
             all_actors = ray.util.list_named_actors(all_namespaces=True)
         except TypeError:
-            # Fall back to older API (no namespace filtering)
             all_actors = ray.util.list_named_actors()
 
-        # Normalize actor format - handle both string and dict formats
-        actors_list = []
-        for actor in all_actors:
-            if isinstance(actor, str):
-                # String format - assume it's in the tinkerbell namespace
-                actors_list.append({"name": actor, "namespace": "tinkerbell"})
-            elif isinstance(actor, dict):
-                actors_list.append(actor)
-            else:
-                # Unknown format, skip
-                continue
-
+        actors_list = [
+            {"name": a, "namespace": "tinkerbell"} if isinstance(a, str) else a
+            for a in all_actors
+            if isinstance(a, (str, dict))
+        ]
         actor_names = get_actor_names_by_prefix(
-            f"training_actor_{cleaned_name}",
-            actors_list,
+            f"training_actor_{cleaned_name}", actors_list
         )
-
         if not actor_names:
-            # No existing actors found, raise exception to trigger creation
             raise ValueError(f"No existing actors found for model {model_name}")
 
         workers = [
@@ -245,11 +219,9 @@ class ActorGroup:
         max_wait_time: float = 600.0,
     ) -> ActorGroup:
         master_addr, master_port = "127.0.0.1", str(get_free_port())
-        cleaned_name = model_name.replace("/", "_").replace(":", "_").lower()
-
-        workers = []
-        for rank in range(world_size):
-            worker = TrainingActor.options(
+        cleaned_name = clean_model_name(model_name)
+        workers = [
+            TrainingActor.options(
                 num_gpus=1,
                 lifetime="detached",
                 name=f"training_actor_{cleaned_name}_{rank}",
@@ -268,7 +240,8 @@ class ActorGroup:
                 adapter_name=adapter_name,
                 initialize_random_weights=initialize_random_weights,
             )
-            workers.append(worker)
+            for rank in range(world_size)
+        ]
         return cls(
             workers=workers,
             base_model=base_model,
@@ -282,7 +255,7 @@ class TrainingManager:
     def __init__(
         self,
         max_wait_time: float = 600.0,
-        clock_cycle: float = 0.0,
+        clock_cycle: float = 2.0,
         global_store: GlobalStore = None,
     ):
         self.actor_groups: Dict[str, ActorGroup] = {}
@@ -291,6 +264,7 @@ class TrainingManager:
         self.global_store = global_store
         self.batch_processor_task: Optional[asyncio.Task] = None
         self.running = False
+        self.immediate_trigger: asyncio.Event = asyncio.Event()
 
     async def start(self):
         if self.running:
@@ -335,6 +309,7 @@ class TrainingManager:
         forward_kwargs: dict[str, Any] = {},
         return_logprobs: bool = False,
         loss_fn: LossFnType = "cross_entropy",
+        immediate: bool = False,
     ) -> RemoteFuture:
         request = ForwardBackwardRequest(
             request_id=str(uuid.uuid4()),
@@ -345,7 +320,10 @@ class TrainingManager:
             return_logprobs=return_logprobs,
             loss_fn=loss_fn,
         )
-        return await self._queue_and_process(request, model_name)
+        result = await self._queue_and_process(request, model_name)
+        if immediate:
+            self.immediate_trigger.set()
+        return result
 
     async def zero_grad(self, model_name: str) -> None:
         await self._get_actor_group_or_raise(model_name).zero_grad()
@@ -355,10 +333,18 @@ class TrainingManager:
         model_name: str,
         adapter_name: Optional[str] = None,
         optimizer_params: dict[str, Any] = {},
-    ) -> None:
-        await self._get_actor_group_or_raise(model_name).optim_step(
-            adapter_name=adapter_name, optimizer_params=optimizer_params
+        immediate: bool = False,
+    ) -> RemoteFuture:
+        request = OptimStepRequest(
+            request_id=str(uuid.uuid4()),
+            model_name=model_name,
+            adapter_name=adapter_name,
+            optimizer_params=optimizer_params,
         )
+        await self.global_store.add_request_to_queue.remote(request=request)
+        if immediate:
+            self.immediate_trigger.set()
+        return RemoteFuture(request_id=request.request_id, model_name=model_name)
 
     async def save_checkpoint(
         self, model_name: str, checkpoint_path: str, adapter_name: str | None = None
@@ -410,9 +396,7 @@ class TrainingManager:
         initialize_random_weights: bool = False,
     ) -> str:
         await self.start()
-        model_name = (
-            model_name or base_model.replace("/", "_").replace(":", "_").lower()
-        )
+        model_name = model_name or clean_model_name(base_model)
         lora_config_dict = (
             lora_config
             if isinstance(lora_config, dict)
@@ -471,7 +455,14 @@ class TrainingManager:
     async def _batch_processor_loop(self) -> None:
         while self.running:
             try:
-                await asyncio.sleep(self.clock_cycle)
+                # Wait for either the clock cycle timeout or immediate trigger
+                try:
+                    await asyncio.wait_for(
+                        self.immediate_trigger.wait(), timeout=self.clock_cycle
+                    )
+                    self.immediate_trigger.clear()
+                except asyncio.TimeoutError:
+                    pass  # Normal clock cycle timeout
                 await self._process_all_batches()
             except asyncio.CancelledError:
                 break
@@ -490,7 +481,85 @@ class TrainingManager:
         parts = queue_key.split(":", 1)
         return parts[0], parts[1] if len(parts) > 1 and parts[1] else None
 
+    async def _process_forward_backward_batch(
+        self,
+        fb_requests: list[ForwardBackwardRequest],
+        actor_group: ActorGroup,
+        adapter_name: str | None,
+    ) -> None:
+        """Process a batch of forward_backward requests."""
+        if not fb_requests:
+            return
+
+        batch_data, request_sizes, loss_fns = [], [], []
+        for req in fb_requests:
+            request_sizes.append(len(req.data))
+            batch_data.extend(req.data)
+            loss_fns.extend([req.loss_fn] * len(req.data))
+
+        output = await actor_group.forward_backward(
+            data=batch_data,
+            adapter_name=adapter_name,
+            forward_kwargs=fb_requests[0].forward_kwargs,
+            return_logprobs=getattr(fb_requests[0], "return_logprobs", False),
+            loss_fns=loss_fns,
+        )
+
+        output_idx = 0
+        for req, req_size in zip(fb_requests, request_sizes):
+            req_outputs = output[output_idx : output_idx + req_size]
+            output_idx += req_size
+            if req_outputs and len(req_outputs) > 0:
+                first_output = req_outputs[0]
+                if isinstance(first_output, dict) and first_output:
+                    combined = {}
+                    for key in first_output.keys():
+                        if key == "sum_gradient":
+                            combined[key] = first_output[key]
+                        else:
+                            combined[key] = [
+                                o[key]
+                                for o in req_outputs
+                                if isinstance(o, dict) and key in o
+                            ]
+                    await self.global_store.set_result.remote(
+                        request_id=req.request_id, result=combined
+                    )
+                else:
+                    error_result = _make_error_result(
+                        "Empty or invalid output from forward_backward",
+                        "InvalidOutputError",
+                    )
+                    await self.global_store.set_result.remote(
+                        request_id=req.request_id, result=error_result
+                    )
+
+    async def _process_optim_step(
+        self,
+        optim_request: OptimStepRequest,
+        actor_group: ActorGroup,
+    ) -> None:
+        """Process an optim_step request."""
+        await actor_group.optim_step(
+            adapter_name=optim_request.adapter_name,
+            optimizer_params=optim_request.optimizer_params,
+        )
+        await self.global_store.set_result.remote(
+            request_id=optim_request.request_id,
+            result={
+                "model_name": optim_request.model_name,
+                "message": f"Optimizer stepped for {optim_request.model_name}",
+            },
+        )
+
     async def _process_batch(self, queue_key: str) -> None:
+        """Process a batch of requests, treating optim_step as barriers.
+
+        Requests are processed in order:
+        - ForwardBackwardRequests are accumulated and batched together
+        - When an OptimStepRequest is encountered, flush the pending batch first,
+          then execute the optim_step
+        """
         requests = []
         try:
             model_name, adapter_name = self._parse_queue_key(queue_key)
@@ -501,75 +570,38 @@ class TrainingManager:
 
             await self.global_store.clear_request_queue.remote(queue_key=queue_key)
             if await self.get_actor_status(model_name) != ActorStatus.READY:
-                # Set error results for requests when actors aren't ready
-                error_result = {
-                    "success": False,
-                    "error": f"Actors for {model_name} are not ready",
-                    "error_type": "ActorNotReadyError",
-                }
+                error_result = _make_error_result(
+                    f"Actors for {model_name} are not ready", "ActorNotReadyError"
+                )
                 for req in requests:
                     await self.global_store.set_result.remote(
                         request_id=req.request_id, result=error_result
                     )
                 return
 
-            batch_data, request_sizes, loss_fns = [], [], []
-            for req in requests:
-                request_sizes.append(len(req.data))
-                batch_data.extend(req.data)
-                loss_fns.extend([req.loss_fn] * len(req.data))
-
             actor_group = self._get_actor_group_or_raise(model_name)
-            output = await actor_group.forward_backward(
-                data=batch_data,
-                adapter_name=adapter_name,
-                forward_kwargs=requests[0].forward_kwargs,
-                return_logprobs=getattr(requests[0], "return_logprobs", False),
-                loss_fns=loss_fns,
+            pending_fb_requests: list[ForwardBackwardRequest] = []
+
+            for req in requests:
+                if isinstance(req, OptimStepRequest):
+                    # Flush pending forward_backward requests before optim_step
+                    await self._process_forward_backward_batch(
+                        pending_fb_requests, actor_group, adapter_name
+                    )
+                    pending_fb_requests = []
+                    # Execute optim_step
+                    await self._process_optim_step(req, actor_group)
+                elif isinstance(req, ForwardBackwardRequest):
+                    pending_fb_requests.append(req)
+
+            # Process any remaining forward_backward requests
+            await self._process_forward_backward_batch(
+                pending_fb_requests, actor_group, adapter_name
             )
 
-            output_idx = 0
-            for req, req_size in zip(requests, request_sizes):
-                req_outputs = output[output_idx : output_idx + req_size]
-                output_idx += req_size
-                if req_outputs and len(req_outputs) > 0:
-                    # Get keys from first output dict
-                    first_output = req_outputs[0]
-                    if isinstance(first_output, dict) and first_output:
-                        combined = {}
-                        for key in first_output.keys():
-                            # sum_gradient is the same for all items in the batch, so use the first one
-                            if key == "sum_gradient":
-                                combined[key] = first_output[key]
-                            else:
-                                # For other keys, create a list (one value per item)
-                                combined[key] = [
-                                    o[key]
-                                    for o in req_outputs
-                                    if isinstance(o, dict) and key in o
-                                ]
-                        await self.global_store.set_result.remote(
-                            request_id=req.request_id, result=combined
-                        )
-                    else:
-                        # Empty or invalid output, set error result
-                        error_result = {
-                            "success": False,
-                            "error": "Empty or invalid output from forward_backward",
-                            "error_type": "InvalidOutputError",
-                        }
-                        await self.global_store.set_result.remote(
-                            request_id=req.request_id, result=error_result
-                        )
         except Exception as e:
             logger.error(f"Batch processing error for {queue_key}: {e}", exc_info=True)
-            # Set error results for all requests so clients don't hang
-            error_result = {
-                "success": False,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "message": f"Error processing batch: {str(e)}",
-            }
+            error_result = _make_error_result(e)
             for req in requests:
                 try:
                     await self.global_store.set_result.remote(
@@ -579,5 +611,4 @@ class TrainingManager:
                     logger.error(
                         f"Failed to set error result for request {req.request_id}: {set_error}"
                     )
-            # Re-raise to ensure it's logged at higher levels
             raise

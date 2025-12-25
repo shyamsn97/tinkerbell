@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 class DeployConfig(BaseModel):
     server_url: str = "https://0.0.0.0:8000"
     max_wait_time: float = 600.0
-    clock_cycle: float = 0.0
+    clock_cycle: float = 2.0
 
     @property
     def deployment_type(self) -> str:

@@ -16,10 +16,18 @@ import psutil
 import torch
 
 
+def clean_model_name(name: str) -> str:
+    """Convert a model path to a clean actor name.
+
+    e.g., "Qwen/Qwen3-0.6B" -> "qwen_qwen3-0.6b"
+    """
+    return name.replace("/", "_").replace(":", "_").lower()
+
+
 def convert_to_tensor_data(key: str, value: Any) -> Any:
     """Convert torch.Tensor, numpy array, dict, or 1-D list to TensorData if needed."""
+    from tinkerbell.types._models import _key_to_type
     from tinkerbell.types.data import TensorData
-    from tinkerbell.types.tensor_dtype import _key_to_type
 
     if isinstance(value, TensorData):
         return value
@@ -130,62 +138,21 @@ def get_submodules_with_wildcard(model, pattern):
     return matching_modules
 
 
-def serialize_tensor(obj: Any) -> bytes:
-    """Serialize a tensor or nested structure of tensors to bytes.
-    Args:
-        obj: A torch tensor, list, dict, or nested structure containing tensors
-    Returns:
-        bytes: Serialized representation
-    """
+def serialize(obj: Any) -> bytes:
+    """Serialize any object (tensor, class, nested structure) to bytes using dill."""
     return dill.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def deserialize_tensor(data: bytes) -> Any:
-    """Deserialize bytes back to tensor or nested structure.
-
-    Args:
-        data: Serialized bytes from serialize_tensor
-    Returns:
-        The deserialized tensor or nested structure
-    """
+def deserialize(data: bytes) -> Any:
+    """Deserialize bytes back to the original object."""
     return dill.loads(data)
 
 
-def serialize_payload(data: list[Any], loss_fn: Any = None, **kwargs) -> bytes:
-    """Serialize a complete payload including data and additional parameters.
-
-    Args:
-        data: List of data points (can contain tensors)
-        loss_fn: Optional loss function or serializable representation
-        **kwargs: Additional parameters to serialize
-
-    Returns:
-        bytes: Serialized payload
-    """
-    payload = {"data": data, "loss_fn": loss_fn, **kwargs}
-    return serialize_tensor(payload)
-
-
-def deserialize_payload(data: bytes) -> dict:
-    """Deserialize a complete payload.
-
-    Args:
-        data: Serialized bytes
-
-    Returns:
-        dict: Deserialized payload with 'data', 'loss_fn', and other fields
-    """
-    return deserialize_tensor(data)
-
-
-def serialize_class(cls: type) -> bytes:
-    """Serialize a class definition using dill."""
-    return dill.dumps(cls, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def deserialize_class(data: bytes) -> type:
-    """Deserialize a class definition using dill."""
-    return dill.loads(data)
+# Aliases for backwards compatibility
+serialize_tensor = serialize
+deserialize_tensor = deserialize
+serialize_class = serialize
+deserialize_class = deserialize
 
 
 def get_host_and_port(server_url: str) -> tuple[str, int | None]:
@@ -304,37 +271,6 @@ def set_nested(data: dict, path: str, value: Any, separator: str = ".") -> None:
         current = current[key]
 
     current[keys[-1]] = value
-
-
-class NestedDict(dict):
-    """Dictionary with elegant nested access using dot notation.
-
-    Examples:
-        >>> nd = NestedDict({"a": {"b": {"c": 42}}})
-        >>> nd.get_nested("a.b.c")
-        42
-        >>> nd.get_nested("a.b.x", default=0)
-        0
-        >>> nd.set_nested("a.b.x", 100)
-        >>> nd["a"]["b"]["x"]
-        100
-    """
-
-    def get_nested(self, path: str, default: Any = None, separator: str = ".") -> Any:
-        """Get value using dot notation path."""
-        return get_nested(self, path, default, separator)
-
-    def set_nested(self, path: str, value: Any, separator: str = ".") -> None:
-        """Set value using dot notation path."""
-        set_nested(self, path, value, separator)
-
-    def has_nested(self, path: str, separator: str = ".") -> bool:
-        """Check if a nested path exists."""
-        try:
-            get_nested(self, path, separator=separator)
-            return True
-        except (KeyError, TypeError):
-            return False
 
 
 def model_to_dict(obj, exclude: list[str] = [], exclude_none: bool = False):

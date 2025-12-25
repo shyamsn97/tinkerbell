@@ -8,11 +8,18 @@ import torch.distributed as dist
 
 from tinkerbell.training.llm import LLM
 from tinkerbell.training.loss import LOSSES
+from tinkerbell.types._models import LossFnType
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.lora_config import LoraConfig
-from tinkerbell.types.loss_fn_type import LossFnType
 
 logger = logging.getLogger(__name__)
+
+
+def _to_lora_config(config: LoraConfig | dict[str, Any] | None) -> LoraConfig | None:
+    """Convert dict to LoraConfig if needed."""
+    if config is None:
+        return None
+    return LoraConfig(**config) if isinstance(config, dict) else config
 
 
 @ray.remote
@@ -49,9 +56,17 @@ class TrainingActor:
         self.training_model = None
         self.optimizer = None
         self.ready = False
-        self.lora_config = (
-            LoraConfig(**lora_config) if isinstance(lora_config, dict) else lora_config
-        )
+        self.lora_config = _to_lora_config(lora_config)
+
+    def _trainable_params(self):
+        """Iterate over trainable parameters (LoRA adapters, not base model)."""
+        return (p for p in self.training_model.model.parameters() if p.requires_grad)
+
+    def _clear_gradients(self):
+        """Clear gradients for all trainable parameters."""
+        for param in self._trainable_params():
+            if param.grad is not None:
+                param.grad = None
 
     def _get_optimizer(self, optimizer_config: dict[str, Any]) -> torch.optim.Optimizer:
         # Make a copy to avoid mutating the original dict
@@ -66,20 +81,16 @@ class TrainingActor:
             "adadelta": torch.optim.Adadelta,
         }
         optimizer_config["foreach"] = False
-        trainable_params = [
-            p for p in self.training_model.model.parameters() if p.requires_grad
-        ]
-        return optimizer_dict[optimizer_name](trainable_params, **optimizer_config)
+        return optimizer_dict[optimizer_name](
+            list(self._trainable_params()), **optimizer_config
+        )
 
     def _get_or_create_optimizer(
         self, optimizer_config: dict[str, Any]
     ) -> torch.optim.Optimizer:
         """Get existing optimizer or create a new one if trainable parameters changed."""
         # Get current trainable parameters
-        current_trainable_params = [
-            p for p in self.training_model.model.parameters() if p.requires_grad
-        ]
-        current_param_ids = {id(p) for p in current_trainable_params}
+        current_param_ids = {id(p) for p in self._trainable_params()}
 
         # Check if we need to create a new optimizer
         if self.optimizer is None:
@@ -134,10 +145,7 @@ class TrainingActor:
         return True
 
     async def add_adapter(self, adapter_name: str, lora_config: dict[str, Any]) -> bool:
-        config = (
-            LoraConfig(**lora_config) if isinstance(lora_config, dict) else lora_config
-        )
-        self.training_model.add_adapter(adapter_name, config)
+        self.training_model.add_adapter(adapter_name, _to_lora_config(lora_config))
         return True
 
     async def set_active_adapter(self, adapter_name: str) -> bool:
@@ -188,14 +196,9 @@ class TrainingActor:
                 self.training_model.set_active_adapter(adapter_name)
 
             # Safety check: warn if gradients exist (but don't clear to support gradient accumulation)
-            # Only iterate over trainable parameters (LoRA adapters), not base model
-            has_existing_grads = False
-            for param in (
-                p for p in self.training_model.model.parameters() if p.requires_grad
-            ):
-                if param.grad is not None:
-                    has_existing_grads = True
-                    break
+            has_existing_grads = any(
+                p.grad is not None for p in self._trainable_params()
+            )
             if has_existing_grads:
                 logger.debug(
                     "Found existing gradients before forward_backward - this is expected for gradient accumulation"
@@ -291,18 +294,12 @@ class TrainingActor:
         commit_message: str | None = None,
         push_kwargs: dict[str, Any] = {},
     ):
-        """Push model to Hugging Face Hub.
-
-        The repository will be created automatically if it doesn't exist.
-        Requires authentication via token or huggingface_hub login.
-        """
+        """Push model to Hugging Face Hub."""
         if self.rank == 0:
             if adapter_name and self.training_model.adapters:
                 self.training_model.set_active_adapter(adapter_name)
-
             if not hasattr(self.training_model.model, "push_to_hub"):
                 raise RuntimeError("Model does not support push_to_hub")
-
             push_params = {
                 "repo_id": repo_id,
                 "token": token,
@@ -312,10 +309,7 @@ class TrainingActor:
             }
             if adapter_name and self.training_model.adapters:
                 push_params["adapter_name"] = adapter_name
-
             self.training_model.model.push_to_hub(**push_params)
-
-            # Push tokenizer if available
             if self.training_model.tokenizer is not None:
                 try:
                     self.training_model.tokenizer.push_to_hub(
@@ -326,8 +320,6 @@ class TrainingActor:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to push tokenizer: {e}")
-
-        # Wait for all ranks to complete
         dist.barrier()
         return self.rank == 0
 
@@ -340,13 +332,7 @@ class TrainingActor:
         if self.training_model is None or self.training_model.model is None:
             logger.warning("Model not initialized yet, skipping zero_grad")
             return
-
-        # Only clear gradients for trainable parameters (LoRA adapters), not base model
-        for param in (
-            p for p in self.training_model.model.parameters() if p.requires_grad
-        ):
-            if param.grad is not None:
-                param.grad = None
+        self._clear_gradients()
 
     async def backward(self, loss):
         loss.backward()
@@ -360,11 +346,4 @@ class TrainingActor:
         # Reuse existing optimizer or create/update if needed
         optimizer = self._get_or_create_optimizer(optimizer_params)
         optimizer.step()
-
-        # Clear gradients after optimizer step
-        # Only clear gradients for trainable parameters (LoRA adapters), not base model
-        for param in (
-            p for p in self.training_model.model.parameters() if p.requires_grad
-        ):
-            if param.grad is not None:
-                param.grad = None
+        self._clear_gradients()

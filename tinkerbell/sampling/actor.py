@@ -8,21 +8,10 @@ from typing import Any, Dict, Optional
 import httpx
 import ray
 
+from tinkerbell.types.lora_config import SUPPORTED_LORA_TARGET_MODULES
 from tinkerbell.utils import kill_process_tree
 
 logger = logging.getLogger(__name__)
-
-SUPPORTED_LORA_TARGET_MODULES = [
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-    "qkv_proj",
-    "gate_up_proj",
-]
 
 
 def launch_server_process(server_args, launch_server_fn) -> multiprocessing.Process:
@@ -198,22 +187,17 @@ class SGLangSamplingActor:
             "meta_info": {},
         }
 
+        def _wrap(val):
+            return [val] if val is not None else None
+
         if isinstance(result, dict) and "text" in result:
             response_data["outputs"] = [result["text"]]
-            meta = result.get("meta_info")
-            if meta:
+            if meta := result.get("meta_info"):
                 response_data["meta_info"] = meta
-                response_data["logprobs"] = (
-                    [meta["logprobs"]] if "logprobs" in meta else None
-                )
-                response_data["top_logprobs"] = (
-                    [meta["top_logprobs"]] if "top_logprobs" in meta else None
-                )
-                response_data["output_token_ids"] = (
-                    [meta["output_token_ids"]] if "output_token_ids" in meta else None
-                )
-                fr = meta.get("finish_reason")
-                if fr:
+                response_data["logprobs"] = _wrap(meta.get("logprobs"))
+                response_data["top_logprobs"] = _wrap(meta.get("top_logprobs"))
+                response_data["output_token_ids"] = _wrap(meta.get("output_token_ids"))
+                if fr := meta.get("finish_reason"):
                     response_data["finish_reasons"] = [
                         fr.get("type", str(fr)) if isinstance(fr, dict) else fr
                     ]
@@ -231,7 +215,6 @@ class SGLangSamplingActor:
                 response_data["outputs"] = result
         else:
             response_data["outputs"] = [str(result)]
-
         return response_data
 
     def shutdown(self):

@@ -8,8 +8,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from ._models import StrictBase
-from .tensor_dtype import TensorDtype
+from ._models import StrictBase, TensorDtype
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -17,43 +16,25 @@ else:
     Image = Any
 
 
+_TENSOR_TO_NUMPY = {"float32": np.float32, "int64": np.int64}
+_TENSOR_TO_TORCH = {"float32": torch.float32, "int64": torch.int64}
+_NUMPY_KIND_TO_TENSOR = {"f": "float32", "i": "int64"}
+
+
 def _convert_tensor_dtype_to_numpy(dtype: TensorDtype) -> npt.DTypeLike:
-    """Convert TensorDtype to numpy dtype-like."""
-    if dtype == "float32":
-        return np.float32
-    elif dtype == "int64":
-        return np.int64
-    else:
-        raise ValueError(f"Unsupported TensorDtype: {dtype}")
+    return _TENSOR_TO_NUMPY[dtype]
 
 
 def _convert_tensor_dtype_to_torch(dtype: TensorDtype) -> torch.dtype:
-    """Convert TensorDtype to torch dtype."""
-    if dtype == "float32":
-        return torch.float32
-    elif dtype == "int64":
-        return torch.int64
-    else:
-        raise ValueError(f"Unsupported TensorDtype: {dtype}")
+    return _TENSOR_TO_TORCH[dtype]
 
 
 def _convert_numpy_dtype_to_tensor(dtype: np.dtype[Any]) -> TensorDtype:
-    """Convert numpy dtype to TensorDtype."""
-    if dtype.kind == "f":
-        return "float32"
-    elif dtype.kind == "i":
-        return "int64"
-    else:
-        raise ValueError(f"Unsupported numpy dtype: {dtype}")
+    return _NUMPY_KIND_TO_TENSOR.get(dtype.kind, "float32")
 
 
 def _convert_torch_dtype_to_tensor(dtype: torch.dtype) -> TensorDtype:
-    """Convert torch dtype to TensorDtype."""
-    # torch.dtype objects have .is_floating_point
-    if getattr(dtype, "is_floating_point", False):
-        return "float32"
-    else:
-        return "int64"
+    return "float32" if getattr(dtype, "is_floating_point", False) else "int64"
 
 
 class TensorData(StrictBase):
