@@ -6,8 +6,7 @@ from typing import Any
 import torch
 
 from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
-
-# from tinkerbell.types.data import TensorData
+from tinkerbell.types.data import TensorData
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,
@@ -17,6 +16,7 @@ from tinkerbell.types.requests import (
 from tinkerbell.types.responses import (
     ActorStatusResponse,
     LoadCheckpointResponse,
+    LogprobsResponse,
     RemoteFuture,
     SampleResponse,
     ShutdownSamplingActorResponse,
@@ -58,32 +58,71 @@ def make_logprobs_tensor(logprobs: list[list[list]], vocab_size: int) -> torch.T
     return result
 
 
-def parse_sample_response(result: dict[str, Any], vocab_size: int) -> SampleResponse:
+def parse_single_sample(
+    output: str,
+    finish_reason: str | None,
+    raw_logprobs: list | None,
+    tokens_generated: int | None,
+    meta_info: dict | None,
+    tokenizer=None,
+) -> SampleResponse:
+    """Parse a single sample output into SampleResponse."""
+    logprobs = None
+    if raw_logprobs:
+        logprobs = LogprobsResponse(
+            logprobs=TensorData.from_torch(
+                torch.tensor(
+                    [[sub_item[0] for sub_item in item] for item in raw_logprobs],
+                    dtype=torch.float32,
+                ).squeeze()
+            ),
+            token_ids=TensorData.from_torch(
+                torch.tensor(
+                    [[sub_item[1] for sub_item in item] for item in raw_logprobs],
+                    dtype=torch.int64,
+                ).squeeze()
+            ),
+        )
+
+    # Extract output token IDs by tokenizing the output text
+    output_token_ids = None
+    if tokenizer is not None and output:
+        output_token_ids = tokenizer.encode(output, add_special_tokens=False)
+
+    return SampleResponse(
+        output=output,
+        tokens_generated=tokens_generated,
+        logprobs=logprobs,
+        finish_reason=finish_reason,
+        meta_info=meta_info or None,
+        output_token_ids=output_token_ids,
+    )
+
+
+def parse_sample_response(
+    result: dict[str, Any], vocab_size: int, tokenizer=None
+) -> SampleResponse:
     """Parse the sample response."""
     meta_info = result.get("meta_info") or {}
 
     # Extract output_token_ids if available - wrap in list for batch format
-    output_token_ids = None
-    output_token_logprobs = meta_info.get("output_token_logprobs")
-
-    if output_token_logprobs:
-        # Single sequence: wrap in a list to match list[list[int]] type
-        logprobs = [item[0] for item in output_token_logprobs]
-        output_token_ids = [item[1] for item in output_token_logprobs]
-
-    # Extract logprobs - try output_top_logprobs first, fall back to top-level logprobs
     raw_logprobs = meta_info.get("output_top_logprobs") or result.get("logprobs")
-    # if raw_logprobs is not None:
-    #     logprobs = TensorData.from_torch(make_logprobs_tensor(raw_logprobs, vocab_size))
 
-    return SampleResponse(
-        outputs=result.get("outputs", []),
+    # Extract single output (first from list)
+    outputs = result.get("outputs", [])
+    output = outputs[0] if outputs else ""
+
+    # Extract single finish reason
+    finish_reasons = result.get("finish_reasons")
+    finish_reason = finish_reasons[0] if finish_reasons else None
+
+    return parse_single_sample(
+        output=output,
+        finish_reason=finish_reason,
+        raw_logprobs=raw_logprobs,
         tokens_generated=result.get("tokens_generated"),
-        logprobs=logprobs,
-        top_logprobs=raw_logprobs,
-        output_token_ids=output_token_ids,
-        finish_reasons=result.get("finish_reasons"),
-        meta_info=meta_info or None,
+        meta_info=meta_info,
+        tokenizer=tokenizer,
     )
 
 
@@ -228,8 +267,9 @@ class SamplingClient(BaseClient):
         return SampleRequest(*args, **kwargs)
 
     def _sample_parser(self):
+        tokenizer = self.get_tokenizer()
         return functools.partial(
-            parse_sample_response, vocab_size=self.get_tokenizer().vocab_size
+            parse_sample_response, vocab_size=tokenizer.vocab_size, tokenizer=tokenizer
         )
 
     def sample(self, *args, **kwargs) -> TinkerbellFuture[SampleResponse]:
@@ -253,6 +293,36 @@ class SamplingClient(BaseClient):
             endpoint="/sample",
             parse_result_fn=self._sample_parser(),
         )
+
+    def sample_batch(
+        self,
+        batch_kwargs,
+    ) -> list[TinkerbellFuture[SampleResponse]]:
+        """Sample text for a batch of prompts.
+
+        Args:
+            texts: List of input prompts to sample from.
+            **kwargs: Additional arguments passed to SampleRequest (e.g., sampling_params).
+
+        Returns:
+            List of TinkerbellFuture objects, one per prompt.
+        """
+        return [self.sample(**kwargs) for kwargs in batch_kwargs]
+
+    async def sample_batch_async(
+        self,
+        batch_kwargs,
+    ) -> list[AsyncTinkerbellFuture[SampleResponse]]:
+        """Async: Sample text for a batch of prompts.
+
+        Args:
+            texts: List of input prompts to sample from.
+            **kwargs: Additional arguments passed to SampleRequest (e.g., sampling_params).
+
+        Returns:
+            List of AsyncTinkerbellFuture objects, one per prompt.
+        """
+        return [await self.sample_async(**kwargs) for kwargs in batch_kwargs]
 
     def _load_checkpoint_request(
         self, checkpoint_path: str, pin_lora: bool = False

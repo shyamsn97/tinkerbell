@@ -1,13 +1,6 @@
-from typing import cast
-# from datasets import DatasetDict, load_dataset
-import gymnasium as gym
-from tinkerbell.types import ModelInput, TensorData
-from pydantic import BaseModel
 from tinkerbell.types import ModalDeployConfig
 from tinkerbell.client import ServiceClient
-from tinkerbell.renderer import Renderer
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import AutoTokenizer
+from tinkerbell.utils import save_dict_to_json
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
 GPU_TYPE = "A100"
@@ -35,22 +28,35 @@ sampling_client.wait_until_ready()
 # Full model: General knowledge (uses all parameters)
 full_model_conversations = [
     [
-        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "system", "content": "You are a helpful assistant. Put your thoughts in <think></think> tags. Respond with <answer></answer> tags."},
         {"role": "user", "content": "Tell me about machine learning."},
     ],
     [
-        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "system", "content": "You are a helpful assistant. Put your thoughts in <think></think> tags. Respond with <answer></answer> tags."},
         {"role": "user", "content": "Tell me about bayesian inference."},
     ],
 ]
 
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-renderer = Renderer(tokenizer)
+# Convert chat messages to formatted text using the tokenizer's chat template
+tokenizer = sampling_client.get_tokenizer()
+formatted_prompts = [
+    tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    for messages in full_model_conversations
+]
+tokenized_conversations = [tokenizer.encode(prompt) for prompt in formatted_prompts]
+# tokenized_conversations = sampling_client.render(
+#     full_model_conversations,
+#     mode="inference",
+#     add_generation_prompt=True,
+#     continue_final_message=False,
+# )
 
-input_data = renderer.build_chat_samples(
-    messages=full_model_conversations,
-    mask_value=-100,
-)
+# print("Input Data:")
+# print(sampling_client.get_tokenizer().decode(tokenized_conversations[0].get_input_ids().tolist()))
 
 sampling_params = {
     "max_new_tokens": 1024,
@@ -59,25 +65,39 @@ sampling_params = {
     # "top_k": 50,
     # "return_text_in_logprobs": False
 }
-sample_futures = sampling_client.sample(
-    input_ids=input_data[0].model_input.input_ids,
-    sampling_params=sampling_params,
-    return_logprob=True,
-    top_logprobs_num=256,
+sample_futures = sampling_client.sample_batch(
+    batch_kwargs=[
+        {
+            "sampling_params": sampling_params,
+            "input_ids": tokenized_conversation,
+        }
+    for tokenized_conversation in tokenized_conversations],
 )
 
-out = sample_futures.result()
+# sample_batch returns a list of futures - get results for each
+results = [future.result() for future in sample_futures]
 
-print("================================================")
-print("Output:")
-print(out.outputs)
-print("================================================")
-print("Logprobs:")
-print(out.logprobs)
-print("================================================")
-print("Top Logprobs:")
-print(out.top_logprobs[0])
-print("================================================")
-print("Output Token IDs:")
-print(out.output_token_ids)
-print("================================================")
+save_dict_to_json(results[0].model_dump(), "results.json")
+
+for i, out in enumerate(results):
+    print("================================================")
+    print("================================================")
+    print(f"Output {i + 1}:")
+    print(out.output)
+    print("================================================")
+    print("Top Logprobs:")
+    print(out.logprobs.logprobs.shape)
+    print("================================================")
+    print("Output Token IDs:")
+    print(out.output_token_ids)
+    print("================================================")
+
+    # Verify output_token_ids decode to the same text
+    decoded = tokenizer.decode(out.output_token_ids, skip_special_tokens=False)
+    match = decoded == out.output
+    print(f"Token decode: {'✓ MATCH' if match else '✗ MISMATCH'}")
+    if not match:
+        print(f"  Original: {repr(out.output)}")
+        print(f"  Decoded:  {repr(decoded)}")
+    assert match, "Output token IDs don't decode to original text!"
+    print("Verified! ✓")

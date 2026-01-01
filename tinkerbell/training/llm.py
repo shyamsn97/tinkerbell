@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 class LLM:
     def __init__(
         self,
-        rank: int,
-        world_size: int,
         base_model: str,
-        model_kwargs: dict[str, Any],
+        rank: int = 0,
+        world_size: int = 1,
+        model_kwargs: dict[str, Any] = {},
         parallelize_plan: Optional[dict[str, str]] = None,
         lora_config: Optional[LoraConfig] = None,
         adapter_name: str | None = None,
@@ -174,7 +174,9 @@ class LLM:
         self.model.set_adapter(adapter_name)
         self.active_adapter = adapter_name
 
-    def pad(self, data: list[Datum], device: torch.device) -> dict[str, torch.Tensor]:
+    def prepare_inputs(
+        self, data: list[Datum], device: torch.device
+    ) -> dict[str, torch.Tensor]:
         from tinkerbell.utils import get_nested, set_nested
 
         torch_data = [d.to_torch(device=device) for d in data]
@@ -223,6 +225,11 @@ class LLM:
             logger.error(f"Forward error: {e}")
             raise
 
+    def gather_logprobs(
+        self, logprobs: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        return logprobs.gather(dim=-1, index=token_ids)
+
     def get_model_state_dict(self, full_state_dict: bool = False):
         options = StateDictOptions(full_state_dict=full_state_dict, cpu_offload=True)
         return get_model_state_dict(self.model, options=options)
@@ -264,7 +271,13 @@ class LLM:
         self, model: nn.Module, parallelize_plan: Optional[dict[str, str]] = None
     ) -> nn.Module:
         if parallelize_plan is None:
-            return model.cuda()
+            if torch.cuda.is_available():
+                return model.cuda()
+            else:
+                return model
+
+        if not torch.cuda.is_available():
+            return model
 
         strategies = {"column": ColwiseParallel, "row": RowwiseParallel}
         module_parallelization_plan = {}

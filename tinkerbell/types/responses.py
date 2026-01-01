@@ -66,17 +66,20 @@ class CreateSamplingActorResponse(BaseModel):
     message: str | None = None
 
 
+class LogprobsResponse(BaseModel):
+    logprobs: list[list[float]] | TensorData | None = None
+    token_ids: list[list[int]] | TensorData | None = None
+
+
 class SampleResponse(BaseModel):
-    outputs: list[str]
+    output: str
     tokens_generated: int | None = None
-    # Logprobs for each token in the output. Can be logits if logprobs not available from backend
-    logprobs: TensorData | list[float] | None = None
-    # Top k logprobs for each position (if requested)
-    top_logprobs: list[tuple[float, int, Any] | Any] | None = None
+    # Logprobs for each token in the output
+    logprobs: LogprobsResponse | None = None
     # Token IDs for the generated text
     output_token_ids: list[int] | None = None
-    # Finish reasons for each sequence
-    finish_reasons: list[str] | None = None
+    # Finish reason for the sequence
+    finish_reason: str | None = None
     # Metadata about the sampling process
     meta_info: dict[str, Any] | None = None
 

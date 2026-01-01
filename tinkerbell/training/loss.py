@@ -50,22 +50,28 @@ def importance_sampling_loss(
     """Compute importance sampling loss for causal language modeling.
 
     Args:
-        logprobs: Model log probabilities of size batch_size, seq_len]
+        logprobs: Model log probabilities of size (batch_size, seq_len, vocab_size) or (batch_size, seq_len)]
         labels: Target labels of shape [batch_size, seq_len]
-        sampling_logprobs: Log probabilities from the sampling/behavior policy
-            of shape [batch_size, seq_len]
+        sampling_logprobs: Log probabilities from the sampling/behavior policy for each token label of shape [batch_size, seq_len]
         advantages: Advantage values of shape [batch_size, seq_len]
 
     Returns:
         Per-example loss of shape [batch_size]
     """
-    batch_size = logprobs.shape[0]
-    seq_len = logprobs.shape[1]
+    batch_size = labels.shape[0]
+    seq_len = labels.shape[1]
 
     # Ensure logprobs are float32
     logprobs = logprobs.float()
     sampling_logprobs = sampling_logprobs.float()
     advantages = advantages.float()
+
+    if len(logprobs.shape) == 3:
+        logprobs = torch.gather(
+            logprobs, dim=-1, index=labels.view(batch_size, seq_len, 1)
+        )
+    else:
+        logprobs = logprobs.view(batch_size, seq_len)
 
     target_logprobs = logprobs.view(batch_size, seq_len)
     sampling_logprobs = sampling_logprobs.view(batch_size, seq_len)

@@ -90,10 +90,7 @@ dataset = cast(datasets.DatasetDict, dataset)
 train_dataset = dataset["train"]
 test_dataset = dataset["test"]
 
-# renderer
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-renderer = Renderer(tokenizer)
-datums = renderer.build_chat_samples(
+datums = training_client.build_chat_samples(
     messages=train_dataset["messages"],
     train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
     mask_value=-100,

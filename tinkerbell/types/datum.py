@@ -19,6 +19,9 @@ class Datum(StrictBase):
     loss_fn_inputs: dict[str, TensorData] = Field(default_factory=dict)
     """Dictionary mapping field names to tensor data. Optional."""
 
+    def get_input_ids(self) -> TensorData:
+        return self.model_input.input_ids
+
     @model_validator(mode="before")
     @classmethod
     def convert_tensors(cls, data: Any) -> Any:

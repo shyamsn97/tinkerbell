@@ -206,9 +206,9 @@ class TrainingActor:
 
             self.training_model.train()
             device = torch.cuda.current_device()
-            padded = self.training_model.pad(data, device)
+            prepared_inputs = self.training_model.prepare_inputs(data, device)
             forward_output = self.training_model.forward(
-                model_inputs=padded["model_input"],
+                model_inputs=prepared_inputs["model_input"],
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
@@ -218,7 +218,7 @@ class TrainingActor:
             if len(set(loss_fns)) == 1:
                 loss_fn = loss_fns[0]
                 per_batch_losses = LOSSES[loss_fn](
-                    logprobs=logprobs, **padded["loss_fn_inputs"]
+                    logprobs=logprobs, **prepared_inputs["loss_fn_inputs"]
                 )
             else:
                 per_batch_losses = torch.stack(
@@ -227,7 +227,7 @@ class TrainingActor:
                             logprobs=logprobs[i : i + 1],
                             **{
                                 k: v[i : i + 1]
-                                for k, v in padded["loss_fn_inputs"].items()
+                                for k, v in prepared_inputs["loss_fn_inputs"].items()
                             },
                         )
                         for i, loss_fn in enumerate(loss_fns)
@@ -243,7 +243,7 @@ class TrainingActor:
             )
 
             # Clean up intermediate tensors to free memory
-            del forward_output, padded, per_batch_losses, loss_mean
+            del forward_output, prepared_inputs, per_batch_losses, loss_mean
 
             sum_gradient = {}
             with torch.no_grad():

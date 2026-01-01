@@ -5,6 +5,8 @@ from typing import Any, Callable, Generic, TypeVar
 
 import httpx
 
+from tinkerbell.renderer import MASK_TOKEN_ID, Renderer, RenderMode, TrainOnWhat
+from tinkerbell.types.datum import Datum
 from tinkerbell.types.responses import RemoteFuture
 
 T = TypeVar("T")
@@ -164,6 +166,7 @@ class BaseClient:
         self._client = None
         self._async_client = None
         self._tokenizer = None
+        self._renderer = None
 
     @property
     def client(self) -> httpx.Client:
@@ -277,6 +280,75 @@ class BaseClient:
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token or 0
         return self._tokenizer
+
+    def get_renderer(self) -> Renderer:
+        """Get or create a renderer for the base model."""
+        if self.base_model is None:
+            raise ValueError("base_model is required to get renderer")
+        if self._renderer is None:
+            self._renderer = Renderer(self.get_tokenizer())
+        return self._renderer
+
+    def render(
+        self,
+        messages: list[list[dict[str, str]]] | list[dict[str, str]],
+        mode: RenderMode = RenderMode.TRAINING,
+        train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        mask_value: int = MASK_TOKEN_ID,
+        continue_final_message: bool = False,
+        add_generation_prompt: bool = False,
+        **kwargs,
+    ) -> list[Datum]:
+        """Render chat messages into Datum objects.
+
+        Args:
+            messages: Single conversation or batch of conversations.
+            mode: TRAINING (with labels) or INFERENCE (for sampling).
+            train_on_what: Which messages to train on (only for TRAINING mode).
+            mask_value: Value for masked tokens (only for TRAINING mode).
+            continue_final_message: If True in INFERENCE mode, continue from a
+                                    partial assistant message.]
+            add_generation_prompt: If True, add the generation prompt to the messages.
+            **kwargs: Additional args passed to apply_chat_template.
+
+        Returns:
+            List of Datum objects ready for training or inference.
+        """
+        renderer = self.get_renderer()
+        return renderer.render(
+            messages=messages,
+            mode=mode,
+            train_on_what=train_on_what,
+            mask_value=mask_value,
+            continue_final_message=continue_final_message,
+            add_generation_prompt=add_generation_prompt,
+            **kwargs,
+        )
+
+    # Backwards compatibility aliases
+    def build_chat_samples(
+        self,
+        messages: list[list[dict[str, str]]] | list[dict[str, str]],
+        train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        mask_value: int = MASK_TOKEN_ID,
+        include_labels: bool = True,
+        **kwargs,
+    ) -> list[Datum]:
+        """Backwards-compatible alias for render(mode=TRAINING)."""
+        mode = RenderMode.TRAINING if include_labels else RenderMode.INFERENCE
+        return self.render(messages, mode, train_on_what, mask_value, **kwargs)
+
+    def build_message_samples(
+        self,
+        messages: list[dict[str, str]],
+        train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        mask_value: int = MASK_TOKEN_ID,
+        include_labels: bool = True,
+        **kwargs,
+    ) -> Datum:
+        """Backwards-compatible alias for render(mode=TRAINING) with single message."""
+        mode = RenderMode.TRAINING if include_labels else RenderMode.INFERENCE
+        return self.render([messages], mode, train_on_what, mask_value, **kwargs)[0]
 
     def close(self):
         """Close the HTTP client."""
