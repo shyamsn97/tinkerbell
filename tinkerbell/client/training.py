@@ -431,9 +431,9 @@ class TrainingClient(BaseClient):
             actor_base_model = self.base_model
             final_engine_kwargs["lora_paths"] = [checkpoint_path]
         else:
-            # Full model: Create actor directly with checkpoint (SGLang converts HF format)
+            # Full model: Create actor with base model, then load checkpoint weights
             # Disable LoRA mode since it's not needed
-            actor_base_model = checkpoint_path
+            actor_base_model = self.base_model
             final_engine_kwargs = {**final_engine_kwargs, "enable_lora": False}
 
         request = CreateSamplingActorRequest(
@@ -459,9 +459,9 @@ class TrainingClient(BaseClient):
         if wait_until_ready:
             sampling_client.wait_until_ready()
 
-        # For full model: update weights (needed if actor was reconnected with old weights)
-        # For LoRA: adapter was already loaded via lora_paths at startup
-        if not is_lora:
-            sampling_client.load_checkpoint(checkpoint_path).result()
+        # Always load the checkpoint - this handles:
+        # - First run: loads the newly trained weights/adapter
+        # - Re-run: reloads with updated weights after more training
+        sampling_client.load_checkpoint(checkpoint_path).result()
 
         return sampling_client

@@ -33,8 +33,7 @@ parallelize_plan = {
 }
 
 # Create training client and train
-server_url = "https://jesterlabs--training-service.modal.run"
-service_client = ServiceClient.deploy(deploy_config, wait_for_ready=True, timeout=600.0)
+service_client = ServiceClient.deploy_or_connect(deploy_config)
 print("Service client initialized")
 print("Deploying server...")
 print("Deployed to: ", service_client.server_url)
@@ -444,6 +443,6 @@ print(f"Avg time per request: {elapsed / (len(all_prompts) * 3):.3f}s")
 print("=" * 70)
 
 print("Logprobs:")
-print(lora1_results[0].logprobs[0])
+print(lora1_results[0].logprobs)
 # print(lora2_results[0].logprobs)
 # print(full_results[0].logprobs)
