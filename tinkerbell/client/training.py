@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
 from tinkerbell.client.sampling import SamplingClient
+from tinkerbell.types import LossFnType
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
@@ -163,6 +164,7 @@ class TrainingClient(BaseClient):
         return_logprobs: bool,
         zero_grad: bool,
         optimizer_params: Optional[dict[str, Any]],
+        loss_fn: LossFnType = "cross_entropy",
         immediate: bool = False,
     ) -> dict[str, Any]:
         """Build forward_backward request payload."""
@@ -173,6 +175,7 @@ class TrainingClient(BaseClient):
             "forward_kwargs": forward_kwargs or {},
             "return_logprobs": return_logprobs,
             "zero_grad": zero_grad,
+            "loss_fn": loss_fn,
             "immediate": immediate,
         }
         if optimizer_params is not None:
@@ -200,6 +203,7 @@ class TrainingClient(BaseClient):
         return_logprobs: bool = False,
         zero_grad: bool = True,
         optimizer_params: Optional[dict[str, Any]] = None,
+        loss_fn: LossFnType = "cross_entropy",
         immediate: bool = False,
     ) -> TinkerbellFuture[ForwardBackwardResponse]:
         """Perform forward and backward pass, optionally with optimizer step.
@@ -212,6 +216,7 @@ class TrainingClient(BaseClient):
                       Set to False for gradient accumulation.
             optimizer_params: If provided, run optim_step after backward (single round trip).
                             Example: {"name": "adam", "lr": 1e-4}
+            loss_fn: Loss function to use. One of "cross_entropy", "importance_sampling", "ppo".
             immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
         """
         request_data = self._build_forward_backward_request(
@@ -220,6 +225,7 @@ class TrainingClient(BaseClient):
             return_logprobs,
             zero_grad,
             optimizer_params,
+            loss_fn,
             immediate,
         )
         response = self.client.post("/forward_backward", json=request_data)
@@ -241,6 +247,7 @@ class TrainingClient(BaseClient):
         return_logprobs: bool = False,
         zero_grad: bool = True,
         optimizer_params: Optional[dict[str, Any]] = None,
+        loss_fn: LossFnType = "cross_entropy",
         immediate: bool = False,
     ) -> AsyncTinkerbellFuture[ForwardBackwardResponse]:
         """Async: Perform forward and backward pass, optionally with optimizer step.
@@ -252,6 +259,7 @@ class TrainingClient(BaseClient):
             zero_grad: Whether to zero gradients before forward/backward (default True).
                       Set to False for gradient accumulation.
             optimizer_params: If provided, run optim_step after backward (single round trip).
+            loss_fn: Loss function to use. One of "cross_entropy", "importance_sampling", "ppo".
             immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
         """
         request_data = self._build_forward_backward_request(
@@ -260,6 +268,7 @@ class TrainingClient(BaseClient):
             return_logprobs,
             zero_grad,
             optimizer_params,
+            loss_fn,
             immediate,
         )
         response = await self.async_client.post("/forward_backward", json=request_data)

@@ -3,7 +3,7 @@ from tinkerbell.types import ModalDeployConfig, LoraConfig
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.model_input import ModelInput
 from tinkerbell.client import ServiceClient
-
+from tinkerbell.types.data import TensorData
 # =============================================================================
 # GRPO (Group Relative Policy Optimization) Example
 # =============================================================================
@@ -62,7 +62,7 @@ GRPO_BETA = 0.1  # KL penalty coefficient
 
 sampling_params = {
     "max_new_tokens": 1024,
-    "temperature": 0.7,
+    "temperature": 1.0,
     "top_p": 0.9,
 }
 
@@ -175,13 +175,13 @@ for step in range(NUM_GRPO_STEPS):
             
             datum = Datum(
                 model_input=ModelInput(
-                    input_ids=full_input_ids,
-                    attention_mask=attention_mask,
+                    input_ids=TensorData.from_list(full_input_ids),
+                    attention_mask=TensorData.from_list(attention_mask),
                 ),
                 loss_fn_inputs={
-                    "labels": labels,
-                    "sampling_logprobs": sampling_logprobs,
-                    "advantages": advantages_tensor,
+                    "labels": TensorData.from_list(labels),
+                    "sampling_logprobs": TensorData.from_list(sampling_logprobs),
+                    "advantages": TensorData.from_list(advantages_tensor),
                 },
             )
             all_data.append(datum)

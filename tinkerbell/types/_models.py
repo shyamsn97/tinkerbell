@@ -16,10 +16,16 @@ LossFnType: TypeAlias = Literal["cross_entropy", "importance_sampling", "ppo"]
 
 # Mapping from field names to expected tensor dtypes
 _key_to_type = {
+    # Integer types (token IDs, indices, masks)
+    "input_ids": "int64",
+    "attention_mask": "int64",
+    "labels": "int64",
     "target_tokens": "int64",
+    # Float types (probabilities, weights, thresholds)
     "weights": "float32",
     "advantages": "float32",
     "logprobs": "float32",
+    "ref_logprobs": "float32",
     "clip_low_threshold": "float32",
     "clip_high_threshold": "float32",
 }
