@@ -5,7 +5,12 @@ from typing import Any
 
 import torch
 
-from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
+from tinkerbell.client.base import (
+    AsyncTinkerbellFuture,
+    BaseClient,
+    TinkerbellFuture,
+    retry_on_transient_error,
+)
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.requests import (
     ActorStatusRequest,
@@ -337,6 +342,7 @@ class SamplingClient(BaseClient):
             pin_lora=pin_lora,
         )
 
+    @retry_on_transient_error()
     def load_checkpoint(
         self, checkpoint_path: str, pin_lora: bool = False
     ) -> TinkerbellFuture[LoadCheckpointResponse]:

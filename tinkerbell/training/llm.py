@@ -118,11 +118,14 @@ class LLM:
         return AutoModelForCausalLM.from_pretrained(self.base_model, **filtered_kwargs)
 
     def _build_target_modules(self, lora_config: LoraConfig) -> list[str]:
+        # Only include modules that exist in the model
+        # Don't include fused variants (qkv_proj, gate_up_proj) - PEFT will save them
+        # in adapter_config.json even if they don't exist, causing SGLang to fail
         target_modules = []
         if lora_config.train_attn:
-            target_modules.extend(["q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj"])
+            target_modules.extend(["q_proj", "k_proj", "v_proj", "o_proj"])
         if lora_config.train_mlp:
-            target_modules.extend(["gate_proj", "up_proj", "down_proj", "gate_up_proj"])
+            target_modules.extend(["gate_proj", "up_proj", "down_proj"])
         if lora_config.train_unembed:
             target_modules.extend(["lm_head", "embed_out"])
         return target_modules

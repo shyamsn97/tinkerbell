@@ -4,17 +4,16 @@ import logging
 import time
 from typing import Any, Optional
 
-from tinkerbell.client.base import BaseClient, TinkerbellFuture
+from tinkerbell.client.base import BaseClient
 from tinkerbell.client.sampling import SamplingClient
 from tinkerbell.client.training import TrainingClient
 from tinkerbell.types import (
     CreateSamplingActorRequest,
     CreateTrainingActorsRequest,
     DeployConfig,
-    GetRayActorsResponse,
     HealthResponse,
 )
-from tinkerbell.types.responses import CreateSamplingActorResponse, RemoteFuture
+from tinkerbell.types.responses import CreateSamplingActorResponse
 from tinkerbell.utils import clean_model_name
 
 logger = logging.getLogger(__name__)
@@ -58,20 +57,12 @@ class ServiceClient(BaseClient):
         except Exception:
             return False
 
-    def get_ray_actors(self) -> TinkerbellFuture[GetRayActorsResponse]:
+    def get_ray_actors(self) -> list[str]:
         """Get list of all Ray actors from the server."""
-        # Send request immediately
-        response = self.client.post("/get_ray_actors", json={})
+        response = self.client.get("/get_ray_actors")
         response.raise_for_status()
-        remote_future_dict = response.json()
-
-        def _parse_result(result: dict[str, Any]):
-            return result["actor_names"]
-
-        return self.create_future_from_remote(
-            remote_future=RemoteFuture(**remote_future_dict),
-            parse_result_fn=_parse_result,
-        )
+        result = response.json()
+        return result.get("actor_names", [])
 
     def get_store_keys(self) -> list[str]:
         """Get list of all keys from the global store."""

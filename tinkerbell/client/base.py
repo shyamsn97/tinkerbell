@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import logging
 import time
 from abc import ABC
 from typing import Any, Callable, Generic, TypeVar
@@ -10,6 +12,58 @@ from tinkerbell.types.datum import Datum
 from tinkerbell.types.responses import RemoteFuture
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
+
+# Transient HTTP status codes that should be retried
+RETRYABLE_STATUS_CODES = (408, 429, 502, 503, 504)
+
+
+def retry_on_transient_error(
+    max_retries: int = 5,
+    initial_delay: float = 2.0,
+    backoff_multiplier: float = 2.0,
+    retryable_codes: tuple[int, ...] = RETRYABLE_STATUS_CODES,
+):
+    """
+    Decorator that retries a function on transient HTTP errors.
+
+    Works with functions that return an httpx.Response or call response.raise_for_status().
+
+    Args:
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        backoff_multiplier: Multiplier for exponential backoff
+        retryable_codes: HTTP status codes that trigger a retry
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exception = None
+
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in retryable_codes:
+                        last_exception = e
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                f"{func.__name__} got {e.response.status_code}, "
+                                f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(delay)
+                            delay *= backoff_multiplier
+                            continue
+                    raise
+
+            if last_exception:
+                raise last_exception
+
+        return wrapper
+
+    return decorator
 
 
 class BaseFuture(ABC, Generic[T]):

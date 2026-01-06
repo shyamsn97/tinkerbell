@@ -308,11 +308,9 @@ class TinkerbellServiceDeployment:
             logger.error(f"Error getting store keys: {e}", exc_info=True)
             return {"keys": [], "error": str(e)}
 
-    @APP.post("/get_ray_actors")
-    @returns_future
-    async def get_ray_actors(
-        self,
-    ) -> RemoteFuture:
+    @APP.get("/get_ray_actors")
+    async def get_ray_actors(self) -> Dict[str, Any]:
+        """Get list of all Ray actors."""
         actors = ray.util.list_named_actors(all_namespaces=True)
         # Handle both string and dict return formats from ray.util.list_named_actors()
         actor_names = []
@@ -323,8 +321,7 @@ class TinkerbellServiceDeployment:
                 actor_names.append(actor.get("name", str(actor)))
             else:
                 actor_names.append(str(actor))
-        result = {"actor_names": actor_names}
-        return result
+        return {"actor_names": actor_names}
 
     @APP.post("/create_sampling_actor")
     async def create_sampling_actor(

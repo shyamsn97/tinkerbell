@@ -49,11 +49,17 @@ class SGLangSamplingActor:
             engine_kwargs["enable_lora"] = True
             engine_kwargs.setdefault("max_loras_per_batch", 8)
             engine_kwargs.setdefault("max_lora_rank", 256)
-            engine_kwargs["lora_target_modules"] = SUPPORTED_LORA_TARGET_MODULES
+            engine_kwargs["lora_target_modules"] = list(SUPPORTED_LORA_TARGET_MODULES)
+            logger.info(
+                f"LoRA enabled: max_rank={engine_kwargs['max_lora_rank']}, "
+                f"target_modules={engine_kwargs['lora_target_modules']}, "
+                f"lora_paths={engine_kwargs.get('lora_paths', [])}"
+            )
 
         engine_kwargs.setdefault("enable_deterministic_inference", True)
 
         server_args = ServerArgs(**engine_kwargs)
+        logger.info(f"ServerArgs: {server_args}")
         self.server_process = launch_server_process(server_args, launch_server)
 
         try:
@@ -139,18 +145,36 @@ class SGLangSamplingActor:
                         break
 
             lora_name = os.path.basename(os.path.normpath(lora_path))
+
+            # Log adapter config for debugging
+            adapter_config_path = os.path.join(lora_path, "adapter_config.json")
+            if os.path.exists(adapter_config_path):
+                import json
+
+                with open(adapter_config_path) as f:
+                    adapter_config = json.load(f)
+                logger.info(f"Loading LoRA '{lora_name}' from {lora_path}")
+                logger.info(
+                    f"  Adapter target_modules: {adapter_config.get('target_modules')}"
+                )
+                logger.info(f"  Adapter rank (r): {adapter_config.get('r')}")
+                logger.info(
+                    f"  SGLang lora_target_modules: {list(SUPPORTED_LORA_TARGET_MODULES)}"
+                )
             try:
-                self.client.post(
+                unload_resp = self.client.post(
                     "/unload_lora_adapter", json={"lora_name": lora_name}, timeout=60.0
                 )
-            except Exception:
-                pass
+                logger.info(
+                    f"Unload LoRA response: {unload_resp.status_code} - {unload_resp.text}"
+                )
+            except Exception as e:
+                logger.debug(f"Unload LoRA failed (may not exist): {e}")
             response = self.client.post(
                 "/load_lora_adapter",
                 json={
                     "lora_name": lora_name,
                     "lora_path": lora_path,
-                    "pinned": pin_lora,
                 },
                 timeout=600.0,
             )
@@ -164,6 +188,8 @@ class SGLangSamplingActor:
         if not self.is_server_alive():
             raise RuntimeError("SGLang server died during checkpoint loading")
 
+        if response.status_code != 200:
+            logger.error(f"SGLang response {response.status_code}: {response.text}")
         response.raise_for_status()
         print(
             f"✓ {'LoRA' if is_lora else 'Checkpoint'} loaded: {checkpoint_path}",
