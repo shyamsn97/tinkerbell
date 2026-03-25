@@ -36,7 +36,7 @@ class TrainingActor:
         scheduler_params: dict[str, Any] = {},
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
         adapter_name: Optional[str] = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
     ):
         logging.basicConfig(
             level=logging.INFO,
@@ -51,7 +51,7 @@ class TrainingActor:
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
-        self.initialize_random_weights = initialize_random_weights
+        self.initialize_base_model = initialize_base_model
         self.adapter_name = adapter_name
         self.training_model = None
         self.optimizer = None
@@ -139,7 +139,7 @@ class TrainingActor:
             parallelize_plan=self.parallelize_plan,
             lora_config=self.lora_config,
             adapter_name=self.adapter_name,
-            initialize_random_weights=self.initialize_random_weights,
+            initialize_base_model=self.initialize_base_model,
         )
         self.ready = True
         return True

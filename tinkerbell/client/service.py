@@ -142,7 +142,7 @@ class ServiceClient(BaseClient):
         lora_config: Optional[dict[str, Any]] = None,
         ray_worker_options: Optional[dict[str, Any]] = None,
         wait_until_ready: bool = False,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
     ) -> TrainingClient:
         """Create training actors. Args: base_model, tp_size, model_name, adapter_name, lora_config, etc."""
         self._check_deployed()
@@ -159,7 +159,7 @@ class ServiceClient(BaseClient):
             lora_config=lora_config,
             ray_worker_options=ray_worker_options or {},
             wait_until_ready=wait_until_ready,
-            initialize_random_weights=initialize_random_weights,
+            initialize_base_model=initialize_base_model,
         )
         response = self.client.post(
             "/create_training_actors", json=request.model_dump()

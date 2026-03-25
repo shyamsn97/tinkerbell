@@ -170,7 +170,7 @@ def train():
         model_kwargs={"torch_dtype": "bfloat16"},
         lora_config=lora_config,
         adapter_name="default",
-        initialize_random_weights=False,
+        initialize_base_model=False,
         enable_gradient_checkpointing=True,
     )
     model.train()

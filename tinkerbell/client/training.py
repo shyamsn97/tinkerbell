@@ -73,21 +73,33 @@ class TrainingClient(BaseClient):
 
     # ===== Training operations =====
 
-    def _zero_grad_request(self) -> ZeroGradRequest:
+    def _zero_grad_request(self, immediate: bool = False) -> ZeroGradRequest:
         return ZeroGradRequest(
-            model_name=self.model_name, adapter_name=self.adapter_name
+            model_name=self.model_name,
+            adapter_name=self.adapter_name,
+            immediate=immediate,
         )
 
-    def zero_grad(self) -> TinkerbellFuture[dict[str, Any]]:
-        """Zero out gradients."""
+    def zero_grad(self, immediate: bool = False) -> TinkerbellFuture[dict[str, Any]]:
+        """Zero out gradients.
+
+        Args:
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
         return self.create_future(
-            request=self._zero_grad_request(), endpoint="/zero_grad"
+            request=self._zero_grad_request(immediate), endpoint="/zero_grad"
         )
 
-    async def zero_grad_async(self) -> AsyncTinkerbellFuture[dict[str, Any]]:
-        """Async: Zero out gradients."""
+    async def zero_grad_async(
+        self, immediate: bool = False
+    ) -> AsyncTinkerbellFuture[dict[str, Any]]:
+        """Async: Zero out gradients.
+
+        Args:
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
         return await self.create_async_future(
-            request=self._zero_grad_request(), endpoint="/zero_grad"
+            request=self._zero_grad_request(immediate), endpoint="/zero_grad"
         )
 
     def _build_forward_request(
@@ -471,6 +483,16 @@ class TrainingClient(BaseClient):
         # Always load the checkpoint - this handles:
         # - First run: loads the newly trained weights/adapter
         # - Re-run: reloads with updated weights after more training
-        sampling_client.load_checkpoint(checkpoint_path).result()
+        print(
+            f"[save_weights_and_get_sampling_client] Loading checkpoint: {checkpoint_path}"
+        )
+        load_result = sampling_client.load_checkpoint(checkpoint_path).result()
+        print(f"[save_weights_and_get_sampling_client] Load result: {load_result}")
+
+        # Wait for checkpoint loading to complete (it's async on the server)
+        sampling_client.wait_until_ready()
+        print(
+            f"[save_weights_and_get_sampling_client] Sampling client ready, lora_path={sampling_client.lora_path}"
+        )
 
         return sampling_client

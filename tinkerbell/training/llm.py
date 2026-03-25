@@ -35,7 +35,7 @@ class LLM:
         parallelize_plan: Optional[dict[str, str]] = None,
         lora_config: Optional[LoraConfig] = None,
         adapter_name: str | None = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
         enable_gradient_checkpointing: bool = True,
     ):
         self.rank = rank
@@ -45,7 +45,7 @@ class LLM:
         self.parallelize_plan = parallelize_plan
         self.lora_config = lora_config
         self.adapter_name = adapter_name or "default"
-        self.initialize_random_weights = initialize_random_weights
+        self.initialize_base_model = initialize_base_model
         self.should_merge_lora = {}
         self.enable_gradient_checkpointing = enable_gradient_checkpointing
         self.adapters: dict[str, LoraConfig] = {}
@@ -72,6 +72,12 @@ class LLM:
             ),
             "loss_fn_inputs.labels": PaddingStrategy(
                 padding_side="left", padding_value=-100
+            ),
+            "loss_fn_inputs.sampling_logprobs": PaddingStrategy(
+                padding_side="left", padding_value=0.0
+            ),
+            "loss_fn_inputs.advantages": PaddingStrategy(
+                padding_side="left", padding_value=0.0
             ),
         }
 
@@ -113,7 +119,7 @@ class LLM:
         }
 
         config = AutoConfig.from_pretrained(base_model)
-        if self.initialize_random_weights:
+        if self.initialize_base_model:
             return AutoModelForCausalLM.from_config(config, **filtered_kwargs)
         return AutoModelForCausalLM.from_pretrained(self.base_model, **filtered_kwargs)
 

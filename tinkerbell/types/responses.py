@@ -88,6 +88,9 @@ class LoadCheckpointResponse(BaseModel):
     model_name: str  # Actor group name
     success: bool
     message: str | None = None
+    lora_name: str | None = (
+        None  # Actual lora_name used by SGLang (may differ from checkpoint_path)
+    )
 
 
 class ShutdownSamplingActorResponse(BaseModel):

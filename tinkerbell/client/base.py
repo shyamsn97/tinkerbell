@@ -74,7 +74,7 @@ class BaseFuture(ABC, Generic[T]):
         remote_future: RemoteFuture,
         server_url: str,
         result_parser: Callable[[dict[str, Any]], T],
-        poll_interval: float = 0.005,  # 5ms default poll interval
+        poll_interval: float = 0.5,  # 500ms default poll interval
         timeout: float | None = None,
         client: httpx.Client | None = None,  # Reuse existing client
     ):
@@ -269,7 +269,7 @@ class BaseClient:
                 remote_future=remote_future,
                 server_url=self.server_url,
                 result_parser=parse_fn or (lambda x: x),
-                poll_interval=0.005,  # 5ms polling
+                poll_interval=0.5,  # 500ms polling
                 timeout=self.timeout,
                 async_client=self._async_client,  # Reuse connection
             )
@@ -278,7 +278,7 @@ class BaseClient:
                 remote_future=remote_future,
                 server_url=self.server_url,
                 result_parser=parse_fn or (lambda x: x),
-                poll_interval=0.005,  # 5ms polling
+                poll_interval=0.5,  # 500ms polling
                 timeout=self.timeout,
                 client=self._client,  # Reuse connection
             )
@@ -379,7 +379,6 @@ class BaseClient:
             **kwargs,
         )
 
-    # Backwards compatibility aliases
     def build_chat_samples(
         self,
         messages: list[list[dict[str, str]]] | list[dict[str, str]],

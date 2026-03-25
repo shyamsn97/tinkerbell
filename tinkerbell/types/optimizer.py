@@ -14,7 +14,9 @@ DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {"scheduler": "cosine"}
 
 class ZeroGradRequest(StrictBase):
     model_name: str
+    request_id: Optional[str] = None
     adapter_name: Optional[str] = None
+    immediate: bool = False  # If True, process the batch queue immediately
 
 
 class ZeroGradResponse(BaseModel):

@@ -13,7 +13,7 @@ from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types._models import LossFnType
 from tinkerbell.types.lora_config import LoraConfig
-from tinkerbell.types.optimizer import OptimStepRequest
+from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import clean_model_name, get_actor_names_by_prefix, get_free_port
@@ -215,7 +215,7 @@ class ActorGroup:
         ray_worker_options: dict[str, Any] = {},
         lora_config: Optional[dict[str, Any]] = None,
         adapter_name: Optional[str] = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
         max_wait_time: float = 600.0,
     ) -> ActorGroup:
         master_addr, master_port = "127.0.0.1", str(get_free_port())
@@ -238,7 +238,7 @@ class ActorGroup:
                 scheduler_params=scheduler_params,
                 lora_config=lora_config,
                 adapter_name=adapter_name,
-                initialize_random_weights=initialize_random_weights,
+                initialize_base_model=initialize_base_model,
             )
             for rank in range(world_size)
         ]
@@ -325,8 +325,23 @@ class TrainingManager:
             self.immediate_trigger.set()
         return result
 
-    async def zero_grad(self, model_name: str) -> None:
-        await self._get_actor_group_or_raise(model_name).zero_grad()
+    async def zero_grad(
+        self,
+        model_name: str,
+        adapter_name: Optional[str] = None,
+        immediate: bool = False,
+    ) -> RemoteFuture:
+        from tinkerbell.types.optimizer import ZeroGradRequest
+
+        request = ZeroGradRequest(
+            request_id=str(uuid.uuid4()),
+            model_name=model_name,
+            adapter_name=adapter_name,
+        )
+        await self.global_store.add_request_to_queue.remote(request=request)
+        if immediate:
+            self.immediate_trigger.set()
+        return RemoteFuture(request_id=request.request_id, model_name=model_name)
 
     async def optim_step(
         self,
@@ -401,7 +416,7 @@ class TrainingManager:
         scheduler_params: dict[str, Any] = {},
         ray_worker_options: dict[str, Any] = {},
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
     ) -> str:
         await self.start()
         model_name = model_name or clean_model_name(base_model)
@@ -454,7 +469,7 @@ class TrainingManager:
             ray_worker_options=ray_worker_options,
             lora_config=lora_config_dict,
             adapter_name=adapter_name,
-            initialize_random_weights=initialize_random_weights,
+            initialize_base_model=initialize_base_model,
             max_wait_time=self.max_wait_time,
         )
         self.actor_groups[model_name] = actor_group
@@ -693,6 +708,21 @@ class TrainingManager:
             },
         )
 
+    async def _process_zero_grad(
+        self,
+        zero_grad_request: ZeroGradRequest,
+        actor_group: ActorGroup,
+    ) -> None:
+        """Process a zero_grad request."""
+        await actor_group.zero_grad()
+        await self.global_store.set_result.remote(
+            request_id=zero_grad_request.request_id,
+            result={
+                "model_name": zero_grad_request.model_name,
+                "message": f"Gradients zeroed for {zero_grad_request.model_name}",
+            },
+        )
+
     async def _process_batch(self, queue_key: str) -> None:
         """Process a batch of requests, treating optim_step as barriers.
 
@@ -724,7 +754,15 @@ class TrainingManager:
             pending_fb_requests: list[ForwardBackwardRequest] = []
 
             for req in requests:
-                if isinstance(req, OptimStepRequest):
+                if isinstance(req, ZeroGradRequest):
+                    # Flush pending forward_backward requests before zero_grad
+                    await self._process_forward_backward_batch(
+                        pending_fb_requests, actor_group, adapter_name
+                    )
+                    pending_fb_requests = []
+                    # Execute zero_grad
+                    await self._process_zero_grad(req, actor_group)
+                elif isinstance(req, OptimStepRequest):
                     # Flush pending forward_backward requests before optim_step
                     await self._process_forward_backward_batch(
                         pending_fb_requests, actor_group, adapter_name
