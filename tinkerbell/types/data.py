@@ -46,6 +46,20 @@ class TensorData(StrictBase):
     shape: List[int]
     """The shape of the tensor (see PyTorch tensor.shape)."""
 
+    def __add__(self, other: TensorData) -> TensorData:
+        if len(self.shape) != len(other.shape):
+            raise ValueError("Shapes of tensors must match")
+        if self.dtype != other.dtype:
+            raise ValueError("Dtypes of tensors must match")
+        new_shape = []
+        for i in range(len(self.shape)):
+            new_shape.append(self.shape[i] + other.shape[i])
+        return TensorData(
+            data=self.data + other.data,
+            dtype=self.dtype,
+            shape=new_shape,
+        )
+
     @classmethod
     def from_numpy(cls, array: npt.NDArray[Any]) -> TensorData:
         return cls(
@@ -60,6 +74,14 @@ class TensorData(StrictBase):
             data=tensor.flatten().tolist(),
             dtype=_convert_torch_dtype_to_tensor(tensor.dtype),
             shape=list(tensor.shape),
+        )
+
+    @classmethod
+    def from_list(cls, data: List[Any]) -> TensorData:
+        return cls(
+            data=data,
+            dtype=_convert_numpy_dtype_to_tensor(np.array(data).dtype),
+            shape=[len(data)],
         )
 
     def to_numpy(self) -> npt.NDArray[Any]:

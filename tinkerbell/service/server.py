@@ -206,7 +206,7 @@ class TinkerbellServiceDeployment:
             scheduler_params=request.scheduler_params,
             ray_worker_options=request.ray_worker_options,
             lora_config=request.lora_config,
-            initialize_random_weights=request.initialize_random_weights,
+            initialize_base_model=request.initialize_base_model,
         )
         return CreateTrainingActorsResponse(
             success=True,
@@ -253,9 +253,13 @@ class TinkerbellServiceDeployment:
         if not self.training_manager.running:
             await self.training_manager.start()
 
-        # Zero gradients if requested (default True for convenience, False for gradient accumulation)
+        # Zero gradients if requested (queued in order with other ops)
         if request.zero_grad:
-            await self.training_manager.zero_grad(model_name=request.model_name)
+            await self.training_manager.zero_grad(
+                model_name=request.model_name,
+                adapter_name=request.adapter_name,
+                immediate=request.immediate,
+            )
 
         remote_future: RemoteFuture = await self.training_manager.forward_backward(
             model_name=request.model_name,
@@ -264,24 +268,17 @@ class TinkerbellServiceDeployment:
             forward_kwargs=request.forward_kwargs,
             return_logprobs=request.return_logprobs,
             immediate=request.immediate,
+            loss_fn=request.loss_fn,
         )
 
-        # If optimizer_params provided, wait for forward_backward and run optim_step
+        # If optimizer_params provided, queue optim_step after forward_backward
+        # The queue ensures ordering - no need to wait
         if request.optimizer_params is not None:
-            # Wait for forward_backward to complete
-            while True:
-                result = await self.global_store.get_result.remote(
-                    request_id=remote_future.request_id
-                )
-                if result is not None:
-                    break
-                await asyncio.sleep(0.005)
-
-            # Run optimizer step
             await self.training_manager.optim_step(
                 model_name=request.model_name,
                 adapter_name=request.adapter_name,
                 optimizer_params=request.optimizer_params,
+                immediate=request.immediate,
             )
 
         return remote_future
@@ -308,11 +305,9 @@ class TinkerbellServiceDeployment:
             logger.error(f"Error getting store keys: {e}", exc_info=True)
             return {"keys": [], "error": str(e)}
 
-    @APP.post("/get_ray_actors")
-    @returns_future
-    async def get_ray_actors(
-        self,
-    ) -> RemoteFuture:
+    @APP.get("/get_ray_actors")
+    async def get_ray_actors(self) -> Dict[str, Any]:
+        """Get list of all Ray actors."""
         actors = ray.util.list_named_actors(all_namespaces=True)
         # Handle both string and dict return formats from ray.util.list_named_actors()
         actor_names = []
@@ -323,8 +318,7 @@ class TinkerbellServiceDeployment:
                 actor_names.append(actor.get("name", str(actor)))
             else:
                 actor_names.append(str(actor))
-        result = {"actor_names": actor_names}
-        return result
+        return {"actor_names": actor_names}
 
     @APP.post("/create_sampling_actor")
     async def create_sampling_actor(
@@ -413,6 +407,18 @@ class TinkerbellServiceDeployment:
             return self._make_result(
                 request.model_name, False, f"Failed to start checkpoint loading: {e}"
             )
+
+    @APP.post("/get_lora_info")
+    async def get_lora_info(self, request: ActorStatusRequest) -> dict[str, Any]:
+        """Get info about loaded LoRAs on a sampling actor."""
+        sampling_actor = self.sampling_manager.get_sampling_actor(request.model_name)
+        if sampling_actor is None:
+            return {"error": f"Sampling actor '{request.model_name}' not found"}
+        try:
+            result = await sampling_actor.get_lora_info.remote()
+            return result
+        except Exception as e:
+            return {"error": str(e)}
 
     @APP.post("/shutdown_sampling_actor")
     @returns_future

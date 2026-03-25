@@ -28,14 +28,14 @@ logger = logging.getLogger(__name__)
 class LLM:
     def __init__(
         self,
-        rank: int,
-        world_size: int,
         base_model: str,
-        model_kwargs: dict[str, Any],
+        rank: int = 0,
+        world_size: int = 1,
+        model_kwargs: dict[str, Any] = {},
         parallelize_plan: Optional[dict[str, str]] = None,
         lora_config: Optional[LoraConfig] = None,
         adapter_name: str | None = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
         enable_gradient_checkpointing: bool = True,
     ):
         self.rank = rank
@@ -45,7 +45,7 @@ class LLM:
         self.parallelize_plan = parallelize_plan
         self.lora_config = lora_config
         self.adapter_name = adapter_name or "default"
-        self.initialize_random_weights = initialize_random_weights
+        self.initialize_base_model = initialize_base_model
         self.should_merge_lora = {}
         self.enable_gradient_checkpointing = enable_gradient_checkpointing
         self.adapters: dict[str, LoraConfig] = {}
@@ -72,6 +72,12 @@ class LLM:
             ),
             "loss_fn_inputs.labels": PaddingStrategy(
                 padding_side="left", padding_value=-100
+            ),
+            "loss_fn_inputs.sampling_logprobs": PaddingStrategy(
+                padding_side="left", padding_value=0.0
+            ),
+            "loss_fn_inputs.advantages": PaddingStrategy(
+                padding_side="left", padding_value=0.0
             ),
         }
 
@@ -113,16 +119,19 @@ class LLM:
         }
 
         config = AutoConfig.from_pretrained(base_model)
-        if self.initialize_random_weights:
+        if self.initialize_base_model:
             return AutoModelForCausalLM.from_config(config, **filtered_kwargs)
         return AutoModelForCausalLM.from_pretrained(self.base_model, **filtered_kwargs)
 
     def _build_target_modules(self, lora_config: LoraConfig) -> list[str]:
+        # Only include modules that exist in the model
+        # Don't include fused variants (qkv_proj, gate_up_proj) - PEFT will save them
+        # in adapter_config.json even if they don't exist, causing SGLang to fail
         target_modules = []
         if lora_config.train_attn:
-            target_modules.extend(["q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj"])
+            target_modules.extend(["q_proj", "k_proj", "v_proj", "o_proj"])
         if lora_config.train_mlp:
-            target_modules.extend(["gate_proj", "up_proj", "down_proj", "gate_up_proj"])
+            target_modules.extend(["gate_proj", "up_proj", "down_proj"])
         if lora_config.train_unembed:
             target_modules.extend(["lm_head", "embed_out"])
         return target_modules
@@ -174,7 +183,9 @@ class LLM:
         self.model.set_adapter(adapter_name)
         self.active_adapter = adapter_name
 
-    def pad(self, data: list[Datum], device: torch.device) -> dict[str, torch.Tensor]:
+    def prepare_inputs(
+        self, data: list[Datum], device: torch.device
+    ) -> dict[str, torch.Tensor]:
         from tinkerbell.utils import get_nested, set_nested
 
         torch_data = [d.to_torch(device=device) for d in data]
@@ -223,6 +234,11 @@ class LLM:
             logger.error(f"Forward error: {e}")
             raise
 
+    def gather_logprobs(
+        self, logprobs: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        return logprobs.gather(dim=-1, index=token_ids)
+
     def get_model_state_dict(self, full_state_dict: bool = False):
         options = StateDictOptions(full_state_dict=full_state_dict, cpu_offload=True)
         return get_model_state_dict(self.model, options=options)
@@ -264,7 +280,13 @@ class LLM:
         self, model: nn.Module, parallelize_plan: Optional[dict[str, str]] = None
     ) -> nn.Module:
         if parallelize_plan is None:
-            return model.cuda()
+            if torch.cuda.is_available():
+                return model.cuda()
+            else:
+                return model
+
+        if not torch.cuda.is_available():
+            return model
 
         strategies = {"column": ColwiseParallel, "row": RowwiseParallel}
         module_parallelization_plan = {}

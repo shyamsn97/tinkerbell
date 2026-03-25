@@ -63,14 +63,32 @@ class SamplingManager:
                     status=SamplingActorStatus.READY,  # Already verified healthy
                     pending_ref=None,
                 )
+                # Store in GlobalStore for cross-replica access
+                ray.get(
+                    self.global_store.set_sampling_actor.remote(
+                        model_name, existing_actor
+                    )
+                )
                 return model_name
 
             logger.info(
                 f"Creating sampling actor '{actor_name}' loading model '{base_model}'"
             )
+            # Try to kill any existing actor with this name first (might be stale/crashed)
+            try:
+                old_actor = ray.get_actor(actor_name, namespace="tinkerbell")
+                logger.warning(f"Found stale actor '{actor_name}', killing it")
+                ray.kill(old_actor)
+                import time
+
+                time.sleep(1)  # Give Ray time to clean up
+            except ValueError:
+                pass  # Actor doesn't exist, good
+            except Exception as e:
+                logger.warning(f"Error killing stale actor: {e}")
+
             actor = SGLangSamplingActor.options(
                 num_gpus=tp_size,
-                get_if_exists=False,  # Create fresh actor - we already checked for existing
                 lifetime="detached",
                 name=actor_name,
                 namespace="tinkerbell",
@@ -83,6 +101,8 @@ class SamplingManager:
                 status=SamplingActorStatus.PENDING,
                 pending_ref=actor.is_ready.remote(),
             )
+            # Store in GlobalStore for cross-replica access
+            ray.get(self.global_store.set_sampling_actor.remote(model_name, actor))
             return model_name
 
     def _try_get_existing_actor(
@@ -93,9 +113,11 @@ class SamplingManager:
         Returns the actor if it exists and is healthy, None otherwise.
         If the actor exists but is unhealthy, it will be killed.
         """
+        logger.info(f"Looking for existing actor '{actor_name}'")
         try:
             # Try to get the existing actor by name
             actor = ray.get_actor(actor_name, namespace="tinkerbell")
+            logger.info(f"Found actor '{actor_name}', checking health...")
 
             # Verify the actor is healthy by checking if the SGLang server is alive
             try:
@@ -123,6 +145,7 @@ class SamplingManager:
 
         except ValueError:
             # Actor doesn't exist
+            logger.info(f"Actor '{actor_name}' does not exist")
             return None
         except Exception as e:
             logger.warning(f"Error checking for existing actor '{actor_name}': {e}")
@@ -142,14 +165,47 @@ class SamplingManager:
     def get_sampling_actor(self, model_name: str) -> Optional[SGLangSamplingActor]:
         """Get sampling actor by model_name.
 
-        If the actor isn't in the in-memory registry, attempts to reconnect
-        to an existing detached Ray actor.
+        If the actor isn't in the in-memory registry, attempts to:
+        1. Get the actor handle from GlobalStore (shared across replicas)
+        2. Reconnect to an existing detached Ray actor by name
         """
         state = self.actors.get(model_name)
         if state:
             return state.actor
 
-        # Try to reconnect to an existing detached actor
+        # First, try to get actor handle from GlobalStore (fastest, shared across replicas)
+        try:
+            actor = ray.get(
+                self.global_store.get_sampling_actor.remote(model_name), timeout=5.0
+            )
+            if actor is not None:
+                # Verify it's still alive before caching
+                try:
+                    is_alive = ray.get(actor.is_server_alive.remote(), timeout=5.0)
+                    if is_alive:
+                        self.actors[model_name] = ActorState(
+                            actor=actor,
+                            status=SamplingActorStatus.READY,
+                            pending_ref=None,
+                        )
+                        logger.info(
+                            f"Got sampling actor '{model_name}' from GlobalStore"
+                        )
+                        return actor
+                    else:
+                        logger.warning(
+                            f"Sampling actor '{model_name}' from GlobalStore has dead server"
+                        )
+                        self._cleanup_from_global_store(model_name)
+                except Exception as e:
+                    logger.warning(
+                        f"Sampling actor '{model_name}' from GlobalStore is unresponsive: {e}"
+                    )
+                    self._cleanup_from_global_store(model_name)
+        except Exception as e:
+            logger.debug(f"Could not get actor from GlobalStore: {e}")
+
+        # Fallback: try to reconnect to an existing detached actor by name
         actor_name = self._get_actor_name(model_name)
         existing_actor = self._try_get_existing_actor(actor_name, model_name)
         if existing_actor is not None:
@@ -158,6 +214,15 @@ class SamplingManager:
                 status=SamplingActorStatus.READY,
                 pending_ref=None,
             )
+            # Also store in GlobalStore for other replicas
+            try:
+                ray.get(
+                    self.global_store.set_sampling_actor.remote(
+                        model_name, existing_actor
+                    )
+                )
+            except Exception:
+                pass
             logger.info(f"Reconnected to existing sampling actor '{model_name}'")
             return existing_actor
 
@@ -181,6 +246,11 @@ class SamplingManager:
         state = self._get_state_or_raise(model_name)
         result = await state.actor.shutdown.remote()
         del self.actors[model_name]
+        # Also remove from GlobalStore
+        try:
+            await self.global_store.delete_sampling_actor.remote(model_name)
+        except Exception:
+            pass
         return result
 
     async def _check_pending_status(self, model_name: str) -> None:
@@ -190,6 +260,11 @@ class SamplingManager:
 
         if self._is_actor_dead(model_name):
             del self.actors[model_name]
+            # Also clean up from GlobalStore
+            try:
+                ray.get(self.global_store.delete_sampling_actor.remote(model_name))
+            except Exception:
+                pass
             return
 
         try:
@@ -201,9 +276,11 @@ class SamplingManager:
         except ray.exceptions.RayActorError as e:
             logger.error(f"Actor {model_name} crashed: {e}")
             del self.actors[model_name]
+            self._cleanup_from_global_store(model_name)
         except Exception as e:
             logger.error(f"Error for {model_name}: {e}")
             del self.actors[model_name]
+            self._cleanup_from_global_store(model_name)
 
     def _is_actor_dead(self, model_name: str) -> bool:
         state = self.actors.get(model_name)
@@ -220,6 +297,13 @@ class SamplingManager:
         if state is None:
             raise ValueError(f"Sampling actor '{model_name}' not found")
         return state
+
+    def _cleanup_from_global_store(self, model_name: str) -> None:
+        """Remove a dead/crashed actor from GlobalStore."""
+        try:
+            ray.get(self.global_store.delete_sampling_actor.remote(model_name))
+        except Exception:
+            pass
 
     @staticmethod
     def _get_actor_name(model_name: str) -> str:

@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
 from tinkerbell.client.sampling import SamplingClient
+from tinkerbell.types import LossFnType
 from tinkerbell.types.data import TensorData
 from tinkerbell.types.datum import Datum
 from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
@@ -72,21 +73,33 @@ class TrainingClient(BaseClient):
 
     # ===== Training operations =====
 
-    def _zero_grad_request(self) -> ZeroGradRequest:
+    def _zero_grad_request(self, immediate: bool = False) -> ZeroGradRequest:
         return ZeroGradRequest(
-            model_name=self.model_name, adapter_name=self.adapter_name
+            model_name=self.model_name,
+            adapter_name=self.adapter_name,
+            immediate=immediate,
         )
 
-    def zero_grad(self) -> TinkerbellFuture[dict[str, Any]]:
-        """Zero out gradients."""
+    def zero_grad(self, immediate: bool = False) -> TinkerbellFuture[dict[str, Any]]:
+        """Zero out gradients.
+
+        Args:
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
         return self.create_future(
-            request=self._zero_grad_request(), endpoint="/zero_grad"
+            request=self._zero_grad_request(immediate), endpoint="/zero_grad"
         )
 
-    async def zero_grad_async(self) -> AsyncTinkerbellFuture[dict[str, Any]]:
-        """Async: Zero out gradients."""
+    async def zero_grad_async(
+        self, immediate: bool = False
+    ) -> AsyncTinkerbellFuture[dict[str, Any]]:
+        """Async: Zero out gradients.
+
+        Args:
+            immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
+        """
         return await self.create_async_future(
-            request=self._zero_grad_request(), endpoint="/zero_grad"
+            request=self._zero_grad_request(immediate), endpoint="/zero_grad"
         )
 
     def _build_forward_request(
@@ -163,6 +176,7 @@ class TrainingClient(BaseClient):
         return_logprobs: bool,
         zero_grad: bool,
         optimizer_params: Optional[dict[str, Any]],
+        loss_fn: LossFnType = "cross_entropy",
         immediate: bool = False,
     ) -> dict[str, Any]:
         """Build forward_backward request payload."""
@@ -173,6 +187,7 @@ class TrainingClient(BaseClient):
             "forward_kwargs": forward_kwargs or {},
             "return_logprobs": return_logprobs,
             "zero_grad": zero_grad,
+            "loss_fn": loss_fn,
             "immediate": immediate,
         }
         if optimizer_params is not None:
@@ -200,6 +215,7 @@ class TrainingClient(BaseClient):
         return_logprobs: bool = False,
         zero_grad: bool = True,
         optimizer_params: Optional[dict[str, Any]] = None,
+        loss_fn: LossFnType = "cross_entropy",
         immediate: bool = False,
     ) -> TinkerbellFuture[ForwardBackwardResponse]:
         """Perform forward and backward pass, optionally with optimizer step.
@@ -212,6 +228,7 @@ class TrainingClient(BaseClient):
                       Set to False for gradient accumulation.
             optimizer_params: If provided, run optim_step after backward (single round trip).
                             Example: {"name": "adam", "lr": 1e-4}
+            loss_fn: Loss function to use. One of "cross_entropy", "importance_sampling", "ppo".
             immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
         """
         request_data = self._build_forward_backward_request(
@@ -220,6 +237,7 @@ class TrainingClient(BaseClient):
             return_logprobs,
             zero_grad,
             optimizer_params,
+            loss_fn,
             immediate,
         )
         response = self.client.post("/forward_backward", json=request_data)
@@ -241,6 +259,7 @@ class TrainingClient(BaseClient):
         return_logprobs: bool = False,
         zero_grad: bool = True,
         optimizer_params: Optional[dict[str, Any]] = None,
+        loss_fn: LossFnType = "cross_entropy",
         immediate: bool = False,
     ) -> AsyncTinkerbellFuture[ForwardBackwardResponse]:
         """Async: Perform forward and backward pass, optionally with optimizer step.
@@ -252,6 +271,7 @@ class TrainingClient(BaseClient):
             zero_grad: Whether to zero gradients before forward/backward (default True).
                       Set to False for gradient accumulation.
             optimizer_params: If provided, run optim_step after backward (single round trip).
+            loss_fn: Loss function to use. One of "cross_entropy", "importance_sampling", "ppo".
             immediate: If True, process the batch queue immediately instead of waiting for clock cycle.
         """
         request_data = self._build_forward_backward_request(
@@ -260,6 +280,7 @@ class TrainingClient(BaseClient):
             return_logprobs,
             zero_grad,
             optimizer_params,
+            loss_fn,
             immediate,
         )
         response = await self.async_client.post("/forward_backward", json=request_data)
@@ -426,12 +447,14 @@ class TrainingClient(BaseClient):
         final_engine_kwargs = engine_kwargs or {}
 
         if is_lora:
-            # LoRA: Create actor with base model, then load adapter
+            # LoRA: Create actor with base model AND lora_paths set to initialize LoRA memory pool
+            # SGLang requires lora_paths at startup for dynamic loading to work
             actor_base_model = self.base_model
+            final_engine_kwargs["lora_paths"] = [checkpoint_path]
         else:
-            # Full model: Create actor directly with checkpoint (SGLang converts HF format)
+            # Full model: Create actor with base model, then load checkpoint weights
             # Disable LoRA mode since it's not needed
-            actor_base_model = checkpoint_path
+            actor_base_model = self.base_model
             final_engine_kwargs = {**final_engine_kwargs, "enable_lora": False}
 
         request = CreateSamplingActorRequest(
@@ -457,9 +480,19 @@ class TrainingClient(BaseClient):
         if wait_until_ready:
             sampling_client.wait_until_ready()
 
-        # Always load checkpoint - handles both:
-        # - LoRA: loads adapter into base model
-        # - Full model: updates weights (needed if actor was reconnected with old weights)
-        sampling_client.load_checkpoint(checkpoint_path).result()
+        # Always load the checkpoint - this handles:
+        # - First run: loads the newly trained weights/adapter
+        # - Re-run: reloads with updated weights after more training
+        print(
+            f"[save_weights_and_get_sampling_client] Loading checkpoint: {checkpoint_path}"
+        )
+        load_result = sampling_client.load_checkpoint(checkpoint_path).result()
+        print(f"[save_weights_and_get_sampling_client] Load result: {load_result}")
+
+        # Wait for checkpoint loading to complete (it's async on the server)
+        sampling_client.wait_until_ready()
+        print(
+            f"[save_weights_and_get_sampling_client] Sampling client ready, lora_path={sampling_client.lora_path}"
+        )
 
         return sampling_client

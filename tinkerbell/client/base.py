@@ -1,13 +1,69 @@
 import asyncio
+import functools
+import logging
 import time
 from abc import ABC
 from typing import Any, Callable, Generic, TypeVar
 
 import httpx
 
+from tinkerbell.renderer import MASK_TOKEN_ID, Renderer, RenderMode, TrainOnWhat
+from tinkerbell.types.datum import Datum
 from tinkerbell.types.responses import RemoteFuture
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
+
+# Transient HTTP status codes that should be retried
+RETRYABLE_STATUS_CODES = (408, 429, 502, 503, 504)
+
+
+def retry_on_transient_error(
+    max_retries: int = 5,
+    initial_delay: float = 2.0,
+    backoff_multiplier: float = 2.0,
+    retryable_codes: tuple[int, ...] = RETRYABLE_STATUS_CODES,
+):
+    """
+    Decorator that retries a function on transient HTTP errors.
+
+    Works with functions that return an httpx.Response or call response.raise_for_status().
+
+    Args:
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        backoff_multiplier: Multiplier for exponential backoff
+        retryable_codes: HTTP status codes that trigger a retry
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exception = None
+
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in retryable_codes:
+                        last_exception = e
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                f"{func.__name__} got {e.response.status_code}, "
+                                f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(delay)
+                            delay *= backoff_multiplier
+                            continue
+                    raise
+
+            if last_exception:
+                raise last_exception
+
+        return wrapper
+
+    return decorator
 
 
 class BaseFuture(ABC, Generic[T]):
@@ -18,7 +74,7 @@ class BaseFuture(ABC, Generic[T]):
         remote_future: RemoteFuture,
         server_url: str,
         result_parser: Callable[[dict[str, Any]], T],
-        poll_interval: float = 0.005,  # 5ms default poll interval
+        poll_interval: float = 0.5,  # 500ms default poll interval
         timeout: float | None = None,
         client: httpx.Client | None = None,  # Reuse existing client
     ):
@@ -164,6 +220,7 @@ class BaseClient:
         self._client = None
         self._async_client = None
         self._tokenizer = None
+        self._renderer = None
 
     @property
     def client(self) -> httpx.Client:
@@ -212,7 +269,7 @@ class BaseClient:
                 remote_future=remote_future,
                 server_url=self.server_url,
                 result_parser=parse_fn or (lambda x: x),
-                poll_interval=0.005,  # 5ms polling
+                poll_interval=0.5,  # 500ms polling
                 timeout=self.timeout,
                 async_client=self._async_client,  # Reuse connection
             )
@@ -221,7 +278,7 @@ class BaseClient:
                 remote_future=remote_future,
                 server_url=self.server_url,
                 result_parser=parse_fn or (lambda x: x),
-                poll_interval=0.005,  # 5ms polling
+                poll_interval=0.5,  # 500ms polling
                 timeout=self.timeout,
                 client=self._client,  # Reuse connection
             )
@@ -277,6 +334,74 @@ class BaseClient:
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token or 0
         return self._tokenizer
+
+    def get_renderer(self) -> Renderer:
+        """Get or create a renderer for the base model."""
+        if self.base_model is None:
+            raise ValueError("base_model is required to get renderer")
+        if self._renderer is None:
+            self._renderer = Renderer(self.get_tokenizer())
+        return self._renderer
+
+    def render(
+        self,
+        messages: list[list[dict[str, str]]] | list[dict[str, str]],
+        mode: RenderMode = RenderMode.TRAINING,
+        train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        mask_value: int = MASK_TOKEN_ID,
+        continue_final_message: bool = False,
+        add_generation_prompt: bool = False,
+        **kwargs,
+    ) -> list[Datum]:
+        """Render chat messages into Datum objects.
+
+        Args:
+            messages: Single conversation or batch of conversations.
+            mode: TRAINING (with labels) or INFERENCE (for sampling).
+            train_on_what: Which messages to train on (only for TRAINING mode).
+            mask_value: Value for masked tokens (only for TRAINING mode).
+            continue_final_message: If True in INFERENCE mode, continue from a
+                                    partial assistant message.]
+            add_generation_prompt: If True, add the generation prompt to the messages.
+            **kwargs: Additional args passed to apply_chat_template.
+
+        Returns:
+            List of Datum objects ready for training or inference.
+        """
+        renderer = self.get_renderer()
+        return renderer.render(
+            messages=messages,
+            mode=mode,
+            train_on_what=train_on_what,
+            mask_value=mask_value,
+            continue_final_message=continue_final_message,
+            add_generation_prompt=add_generation_prompt,
+            **kwargs,
+        )
+
+    def build_chat_samples(
+        self,
+        messages: list[list[dict[str, str]]] | list[dict[str, str]],
+        train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        mask_value: int = MASK_TOKEN_ID,
+        include_labels: bool = True,
+        **kwargs,
+    ) -> list[Datum]:
+        """Backwards-compatible alias for render(mode=TRAINING)."""
+        mode = RenderMode.TRAINING if include_labels else RenderMode.INFERENCE
+        return self.render(messages, mode, train_on_what, mask_value, **kwargs)
+
+    def build_message_samples(
+        self,
+        messages: list[dict[str, str]],
+        train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+        mask_value: int = MASK_TOKEN_ID,
+        include_labels: bool = True,
+        **kwargs,
+    ) -> Datum:
+        """Backwards-compatible alias for render(mode=TRAINING) with single message."""
+        mode = RenderMode.TRAINING if include_labels else RenderMode.INFERENCE
+        return self.render([messages], mode, train_on_what, mask_value, **kwargs)[0]
 
     def close(self):
         """Close the HTTP client."""

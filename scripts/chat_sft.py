@@ -60,7 +60,7 @@ training_client = service_client.create_training_client(
     base_model=MODEL_ID,
     model_name="qwen-lora",  # Give it a name for multi-adapter support
     tp_size=NUM_GPUS,
-    initialize_random_weights=False,
+    initialize_base_model=False,
     lora_config=lora_config_1.model_dump(),
     adapter_name="task1_attention",  # Name the first adapter
     model_kwargs={
@@ -90,10 +90,7 @@ dataset = cast(datasets.DatasetDict, dataset)
 train_dataset = dataset["train"]
 test_dataset = dataset["test"]
 
-# renderer
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-renderer = Renderer(tokenizer)
-datums = renderer.build_chat_samples(
+datums = training_client.build_chat_samples(
     messages=train_dataset["messages"],
     train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
     mask_value=-100,

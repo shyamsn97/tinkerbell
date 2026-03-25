@@ -22,7 +22,7 @@ class CreateTrainingActorsRequest(StrictBase):
     lora_config: Optional[LoraConfig | dict[str, Any]] = Field(default=None)
     ray_worker_options: dict[str, Any] = Field(default_factory=lambda: {})
     wait_until_ready: bool = False
-    initialize_random_weights: bool = False
+    initialize_base_model: bool = False
 
 
 class SaveCheckpointRequest(StrictBase):
@@ -110,7 +110,7 @@ class SampleRequest(StrictBase):
     logprob_start_len: Optional[Union[List[int], int]] = None
     # If return logprobs, the number of top logprobs to return at each position.
     # Default to 1 to ensure output_top_logprobs is returned (needed for make_logprobs_tensor)
-    top_logprobs_num: Optional[Union[List[int], int]] = 100
+    top_logprobs_num: Optional[Union[List[int], int]] = 1
     # If return logprobs, the token ids to return logprob for.
     token_ids_logprob: Optional[Union[List[List[int]], List[int]]] = None
     # Whether to detokenize tokens in text in the returned logprobs.

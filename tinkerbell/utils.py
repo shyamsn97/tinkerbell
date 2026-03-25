@@ -1,6 +1,7 @@
 """Utility functions for efficient tensor serialization/deserialization."""
 
 import fnmatch
+import json
 import os
 import pickle
 import re
@@ -14,6 +15,30 @@ import dill
 import numpy as np
 import psutil
 import torch
+
+
+def save_dict_to_json(data: dict[str, Any], filepath: str) -> None:
+    """Save a dictionary to a JSON file.
+
+    Args:
+        data: Dictionary to save
+        filepath: Path to the JSON file
+    """
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_dict_from_json(filepath: str) -> dict[str, Any]:
+    """Load a dictionary from a JSON file.
+
+    Args:
+        filepath: Path to the JSON file
+
+    Returns:
+        Dictionary loaded from the file
+    """
+    with open(filepath, "r") as f:
+        return json.load(f)
 
 
 def clean_model_name(name: str) -> str:

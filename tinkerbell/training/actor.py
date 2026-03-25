@@ -36,7 +36,7 @@ class TrainingActor:
         scheduler_params: dict[str, Any] = {},
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
         adapter_name: Optional[str] = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
     ):
         logging.basicConfig(
             level=logging.INFO,
@@ -51,7 +51,7 @@ class TrainingActor:
         self.model_kwargs = model_kwargs
         self.parallelize_plan = parallelize_plan
         self.scheduler_params = scheduler_params
-        self.initialize_random_weights = initialize_random_weights
+        self.initialize_base_model = initialize_base_model
         self.adapter_name = adapter_name
         self.training_model = None
         self.optimizer = None
@@ -139,7 +139,7 @@ class TrainingActor:
             parallelize_plan=self.parallelize_plan,
             lora_config=self.lora_config,
             adapter_name=self.adapter_name,
-            initialize_random_weights=self.initialize_random_weights,
+            initialize_base_model=self.initialize_base_model,
         )
         self.ready = True
         return True
@@ -206,9 +206,9 @@ class TrainingActor:
 
             self.training_model.train()
             device = torch.cuda.current_device()
-            padded = self.training_model.pad(data, device)
+            prepared_inputs = self.training_model.prepare_inputs(data, device)
             forward_output = self.training_model.forward(
-                model_inputs=padded["model_input"],
+                model_inputs=prepared_inputs["model_input"],
                 with_grad=True,
                 forward_kwargs=forward_kwargs,
             )
@@ -218,7 +218,7 @@ class TrainingActor:
             if len(set(loss_fns)) == 1:
                 loss_fn = loss_fns[0]
                 per_batch_losses = LOSSES[loss_fn](
-                    logprobs=logprobs, **padded["loss_fn_inputs"]
+                    logprobs=logprobs, **prepared_inputs["loss_fn_inputs"]
                 )
             else:
                 per_batch_losses = torch.stack(
@@ -227,7 +227,7 @@ class TrainingActor:
                             logprobs=logprobs[i : i + 1],
                             **{
                                 k: v[i : i + 1]
-                                for k, v in padded["loss_fn_inputs"].items()
+                                for k, v in prepared_inputs["loss_fn_inputs"].items()
                             },
                         )
                         for i, loss_fn in enumerate(loss_fns)
@@ -243,7 +243,7 @@ class TrainingActor:
             )
 
             # Clean up intermediate tensors to free memory
-            del forward_output, padded, per_batch_losses, loss_mean
+            del forward_output, prepared_inputs, per_batch_losses, loss_mean
 
             sum_gradient = {}
             with torch.no_grad():

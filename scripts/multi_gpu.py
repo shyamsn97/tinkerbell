@@ -33,8 +33,7 @@ parallelize_plan = {
 }
 
 # Create training client and train
-server_url = "https://jesterlabs--training-service.modal.run"
-service_client = ServiceClient.deploy(deploy_config, wait_for_ready=True, timeout=600.0)
+service_client = ServiceClient.deploy_or_connect(deploy_config)
 print("Service client initialized")
 print("Deploying server...")
 print("Deployed to: ", service_client.server_url)
@@ -44,8 +43,7 @@ health_response = service_client.get_health()
 print("Health Response: ", health_response)
 
 print("Get Ray Actors:")
-ray_actors_response = service_client.get_ray_actors()
-ray_actors = ray_actors_response.result()
+ray_actors = service_client.get_ray_actors()
 print("Ray actors: ", ray_actors)
 
 print(f"\nRay Actors ({len(ray_actors)} total):")
@@ -134,8 +132,7 @@ print("=" * 70)
 print("\n" + "=" * 70)
 print("TRAINING EXAMPLE: Multi-adapter training with separate clients")
 print("Get Ray Actors:")
-ray_actors_response = service_client.get_ray_actors()
-ray_actors = ray_actors_response.result()
+ray_actors = service_client.get_ray_actors()
 print("Ray actors: ", ray_actors)
 print("=" * 70)
 
@@ -341,8 +338,7 @@ print("=" * 70)
 print("\n" + "=" * 70)
 print("INFERENCE EXAMPLE: Generating text with trained models")
 print("Get Ray Actors:")
-ray_actors_response = service_client.get_ray_actors()
-ray_actors = ray_actors_response.result()
+ray_actors = service_client.get_ray_actors()
 print("Ray actors: ", ray_actors)
 
 print("=" * 70 + "\n")
@@ -432,9 +428,9 @@ for i, (prompt, name) in enumerate(zip(all_prompts, prompt_names)):
     print(f"\n{'─' * 70}")
     print(f"Prompt ({name}): {prompt[1]['content']}")
     print(f"{'─' * 70}")
-    print(f"  LoRA 1 (task1_attention): {lora1_results[i].outputs[0][:100]}...")
-    print(f"  LoRA 2 (task2_mlp):       {lora2_results[i].outputs[0][:100]}...")
-    print(f"  Full Model:               {full_results[i].outputs[0][:100]}...")
+    print(f"  LoRA 1 (task1_attention): {lora1_results[i].output[:100]}...")
+    print(f"  LoRA 2 (task2_mlp):       {lora2_results[i].output[:100]}...")
+    print(f"  Full Model:               {full_results[i].output[:100]}...")
 
 print("\n" + "=" * 70)
 print("SUMMARY")
@@ -447,6 +443,6 @@ print(f"Avg time per request: {elapsed / (len(all_prompts) * 3):.3f}s")
 print("=" * 70)
 
 print("Logprobs:")
-print(lora1_results[0].logprobs[0])
+print(lora1_results[0].logprobs)
 # print(lora2_results[0].logprobs)
 # print(full_results[0].logprobs)

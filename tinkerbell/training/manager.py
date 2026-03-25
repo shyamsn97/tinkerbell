@@ -13,7 +13,7 @@ from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
 from tinkerbell.types._models import LossFnType
 from tinkerbell.types.lora_config import LoraConfig
-from tinkerbell.types.optimizer import OptimStepRequest
+from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture
 from tinkerbell.utils import clean_model_name, get_actor_names_by_prefix, get_free_port
@@ -215,7 +215,7 @@ class ActorGroup:
         ray_worker_options: dict[str, Any] = {},
         lora_config: Optional[dict[str, Any]] = None,
         adapter_name: Optional[str] = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
         max_wait_time: float = 600.0,
     ) -> ActorGroup:
         master_addr, master_port = "127.0.0.1", str(get_free_port())
@@ -238,7 +238,7 @@ class ActorGroup:
                 scheduler_params=scheduler_params,
                 lora_config=lora_config,
                 adapter_name=adapter_name,
-                initialize_random_weights=initialize_random_weights,
+                initialize_base_model=initialize_base_model,
             )
             for rank in range(world_size)
         ]
@@ -325,8 +325,23 @@ class TrainingManager:
             self.immediate_trigger.set()
         return result
 
-    async def zero_grad(self, model_name: str) -> None:
-        await self._get_actor_group_or_raise(model_name).zero_grad()
+    async def zero_grad(
+        self,
+        model_name: str,
+        adapter_name: Optional[str] = None,
+        immediate: bool = False,
+    ) -> RemoteFuture:
+        from tinkerbell.types.optimizer import ZeroGradRequest
+
+        request = ZeroGradRequest(
+            request_id=str(uuid.uuid4()),
+            model_name=model_name,
+            adapter_name=adapter_name,
+        )
+        await self.global_store.add_request_to_queue.remote(request=request)
+        if immediate:
+            self.immediate_trigger.set()
+        return RemoteFuture(request_id=request.request_id, model_name=model_name)
 
     async def optim_step(
         self,
@@ -352,6 +367,14 @@ class TrainingManager:
         await self._get_actor_group_or_raise(model_name).save_checkpoint(
             checkpoint_path, adapter_name
         )
+        # Sync adapter paths to GlobalStore
+        if adapter_name:
+            try:
+                await self.global_store.update_training_actor_adapters.remote(
+                    model_name, adapter_name, checkpoint_path
+                )
+            except Exception:
+                pass
 
     async def push_to_hub(
         self,
@@ -393,7 +416,7 @@ class TrainingManager:
         scheduler_params: dict[str, Any] = {},
         ray_worker_options: dict[str, Any] = {},
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
-        initialize_random_weights: bool = False,
+        initialize_base_model: bool = False,
     ) -> str:
         await self.start()
         model_name = model_name or clean_model_name(base_model)
@@ -410,18 +433,33 @@ class TrainingManager:
                 )
             return model_name
 
+        # First, try to get from GlobalStore (fastest, shared across replicas)
+        actor_group = await self._get_actor_group_from_global_store(
+            model_name, base_model
+        )
+        if actor_group is not None:
+            self.actor_groups[model_name] = actor_group
+            if adapter_name and lora_config_dict:
+                await actor_group.add_adapter(adapter_name, lora_config_dict)
+            logger.info(f"Got training actors '{model_name}' from GlobalStore")
+            return model_name
+
+        # Fallback: try to reconnect to existing detached actors by name
         try:
             existing = ActorGroup.try_reconnect_to_existing_actors(
                 model_name, base_model, self.max_wait_time
             )
             self.actor_groups[model_name] = existing
+            # Store in GlobalStore for other replicas
+            await self._store_actor_group_in_global_store(existing)
             if adapter_name and lora_config_dict:
                 await existing.add_adapter(adapter_name, lora_config_dict)
+            logger.info(f"Reconnected to existing training actors '{model_name}'")
             return model_name
         except Exception:
             pass
 
-        self.actor_groups[model_name] = ActorGroup.create_actor_group(
+        actor_group = ActorGroup.create_actor_group(
             world_size=world_size,
             base_model=base_model,
             model_name=model_name,
@@ -431,26 +469,144 @@ class TrainingManager:
             ray_worker_options=ray_worker_options,
             lora_config=lora_config_dict,
             adapter_name=adapter_name,
-            initialize_random_weights=initialize_random_weights,
+            initialize_base_model=initialize_base_model,
             max_wait_time=self.max_wait_time,
         )
+        self.actor_groups[model_name] = actor_group
+        # Store in GlobalStore for cross-replica access
+        await self._store_actor_group_in_global_store(actor_group)
         return model_name
 
     def _get_actor_group_or_raise(
         self, model_name: str, base_model: str = ""
     ) -> ActorGroup:
-        if model_name not in self.actor_groups:
-            existing = ActorGroup.try_reconnect_to_existing_actors(
-                model_name, base_model or model_name, self.max_wait_time
+        if model_name in self.actor_groups:
+            return self.actor_groups[model_name]
+
+        # Try to get from GlobalStore first (sync version for non-async callers)
+        try:
+            actor_info = ray.get(
+                self.global_store.get_training_actors.remote(model_name), timeout=5.0
             )
-            self.actor_groups[model_name] = existing
-        return self.actor_groups[model_name]
+            if actor_info is not None:
+                workers = actor_info["workers"]
+                # Verify at least one worker is alive by calling setup (idempotent)
+                try:
+                    ray.get(workers[0].setup.remote(), timeout=5.0)
+                    actor_group = ActorGroup(
+                        workers=workers,
+                        base_model=actor_info["base_model"],
+                        model_name=model_name,
+                        status=ActorStatus.READY,
+                        max_wait_time=self.max_wait_time,
+                    )
+                    actor_group.adapters = actor_info.get("adapters", {})
+                    self.actor_groups[model_name] = actor_group
+                    logger.info(f"Got training actors '{model_name}' from GlobalStore")
+                    return actor_group
+                except Exception as e:
+                    logger.warning(
+                        f"Training actors '{model_name}' from GlobalStore are unresponsive: {e}"
+                    )
+        except Exception as e:
+            logger.debug(f"Could not get training actors from GlobalStore: {e}")
+
+        # Fallback: try to reconnect to existing detached actors
+        existing = ActorGroup.try_reconnect_to_existing_actors(
+            model_name, base_model or model_name, self.max_wait_time
+        )
+        self.actor_groups[model_name] = existing
+        # Store in GlobalStore for other replicas
+        try:
+            ray.get(
+                self.global_store.set_training_actors.remote(
+                    model_name=model_name,
+                    workers=existing.workers,
+                    base_model=existing.base_model,
+                    adapters=existing.adapters,
+                )
+            )
+        except Exception:
+            pass
+        return existing
 
     async def _queue_and_process(
         self, request: ForwardRequest | ForwardBackwardRequest, model_name: str
     ) -> RemoteFuture:
         await self.global_store.add_request_to_queue.remote(request=request)
         return RemoteFuture(request_id=request.request_id, model_name=model_name)
+
+    async def _store_actor_group_in_global_store(self, actor_group: ActorGroup) -> None:
+        """Store actor group workers in GlobalStore for cross-replica access."""
+        try:
+            await self.global_store.set_training_actors.remote(
+                model_name=actor_group.model_name,
+                workers=actor_group.workers,
+                base_model=actor_group.base_model,
+                adapters=actor_group.adapters,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to store actor group in GlobalStore: {e}")
+
+    async def _get_actor_group_from_global_store(
+        self, model_name: str, base_model: str
+    ) -> Optional[ActorGroup]:
+        """Try to get actor group from GlobalStore."""
+        try:
+            actor_info = await self.global_store.get_training_actors.remote(model_name)
+            if actor_info is None:
+                return None
+
+            workers = actor_info["workers"]
+            # Verify at least one worker is alive by calling setup (idempotent)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(ray.get, workers[0].setup.remote()),
+                    timeout=5.0,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Training actors '{model_name}' from GlobalStore are unresponsive: {e}"
+                )
+                return None
+
+            actor_group = ActorGroup(
+                workers=workers,
+                base_model=actor_info["base_model"],
+                model_name=model_name,
+                status=ActorStatus.READY,
+                max_wait_time=self.max_wait_time,
+            )
+            actor_group.adapters = actor_info.get("adapters", {})
+            return actor_group
+        except Exception as e:
+            logger.debug(f"Could not get actor group from GlobalStore: {e}")
+            return None
+
+    async def shutdown_training_actors(self, model_name: str) -> bool:
+        """Shutdown training actors and clean up from registries."""
+        if model_name not in self.actor_groups:
+            return False
+
+        actor_group = self.actor_groups[model_name]
+        # Kill all workers
+        for worker in actor_group.workers:
+            try:
+                ray.kill(worker)
+            except Exception as e:
+                logger.warning(f"Error killing training worker: {e}")
+
+        # Remove from local cache
+        del self.actor_groups[model_name]
+
+        # Remove from GlobalStore
+        try:
+            await self.global_store.delete_training_actors.remote(model_name)
+        except Exception:
+            pass
+
+        logger.info(f"Shut down training actors for '{model_name}'")
+        return True
 
     async def _batch_processor_loop(self) -> None:
         while self.running:
@@ -552,6 +708,21 @@ class TrainingManager:
             },
         )
 
+    async def _process_zero_grad(
+        self,
+        zero_grad_request: ZeroGradRequest,
+        actor_group: ActorGroup,
+    ) -> None:
+        """Process a zero_grad request."""
+        await actor_group.zero_grad()
+        await self.global_store.set_result.remote(
+            request_id=zero_grad_request.request_id,
+            result={
+                "model_name": zero_grad_request.model_name,
+                "message": f"Gradients zeroed for {zero_grad_request.model_name}",
+            },
+        )
+
     async def _process_batch(self, queue_key: str) -> None:
         """Process a batch of requests, treating optim_step as barriers.
 
@@ -583,7 +754,15 @@ class TrainingManager:
             pending_fb_requests: list[ForwardBackwardRequest] = []
 
             for req in requests:
-                if isinstance(req, OptimStepRequest):
+                if isinstance(req, ZeroGradRequest):
+                    # Flush pending forward_backward requests before zero_grad
+                    await self._process_forward_backward_batch(
+                        pending_fb_requests, actor_group, adapter_name
+                    )
+                    pending_fb_requests = []
+                    # Execute zero_grad
+                    await self._process_zero_grad(req, actor_group)
+                elif isinstance(req, OptimStepRequest):
                     # Flush pending forward_backward requests before optim_step
                     await self._process_forward_backward_batch(
                         pending_fb_requests, actor_group, adapter_name
