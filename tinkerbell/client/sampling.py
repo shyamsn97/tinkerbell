@@ -270,11 +270,6 @@ class SamplingClient(BaseClient):
             kwargs["model_name"] = self.model_name
         if self.adapter_name and self.lora_path and "lora_path" not in kwargs:
             kwargs["lora_path"] = self.lora_path
-        # Debug: show what we're setting
-        print(
-            f"[_sample_request] adapter_name={self.adapter_name}, self.lora_path={self.lora_path}, request lora_path={kwargs.get('lora_path')}",
-            flush=True,
-        )
         return SampleRequest(*args, **kwargs)
 
     def _sample_parser(self):
@@ -287,8 +282,6 @@ class SamplingClient(BaseClient):
         """Sample text. Uses lora_path only if adapter_name is set (LoRA mode)."""
         request = self._sample_request(*args, **kwargs)
         request_dict = request.model_dump(exclude_none=True)
-        # Debug: show lora_path in request
-        print(f"[sample] request lora_path={request_dict.get('lora_path')}", flush=True)
         response = self.client.post("/sample", json=request_dict)
         response.raise_for_status()
         return self.create_future_from_remote(
@@ -375,9 +368,7 @@ class SamplingClient(BaseClient):
         )
 
     def get_lora_info(self) -> dict:
-        """Get info about loaded LoRAs on the sampling actor (for debugging)."""
-        from tinkerbell.types.requests import ActorStatusRequest
-
+        """Get info about loaded LoRAs on the sampling actor."""
         request = ActorStatusRequest(model_name=self.model_name)
         response = self.client.post(
             "/get_lora_info",

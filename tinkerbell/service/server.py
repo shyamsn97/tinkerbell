@@ -498,7 +498,7 @@ def deploy_on_modal(
     except ImportError:
         raise ImportError("Modal is not installed. Install it with: pip install modal")
 
-    print("Starting server deployment...")
+    logger.info("Starting server deployment...")
     app = modal.App(name="tinkerbell-service")
     env_variables = {
         "HF_TOKEN": os.environ.get("HF_TOKEN", None),
@@ -557,7 +557,7 @@ def deploy_on_modal(
             server_url=server_url, max_wait_time=max_wait_time, clock_cycle=clock_cycle
         )
 
-    print("Deploying server on Modal...")
+    logger.info("Deploying server on Modal...")
     with modal.enable_output():
         runner.deploy_app(app)
     return modal.Function.from_name(

@@ -118,7 +118,7 @@ class ServiceClient(BaseClient):
                 redeploy = True
         if redeploy:
             server_url = deploy_config.deploy()
-            print(f"Deployed new server at: {server_url}")
+            logger.info(f"Deployed new server at: {server_url}")
         if server_url is None:
             raise ValueError("Server URL is None. Please check the deploy config.")
         service_client = cls(server_url=server_url, timeout=timeout)

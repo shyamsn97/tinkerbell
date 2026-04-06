@@ -479,19 +479,8 @@ class TrainingClient(BaseClient):
         if wait_until_ready:
             sampling_client.wait_until_ready()
 
-        # Always load the checkpoint - this handles:
-        # - First run: loads the newly trained weights/adapter
-        # - Re-run: reloads with updated weights after more training
-        print(
-            f"[save_weights_and_get_sampling_client] Loading checkpoint: {checkpoint_path}"
-        )
-        load_result = sampling_client.load_checkpoint(checkpoint_path).result()
-        print(f"[save_weights_and_get_sampling_client] Load result: {load_result}")
-
-        # Wait for checkpoint loading to complete (it's async on the server)
+        sampling_client.load_checkpoint(checkpoint_path).result()
         sampling_client.wait_until_ready()
-        print(
-            f"[save_weights_and_get_sampling_client] Sampling client ready, lora_path={sampling_client.lora_path}"
-        )
+        logger.info(f"Sampling client ready, lora_path={sampling_client.lora_path}")
 
         return sampling_client

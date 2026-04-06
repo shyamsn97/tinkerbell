@@ -445,5 +445,3 @@ print("=" * 70)
 
 print("Logprobs:")
 print(lora1_results[0].logprobs)
-# print(lora2_results[0].logprobs)
-# print(full_results[0].logprobs)
