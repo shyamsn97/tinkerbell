@@ -51,8 +51,9 @@ def clean_model_name(name: str) -> str:
 
 def convert_to_tensor_data(key: str, value: Any) -> Any:
     """Convert torch.Tensor, numpy array, dict, or 1-D list to TensorData if needed."""
+    from tinker.types import TensorData
+
     from tinkerbell.types._models import _key_to_type
-    from tinkerbell.types.data import TensorData
 
     if isinstance(value, TensorData):
         return value
@@ -64,7 +65,6 @@ def convert_to_tensor_data(key: str, value: Any) -> Any:
         isinstance(value, dict)
         and "data" in value
         and "dtype" in value
-        and "shape" in value
     ):
         return TensorData(**value)
     elif isinstance(value, list):

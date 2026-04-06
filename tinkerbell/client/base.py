@@ -7,8 +7,9 @@ from typing import Any, Callable, Generic, TypeVar
 
 import httpx
 
+from tinker.types import Datum
+
 from tinkerbell.renderer import MASK_TOKEN_ID, Renderer, RenderMode, TrainOnWhat
-from tinkerbell.types.datum import Datum
 from tinkerbell.types.responses import RemoteFuture
 
 T = TypeVar("T")

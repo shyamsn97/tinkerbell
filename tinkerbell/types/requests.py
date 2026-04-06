@@ -1,11 +1,10 @@
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import Field
+from tinker.types import Datum, LossFnType, LoraConfig, TensorData
 
-from ._models import BaseModel, LossFnType, StrictBase
-from .data import MultimodalDataInputFormat, TensorData
-from .datum import Datum
-from .lora_config import LoraConfig
+from ._models import BaseModel, StrictBase
+from .data import MultimodalDataInputFormat
 from .optimizer import DEFAULT_SCHEDULER_PARAMS
 
 

@@ -3,11 +3,9 @@ import random
 import numpy as np
 from typing import cast
 from datasets import DatasetDict, load_dataset
-from tinkerbell.types import ModalDeployConfig, LoraConfig
-from tinkerbell.types.datum import Datum
-from tinkerbell.types.model_input import ModelInput
+from tinker.types import Datum, ModelInput, TensorData, LoraConfig
+from tinkerbell.types import ModalDeployConfig
 from tinkerbell.client import ServiceClient
-from tinkerbell.types.data import TensorData
 import wandb
 
 # =============================================================================
@@ -233,7 +231,7 @@ gsm8k_datums = training_client.build_chat_samples(
     messages=gsm8k_prompts,
     include_labels=False,
 )
-gsm8k_tokenized = [datum.model_input.input_ids.tolist() for datum in gsm8k_datums]
+gsm8k_tokenized = [datum.model_input.to_ints() for datum in gsm8k_datums]
 
 # Track output lengths across steps for debugging
 prev_output_lengths = {}  # key: (prompt_idx, sample_idx), value: length
@@ -279,19 +277,15 @@ for step in range(NUM_GRPO_STEPS):
                 
                 # Full sequence = prompt + random completion
                 full_input_ids = input_ids + random_completion
-                attention_mask = [1] * len(full_input_ids)
                 
                 # Labels: -100 for prompt, random tokens for completion (cross entropy target)
                 prompt_len = len(input_ids)
                 labels = [-100] * prompt_len + random_completion
                 
                 datum = Datum(
-                    model_input=ModelInput(
-                        input_ids=TensorData.from_list(full_input_ids),
-                        attention_mask=TensorData.from_list(attention_mask),
-                    ),
+                    model_input=ModelInput.from_ints(full_input_ids),
                     loss_fn_inputs={
-                        "labels": TensorData.from_list(labels),
+                        "labels": TensorData(data=labels, dtype="int64", shape=[len(labels)]),
                     },
                 )
                 all_data.append(datum)
@@ -362,7 +356,6 @@ for step in range(NUM_GRPO_STEPS):
             for sample, advantage in zip(samples, advantages):
                 # Full sequence = prompt + completion
                 full_input_ids = input_ids + sample.output_token_ids
-                attention_mask = [1] * len(full_input_ids)
                 prompt_len = len(input_ids)
                 labels = [-100] * prompt_len + sample.output_token_ids
                 logprobs_tensor = sample.logprobs.logprobs.to_torch()
@@ -371,14 +364,11 @@ for step in range(NUM_GRPO_STEPS):
                 advantages_tensor = [0.0] * prompt_len + [advantage] * len(sample.output_token_ids)
 
                 datum = Datum(
-                    model_input=ModelInput(
-                        input_ids=TensorData.from_list(full_input_ids),
-                        attention_mask=TensorData.from_list(attention_mask),
-                    ),
+                    model_input=ModelInput.from_ints(full_input_ids),
                     loss_fn_inputs={
-                        "labels": TensorData.from_list(labels),
-                        "sampling_logprobs": TensorData.from_list(sampling_logprobs),
-                        "advantages": TensorData.from_list(advantages_tensor),
+                        "labels": TensorData(data=labels, dtype="int64", shape=[len(labels)]),
+                        "sampling_logprobs": TensorData(data=sampling_logprobs, dtype="float32", shape=[len(sampling_logprobs)]),
+                        "advantages": TensorData(data=advantages_tensor, dtype="float32", shape=[len(advantages_tensor)]),
                     },
                 )
                 all_data.append(datum)

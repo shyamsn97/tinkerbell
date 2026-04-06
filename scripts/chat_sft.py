@@ -1,6 +1,7 @@
+from tinker.types import LoraConfig
 from tinkerbell.renderer import Renderer
 from tinkerbell.client import ServiceClient
-from tinkerbell.types import ModalDeployConfig, LoraConfig
+from tinkerbell.types import ModalDeployConfig
 from tinkerbell.renderer import Renderer, TrainOnWhat
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader

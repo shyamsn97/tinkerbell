@@ -29,7 +29,7 @@ from tinkerbell.types import (
     SaveCheckpointRequest,
     ShutdownSamplingActorRequest,
 )
-from tinkerbell.types.data import TensorData
+from tinker.types import TensorData
 from tinkerbell.types.optimizer import (
     OptimStepRequest,
     ZeroGradRequest,

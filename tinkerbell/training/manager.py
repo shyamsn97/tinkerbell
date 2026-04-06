@@ -9,10 +9,10 @@ from typing import Any, Dict, Optional
 import ray
 from fastapi import HTTPException
 
+from tinker.types import LoraConfig, LossFnType
+
 from tinkerbell.store import GlobalStore
 from tinkerbell.training.actor import TrainingActor
-from tinkerbell.types._models import LossFnType
-from tinkerbell.types.lora_config import LoraConfig
 from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
 from tinkerbell.types.requests import ForwardBackwardRequest, ForwardRequest
 from tinkerbell.types.responses import RemoteFuture

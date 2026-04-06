@@ -1,4 +1,5 @@
-from tinkerbell.types import ModalDeployConfig, LoraConfig, Datum, ModelInput
+from tinker.types import Datum, ModelInput, LoraConfig, TensorData
+from tinkerbell.types import ModalDeployConfig
 from tinkerbell.client import ServiceClient
 from tinkerbell.utils import save_dict_to_json
 import tempfile
@@ -138,8 +139,8 @@ for _ in range(batch_size):
     labels = torch.randint(0, tokenizer.vocab_size, (seq_len,)).tolist()
     
     datum = Datum(
-        model_input=ModelInput(input_ids=input_ids),
-        loss_fn_inputs={"labels": labels}
+        model_input=ModelInput.from_ints(input_ids),
+        loss_fn_inputs={"labels": TensorData(data=labels, dtype="int64", shape=[len(labels)])}
     )
     garbage_datums.append(datum)
 

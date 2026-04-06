@@ -96,9 +96,8 @@ def train():
     import wandb
     import time
     
+    from tinker.types import Datum, LoraConfig
     from tinkerbell.renderer import Renderer, TrainOnWhat
-    from tinkerbell.types.lora_config import LoraConfig
-    from tinkerbell.types.datum import Datum
     from tinkerbell.training.llm import LLM
     from tinkerbell.training.loss import cross_entropy_loss
 

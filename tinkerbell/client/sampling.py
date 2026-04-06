@@ -5,13 +5,14 @@ from typing import Any
 
 import torch
 
+from tinker.types import TensorData
+
 from tinkerbell.client.base import (
     AsyncTinkerbellFuture,
     BaseClient,
     TinkerbellFuture,
     retry_on_transient_error,
 )
-from tinkerbell.types.data import TensorData
 from tinkerbell.types.requests import (
     ActorStatusRequest,
     LoadCheckpointRequest,

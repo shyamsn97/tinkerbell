@@ -1,117 +1,42 @@
-# from https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/tensor_data.py
+"""Tensor data types and padding utilities.
+
+Re-exports TensorData from tinker SDK. Keeps internal helpers like PaddingStrategy.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
-from ._models import StrictBase, TensorDtype
+from tinker.types.tensor_data import TensorData
+from tinker.types.tensor_dtype import TensorDtype
+
+from ._models import StrictBase
 
 if TYPE_CHECKING:
     from PIL.Image import Image
 else:
     Image = Any
 
-
-_TENSOR_TO_NUMPY = {"float32": np.float32, "int64": np.int64}
-_TENSOR_TO_TORCH = {"float32": torch.float32, "int64": torch.int64}
-_NUMPY_KIND_TO_TENSOR = {"f": "float32", "i": "int64"}
+__all__ = ["TensorData", "PaddingStrategy"]
 
 
-def _convert_tensor_dtype_to_numpy(dtype: TensorDtype) -> npt.DTypeLike:
-    return _TENSOR_TO_NUMPY[dtype]
+def tensor_data_from_list(data: List[Any]) -> TensorData:
+    """Create TensorData from a plain Python list (convenience helper).
+
+    Tinker's TensorData doesn't have from_list(), so we provide this.
+    """
+    arr = np.array(data)
+    dtype: TensorDtype = "int64" if arr.dtype.kind == "i" else "float32"
+    return TensorData(data=data, dtype=dtype, shape=[len(data)])
 
 
-def _convert_tensor_dtype_to_torch(dtype: TensorDtype) -> torch.dtype:
-    return _TENSOR_TO_TORCH[dtype]
-
-
-def _convert_numpy_dtype_to_tensor(dtype: np.dtype[Any]) -> TensorDtype:
-    return _NUMPY_KIND_TO_TENSOR.get(dtype.kind, "float32")
-
-
-def _convert_torch_dtype_to_tensor(dtype: torch.dtype) -> TensorDtype:
-    return "float32" if getattr(dtype, "is_floating_point", False) else "int64"
-
-
-class TensorData(StrictBase):
-    data: List[int] | List[float]
-    """Flattened tensor data as array of numbers."""
-
-    dtype: TensorDtype
-
-    shape: List[int]
-    """The shape of the tensor (see PyTorch tensor.shape)."""
-
-    def __add__(self, other: TensorData) -> TensorData:
-        if len(self.shape) != len(other.shape):
-            raise ValueError("Shapes of tensors must match")
-        if self.dtype != other.dtype:
-            raise ValueError("Dtypes of tensors must match")
-        new_shape = []
-        for i in range(len(self.shape)):
-            new_shape.append(self.shape[i] + other.shape[i])
-        return TensorData(
-            data=self.data + other.data,
-            dtype=self.dtype,
-            shape=new_shape,
-        )
-
-    @classmethod
-    def from_numpy(cls, array: npt.NDArray[Any]) -> TensorData:
-        return cls(
-            data=array.flatten().tolist(),
-            dtype=_convert_numpy_dtype_to_tensor(array.dtype),
-            shape=list(array.shape),
-        )
-
-    @classmethod
-    def from_torch(cls, tensor: torch.Tensor) -> TensorData:
-        return cls(
-            data=tensor.flatten().tolist(),
-            dtype=_convert_torch_dtype_to_tensor(tensor.dtype),
-            shape=list(tensor.shape),
-        )
-
-    @classmethod
-    def from_list(cls, data: List[Any]) -> TensorData:
-        return cls(
-            data=data,
-            dtype=_convert_numpy_dtype_to_tensor(np.array(data).dtype),
-            shape=[len(data)],
-        )
-
-    def to_numpy(self) -> npt.NDArray[Any]:
-        """Convert TensorData to numpy array."""
-        numpy_dtype = _convert_tensor_dtype_to_numpy(self.dtype)
-        arr = np.array(self.data, dtype=numpy_dtype)
-        if self.shape is not None:
-            arr = arr.reshape(self.shape)
-        return arr
-
-    def to_torch(self, device: Any = None) -> torch.Tensor:
-        """Convert TensorData to torch tensor."""
-        torch_dtype = _convert_tensor_dtype_to_torch(self.dtype)
-        tensor = torch.tensor(self.data, dtype=torch_dtype)
-        if self.shape is not None:
-            tensor = tensor.reshape(self.shape)
-        if device is not None:
-            tensor = tensor.to(device)
-        return tensor
-
-    def tolist(self) -> List[Any]:
-        return self.to_numpy().tolist()
-
-    def slice(self, index: int) -> TensorData:
-        torch_tensor = self.to_torch()
-        torch_tensor = torch_tensor[index]
-        return TensorData.from_torch(torch_tensor)
-
-    def __len__(self) -> int:
-        return len(self.data)
+# Monkey-patch from_list onto TensorData for backwards compatibility
+if not hasattr(TensorData, "from_list"):
+    TensorData.from_list = classmethod(lambda cls, data: tensor_data_from_list(data))  # type: ignore[attr-defined]
 
 
 @dataclass
@@ -120,16 +45,12 @@ class ImageData:
     detail: Optional[Literal["auto", "low", "high"]] = "auto"
 
 
-# Type definitions for multimodal input data
-# Individual data item types for each modality
 ImageDataInputItem = Union[Image, str, ImageData, Dict]
 AudioDataInputItem = Union[str, Dict]
 VideoDataInputItem = Union[str, Dict]
-# Union type for any multimodal data item
 MultimodalDataInputItem = Union[
     ImageDataInputItem, VideoDataInputItem, AudioDataInputItem
 ]
-# Format types supporting single items, lists, or nested lists for batch processing
 MultimodalDataInputFormat = Union[
     List[List[MultimodalDataInputItem]],
     List[MultimodalDataInputItem],

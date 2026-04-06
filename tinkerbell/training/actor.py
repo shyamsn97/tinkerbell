@@ -6,11 +6,10 @@ import ray
 import torch
 import torch.distributed as dist
 
+from tinker.types import Datum, LoraConfig, LossFnType
+
 from tinkerbell.training.llm import LLM
 from tinkerbell.training.loss import LOSSES
-from tinkerbell.types._models import LossFnType
-from tinkerbell.types.datum import Datum
-from tinkerbell.types.lora_config import LoraConfig
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,8 @@
 from typing import Any, Literal, Optional
 
+from tinker.types import TensorData
+
 from ._models import BaseModel
-from .data import TensorData
 
 
 class HealthResponse(BaseModel):

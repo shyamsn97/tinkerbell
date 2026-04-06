@@ -2,11 +2,10 @@ import logging
 import time
 from typing import Any, Optional
 
+from tinker.types import Datum, LossFnType, TensorData
+
 from tinkerbell.client.base import AsyncTinkerbellFuture, BaseClient, TinkerbellFuture
 from tinkerbell.client.sampling import SamplingClient
-from tinkerbell.types import LossFnType
-from tinkerbell.types.data import TensorData
-from tinkerbell.types.datum import Datum
 from tinkerbell.types.optimizer import OptimStepRequest, ZeroGradRequest
 from tinkerbell.types.requests import (
     ActorStatusRequest,
