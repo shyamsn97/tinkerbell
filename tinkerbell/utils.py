@@ -1,44 +1,26 @@
-"""Utility functions for efficient tensor serialization/deserialization."""
+"""Utility functions for tinkerbell."""
+
+from __future__ import annotations
 
 import fnmatch
-import json
+import logging
 import os
-import pickle
 import re
 import signal
 import socket
 import sys
 import threading
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
-import dill
-import numpy as np
 import psutil
 import torch
 
+if TYPE_CHECKING:
+    from tinkerbell.training.engine import TrainingEngine
+    from tinkerbell.types.route import RouteKey
 
-def save_dict_to_json(data: dict[str, Any], filepath: str) -> None:
-    """Save a dictionary to a JSON file.
-
-    Args:
-        data: Dictionary to save
-        filepath: Path to the JSON file
-    """
-    with open(filepath, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def load_dict_from_json(filepath: str) -> dict[str, Any]:
-    """Load a dictionary from a JSON file.
-
-    Args:
-        filepath: Path to the JSON file
-
-    Returns:
-        Dictionary loaded from the file
-    """
-    with open(filepath, "r") as f:
-        return json.load(f)
+logger = logging.getLogger(__name__)
 
 
 def clean_model_name(name: str) -> str:
@@ -47,37 +29,6 @@ def clean_model_name(name: str) -> str:
     e.g., "Qwen/Qwen3-0.6B" -> "qwen_qwen3-0.6b"
     """
     return name.replace("/", "_").replace(":", "_").lower()
-
-
-def convert_to_tensor_data(key: str, value: Any) -> Any:
-    """Convert torch.Tensor, numpy array, dict, or 1-D list to TensorData if needed."""
-    from tinker.types import TensorData
-
-    from tinkerbell.types._models import _key_to_type
-
-    if isinstance(value, TensorData):
-        return value
-    elif isinstance(value, torch.Tensor):
-        return TensorData.from_torch(value)
-    elif isinstance(value, np.ndarray):
-        return TensorData.from_numpy(value)
-    elif (
-        isinstance(value, dict)
-        and "data" in value
-        and "dtype" in value
-    ):
-        return TensorData(**value)
-    elif isinstance(value, list):
-        return TensorData(
-            data=value, dtype=_key_to_type.get(key, "float32"), shape=[len(value)]
-        )
-    else:
-        return value
-
-
-def process_dict_values(data: dict[str, Any], converter_fn) -> dict[str, Any]:
-    """Apply converter function to all dictionary values."""
-    return {key: converter_fn(key, value) for key, value in data.items()}
 
 
 def pad_sequence(
@@ -112,30 +63,6 @@ def pad_sequence(
     return padded
 
 
-def stack_or_cat_tensors(
-    tensors: list[torch.Tensor],
-    padding_side: str = "left",
-    pad_value: int = 0,
-) -> torch.Tensor:
-    """Stack or concatenate tensors, handling already-batched and variable-length cases."""
-    if len(tensors) == 1:
-        return tensors[0] if tensors[0].ndim >= 2 else tensors[0].unsqueeze(0)
-
-    lengths = [t.shape[-1] if t.ndim >= 2 else len(t) for t in tensors]
-    if len(set(lengths)) > 1:
-        return pad_sequence(tensors, padding_side=padding_side, pad_value=pad_value)
-    return torch.cat(tensors) if tensors[0].ndim >= 2 else torch.stack(tensors)
-
-
-def get_actor_names_by_prefix(prefix: str, actors: list[dict[str, Any]]) -> list[str]:
-    return [
-        actor["name"]
-        for actor in actors
-        if actor["name"].startswith(prefix)
-        if actor["namespace"] == "tinkerbell"
-    ]
-
-
 def get_free_port() -> int:
     """
     Get a free port on the local machine.
@@ -161,23 +88,6 @@ def get_submodules_with_wildcard(model, pattern):
             matching_modules.append(name)
 
     return matching_modules
-
-
-def serialize(obj: Any) -> bytes:
-    """Serialize any object (tensor, class, nested structure) to bytes using dill."""
-    return dill.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def deserialize(data: bytes) -> Any:
-    """Deserialize bytes back to the original object."""
-    return dill.loads(data)
-
-
-# Aliases for backwards compatibility
-serialize_tensor = serialize
-deserialize_tensor = deserialize
-serialize_class = serialize
-deserialize_class = deserialize
 
 
 def get_host_and_port(server_url: str) -> tuple[str, int | None]:
@@ -315,3 +225,166 @@ def model_to_dict(obj, exclude: list[str] = [], exclude_none: bool = False):
         return out
     else:
         raise ValueError(f"Object {obj} is not a Pydantic model instance")
+
+
+# ---------------------------------------------------------------------------
+# Ray named-actor discovery (used by the API on boot to back-fill Registry).
+# ---------------------------------------------------------------------------
+
+
+def list_tinkerbell_actors() -> list[dict]:
+    """Return all named Ray actors in the "tinkerbell" namespace.
+
+    Normalizes the shape across Ray versions: some return `list[str]`, some
+    return `list[dict]`. Always returns `list[dict]` with `name` + `namespace`.
+    """
+    import ray
+
+    try:
+        actors = ray.util.list_named_actors(all_namespaces=True)
+    except TypeError:
+        actors = ray.util.list_named_actors()
+    normalized = []
+    for a in actors:
+        if isinstance(a, str):
+            normalized.append({"name": a, "namespace": "tinkerbell"})
+        elif isinstance(a, dict):
+            normalized.append(a)
+    return [a for a in normalized if a.get("namespace") == "tinkerbell"]
+
+
+def rehydrate_registry(
+    registry, base_model_hint: dict[RouteKey, str] | None = None
+) -> int:
+    """Inspect Ray for training/sampling actors and register any missing ones.
+
+    Called once on API boot. Walks the "tinkerbell" Ray namespace for actors
+    matching known naming conventions and re-registers them if the Registry
+    doesn't know about them (e.g. after a full cluster restart where detached
+    actors survived but the Registry did not).
+
+    Args:
+        registry: a Registry Ray actor handle.
+        base_model_hint: optional {route: base_model} to fill in base_model
+            on rehydrated records (otherwise we use model_name as a stand-in).
+
+    Returns the number of records added.
+    """
+    import ray
+
+    from tinkerbell.state.registry import EngineRecord
+    from tinkerbell.types.route import RouteKey as _RouteKey
+
+    base_model_hint = base_model_hint or {}
+    existing: dict[str, EngineRecord] = {
+        str(r.route): r for r in ray.get(registry.list.remote())
+    }
+    added = 0
+
+    # Training actors: naming is training_actor_{model_clean}_{rank}
+    training_by_model: dict[str, list[str]] = {}
+    sampling_by_model: dict[str, str] = {}
+    for a in list_tinkerbell_actors():
+        name = a.get("name", "")
+        if name.startswith("training_actor_"):
+            # Strip the trailing _{rank}
+            parts = name.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                model_clean = parts[0][len("training_actor_") :]
+                training_by_model.setdefault(model_clean, []).append(name)
+        elif name.startswith("sampling_actor_"):
+            model_clean = name[len("sampling_actor_") :]
+            sampling_by_model[model_clean] = name
+
+    now = time.time()
+    for model_clean, worker_names in training_by_model.items():
+        worker_names.sort()
+        route = _RouteKey(model=model_clean, adapter=None)
+        if str(route) in existing:
+            continue
+        record = EngineRecord(
+            kind="training",
+            route=route,
+            base_model=base_model_hint.get(route, model_clean),
+            worker_names=worker_names,
+            created_at=now,
+        )
+        ray.get(registry.register.remote(record))
+        added += 1
+        logger.info(f"Rehydrated training engine {route} ({len(worker_names)} workers)")
+
+    for model_clean, name in sampling_by_model.items():
+        route = _RouteKey(model=model_clean, adapter=None)
+        if str(route) in existing:
+            continue
+        record = EngineRecord(
+            kind="sampling",
+            route=route,
+            base_model=base_model_hint.get(route, model_clean),
+            worker_names=[name],
+            created_at=now,
+        )
+        ray.get(registry.register.remote(record))
+        added += 1
+        logger.info(f"Rehydrated sampling engine {route}")
+
+    return added
+
+
+# ---------------------------------------------------------------------------
+# Background job wrappers: run an engine method, write the result to JobStore.
+# Kicked off by the API as fire-and-forget asyncio tasks so one stuck upload
+# can't stall other work on the same engine.
+# ---------------------------------------------------------------------------
+
+
+async def run_save_checkpoint_job(
+    engine: TrainingEngine,
+    registry: Any,
+    job_store: Any,
+    job_id: str,
+    checkpoint_path: str,
+    adapter_name: str | None = None,
+) -> None:
+    from tinkerbell.types.jobs import ErrorRecord
+
+    try:
+        await engine.save_checkpoint(checkpoint_path, adapter_name=adapter_name)
+        if adapter_name:
+            await registry.update_adapter.remote(
+                engine.route, adapter_name, checkpoint_path
+            )
+        await job_store.set_success.remote(
+            job_id,
+            {
+                "model_name": engine.route.model,
+                "success": True,
+                "path": checkpoint_path,
+            },
+        )
+    except Exception as e:
+        logger.error(f"save_checkpoint failed: {e}", exc_info=True)
+        await job_store.set_error.remote(job_id, ErrorRecord.from_exception(e))
+
+
+async def run_push_to_hub_job(
+    engine: TrainingEngine,
+    job_store: Any,
+    job_id: str,
+    **push_kwargs: Any,
+) -> None:
+    from tinkerbell.types.jobs import ErrorRecord
+
+    try:
+        await engine.push_to_hub(**push_kwargs)
+        await job_store.set_success.remote(
+            job_id,
+            {
+                "model_name": engine.route.model,
+                "success": True,
+                "repo_id": push_kwargs.get("repo_id"),
+            },
+        )
+    except Exception as e:
+        logger.error(f"push_to_hub failed: {e}", exc_info=True)
+        await job_store.set_error.remote(job_id, ErrorRecord.from_exception(e))

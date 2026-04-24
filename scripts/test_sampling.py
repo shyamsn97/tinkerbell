@@ -1,9 +1,6 @@
 from tinker.types import Datum, ModelInput, LoraConfig, TensorData
 from tinkerbell.types import ModalDeployConfig
 from tinkerbell.client import ServiceClient
-from tinkerbell.utils import save_dict_to_json
-import tempfile
-import os
 import torch
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
@@ -16,7 +13,7 @@ deploy_config = ModalDeployConfig(
     gpu=GPU_TYPE, 
     num_gpus=NUM_GPUS,
     timeout=86400,
-    container_idle_timeout=600,
+    scaledown_window=600,
     max_inputs=200,
     max_wait_time=1200.0,
 )

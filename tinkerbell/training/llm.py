@@ -7,6 +7,7 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from tinker.types import Datum, LoraConfig
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -17,8 +18,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     parallelize_module,
 )
-
-from tinker.types import Datum, LoraConfig, TensorData
 
 from tinkerbell.types.lora_config import SUPPORTED_LORA_TARGET_MODULES
 from tinkerbell.utils import get_submodules_with_wildcard
@@ -192,7 +191,7 @@ class LLM:
 
         loss_fn_tensors = {}
         for key, td in (datum.loss_fn_inputs or {}).items():
-            loss_fn_tensors[key] = td.to_torch(device=device)
+            loss_fn_tensors[key] = td.to_torch().to(device)
 
         return {
             "model_input": {
@@ -227,6 +226,9 @@ class LLM:
 
             set_nested(result, path, padding_strategy.pad_sequence(values))
         return result
+
+    # Alias for backwards compatibility (scripts use model.pad())
+    pad = prepare_inputs
 
     def forward(
         self,

@@ -20,7 +20,7 @@ deploy_config = ModalDeployConfig(
     gpu=GPU_TYPE,
     num_gpus=NUM_GPUS,
     timeout=86400,
-    container_idle_timeout=600,
+    scaledown_window=600,
     max_inputs=200,
     max_wait_time=1200.0,
 )
@@ -243,17 +243,13 @@ for step in range(NUM_GRPO_STEPS):
             all_advantages.append(adv)
 
     # Train step: zero_grad → forward_backward → optim_step
-    training_client.zero_grad(immediate=True).result()
+    training_client.zero_grad().result()
     result = training_client.forward_backward(
         data=all_data,
         loss_fn="importance_sampling",
         return_logprobs=False,
-        immediate=True,
     ).result()
-    training_client.optim_step(
-        optimizer_params=OPTIMIZER_PARAMS,
-        immediate=True,
-    ).result()
+    training_client.optim_step(optimizer_params=OPTIMIZER_PARAMS).result()
 
     # Logging
     loss_val = result.loss if isinstance(result.loss, float) else np.mean(result.loss)

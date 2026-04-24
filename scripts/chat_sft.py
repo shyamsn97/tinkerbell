@@ -33,20 +33,17 @@ CHECKPOINT_INTERVAL = 100
 HUGGINGFACE_REPO_ID = "shyamsn97/tinkerbell-chat-sft"
 
 deploy_config = ModalDeployConfig(
+    server_url="https://jesterlabs--training-service.modal.run",
     gpu=GPU_TYPE, 
     num_gpus=NUM_GPUS,
     timeout=86400,
-    container_idle_timeout=600,
+    scaledown_window=600,
     max_inputs=200,
     max_wait_time=1200.0,
 )
 
-# Create training client and train
-server_url = "https://jesterlabs--training-service.modal.run"
-service_client = ServiceClient(server_url=server_url, timeout=600.0)
-print("Service client initialized")
-server_url = service_client.deploy_or_connect(deploy_config)
-print("Server URL: ", server_url)
+service_client = ServiceClient.deploy_or_connect(deploy_config, timeout=1200.0)
+print(f"Server URL: {service_client.server_url}")
 
 lora_config_1 = LoraConfig(
     rank=64,
@@ -59,18 +56,17 @@ lora_config_1 = LoraConfig(
 # This trades compute for memory by recomputing activations during backward
 training_client = service_client.create_training_client(
     base_model=MODEL_ID,
-    model_name="qwen-lora",  # Give it a name for multi-adapter support
+    model_name="qwen-lora",
     tp_size=NUM_GPUS,
     initialize_base_model=False,
     lora_config=lora_config_1.model_dump(),
-    adapter_name="task1_attention",  # Name the first adapter
+    adapter_name="task1_attention",
     model_kwargs={
         "torch_dtype": "bfloat16",
-        "gradient_checkpointing": True,  # Enable gradient checkpointing to save activation memory
-        # "use_cache": False,  # Disable KV cache during training to save memory
-        # "flash_attention": True,
+        "gradient_checkpointing": True,
     }
 )
+training_client.wait_until_ready()
 
 # create dataset
 class DatumDataset(Dataset):
@@ -98,10 +94,9 @@ datums = training_client.build_chat_samples(
 )
 
 original_count = len(datums)
-# Use len(datum.model_input) since ModelInput has __len__ that returns input_ids length
 datums = [
     datum for datum in datums 
-    if len(datum.model_input.input_ids) <= MAX_SEQUENCE_LENGTH
+    if datum.model_input.length <= MAX_SEQUENCE_LENGTH
 ]
 filtered_count = len(datums)
 print(f"Filtered dataset: {original_count} -> {filtered_count} samples (keeping sequences <= {MAX_SEQUENCE_LENGTH} tokens)")
@@ -153,14 +148,23 @@ for epoch in epoch_bar:
     # Track accumulated loss for logging
     accumulated_losses = []
 
+    # Track the most recent push_to_hub future so we can check (optionally) for
+    # errors without blocking. Pushing is fire-and-forget: training does NOT
+    # stall waiting for HF upload. Upload failures are logged via the next poll.
+    pending_push_future = None
+
     batch_bar = tqdm(dataloader, desc=f"Epoch {epoch}", leave=False)
     for batch_idx, batch in enumerate(batch_bar):
-        if batch_idx % CHECKPOINT_INTERVAL == 0:
-            training_client.push_to_hub(
+        if batch_idx > 0 and batch_idx % CHECKPOINT_INTERVAL == 0:
+            # Fire-and-forget: don't .result() here or we block training while
+            # HF uploads. If a previous push is still running, we still queue
+            # another one; the actor serializes them.
+            pending_push_future = training_client.push_to_hub(
                 repo_id=HUGGINGFACE_REPO_ID,
                 token=os.getenv("HF_TOKEN"),
                 private=False,
-            ).result()
+            )
+            print(f"[push_to_hub] submitted at batch_idx={batch_idx} (non-blocking)")
 
         # Start timing at beginning of accumulation cycle
         if batch_idx % GRADIENT_ACCUMULATION_STEPS == 0:
@@ -172,7 +176,6 @@ for epoch in epoch_bar:
         response = training_client.forward_backward(
             data=batch,
             zero_grad=should_zero_grad,
-            immediate=True,
         ).result()
 
         # Accumulate losses for logging
@@ -181,7 +184,7 @@ for epoch in epoch_bar:
 
         # Optimizer step after accumulating gradients
         if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
-            training_client.optim_step(optimizer_params=optimizer_params, immediate=True).result()
+            training_client.optim_step(optimizer_params=optimizer_params).result()
 
             step_time = time.time() - step_start_time
 
@@ -207,7 +210,7 @@ for epoch in epoch_bar:
 
     # Handle remaining batches that don't complete an accumulation cycle
     if accumulated_losses:
-        training_client.optim_step(optimizer_params=optimizer_params, immediate=True).result()
+        training_client.optim_step(optimizer_params=optimizer_params).result()
 
         step_time = time.time() - step_start_time
         avg_loss = sum(accumulated_losses) / len(accumulated_losses)

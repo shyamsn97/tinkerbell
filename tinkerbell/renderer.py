@@ -2,9 +2,8 @@
 
 from enum import StrEnum
 
-from transformers import AutoTokenizer
-
 from tinker.types import Datum, ModelInput, TensorData
+from transformers import AutoTokenizer
 
 MASK_TOKEN_ID = -100
 
@@ -112,7 +111,6 @@ class Renderer:
             **kwargs,
         )
         full_ids = self.tokenizer.encode(full_text, add_special_tokens=True)
-        attention_mask = [1] * len(full_ids)
 
         train_roles = None
         if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:

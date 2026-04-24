@@ -2,12 +2,23 @@ from typing import Any, Literal, Optional
 
 from tinker.types import TensorData
 
-from ._models import BaseModel
+from .base import BaseModel
 
 
 class HealthResponse(BaseModel):
     status: Literal["ok", "healthy"]
     name: Optional[str] = None
+
+
+class ZeroGradResponse(BaseModel):
+    model_name: str
+    message: str
+
+
+class OptimStepResponse(BaseModel):
+    model_name: str
+    message: str
+    metrics: Optional[dict[str, float]] = None
 
 
 class CreateTrainingActorsResponse(BaseModel):
@@ -18,7 +29,6 @@ class CreateTrainingActorsResponse(BaseModel):
 
 class ForwardResponse(BaseModel):
     model_name: str  # Actor group name
-    request_id: str | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, Any] | None = None
     metrics: Optional[dict[str, float]] = None
@@ -26,7 +36,6 @@ class ForwardResponse(BaseModel):
 
 class ForwardBackwardResponse(BaseModel):
     model_name: str  # Actor group name
-    request_id: str | None = None
     loss: float | list[float] | None = None
     logprobs: TensorData | None = None
     outputs: dict[str, TensorData] | None = None
@@ -37,15 +46,6 @@ class ForwardBackwardResponse(BaseModel):
 class ActorStatusResponse(BaseModel):
     status: Literal["ready", "pending", "not_present"]
     message: str | None = None
-
-
-class RemoteFuture(BaseModel):
-    request_id: str
-    model_name: str | None = None  # Actor group name (optional, for context)
-
-
-class GetRayActorsResponse(BaseModel):
-    actor_names: list[str]
 
 
 class SaveCheckpointResponse(BaseModel):

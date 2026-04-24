@@ -8,6 +8,7 @@ def cross_entropy_loss(
     logprobs: torch.Tensor,
     labels: torch.Tensor,
     mask_token_id: int = MASK_TOKEN_ID,
+    **kwargs,
 ) -> torch.Tensor:
     """Compute cross-entropy loss for causal language modeling.
 
@@ -47,6 +48,7 @@ def importance_sampling_loss(
     advantages: torch.Tensor,
     mask_token_id: int = MASK_TOKEN_ID,
     ratio_clip: float = 10.0,
+    **kwargs,
 ) -> torch.Tensor:
     """Compute truncated importance sampling loss for off-policy GRPO.
 

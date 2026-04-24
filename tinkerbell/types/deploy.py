@@ -1,6 +1,6 @@
 import logging
 
-from ._models import BaseModel
+from .base import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class ModalDeployConfig(DeployConfig):
     gpu: str = "H100"
     num_gpus: int = 1
     timeout: int = 86400
-    container_idle_timeout: int = 600
+    scaledown_window: int = 600
     max_inputs: int = 100
 
     @property
@@ -37,9 +37,7 @@ class ModalDeployConfig(DeployConfig):
             import httpx
             import modal
 
-            existing_function = modal.Function.from_name(
-                "tinkerbell-service", "deploy_on_modal.<locals>.serve"
-            )
+            existing_function = modal.Function.from_name("tinkerbell-service", "serve")
             existing_url = existing_function.web_url
 
             # Verify the server is actually active by checking health endpoint
@@ -64,7 +62,7 @@ class ModalDeployConfig(DeployConfig):
             raise e
 
     def deploy(self) -> str:
-        from tinkerbell.service.server import deploy_on_modal
+        from tinkerbell.api.deploy import deploy_on_modal
 
         modal_url = deploy_on_modal(
             server_url=self.server_url,
@@ -73,7 +71,7 @@ class ModalDeployConfig(DeployConfig):
             gpu=self.gpu,
             num_gpus=self.num_gpus,
             timeout=self.timeout,
-            container_idle_timeout=self.container_idle_timeout,
+            scaledown_window=self.scaledown_window,
             max_inputs=self.max_inputs,
         )
         return modal_url

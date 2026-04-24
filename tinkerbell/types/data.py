@@ -10,11 +10,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 import numpy as np
 import torch
-
 from tinker.types.tensor_data import TensorData
 from tinker.types.tensor_dtype import TensorDtype
 
-from ._models import StrictBase
+from .base import StrictBase
 
 if TYPE_CHECKING:
     from PIL.Image import Image

@@ -1,14 +1,16 @@
-"""Tinkerbell types - re-exports tinker SDK types for public API compatibility,
-plus internal types for server/actor protocol."""
+"""Tinkerbell types.
 
-# Core types from tinker SDK (public API)
+Public imports re-export tinker SDK types for API compatibility. Internal
+types cover the HTTP protocol and the server-internal ops/jobs pipeline.
+"""
+
 from tinker.types import (
     AdamParams,
     Datum,
     EncodedTextChunk,
     ForwardBackwardOutput,
-    LossFnType,
     LoraConfig,
+    LossFnType,
     ModelInput,
     SampledSequence,
     SamplingParams,
@@ -16,59 +18,53 @@ from tinker.types import (
     TensorDtype,
 )
 
-# Re-export SampleResponse from tinker as TinkerSampleResponse to avoid clash
-from tinker.types import SampleResponse as TinkerSampleResponse
-
-# Internal base models
-from ._models import BaseModel, StrictBase
-
-# Internal data utilities
-from .data import PaddingStrategy
-
-# Infrastructure types (tinkerbell-specific)
-from .deploy import DeployConfig, ModalDeployConfig
-
-# Internal server protocol types
-from .optimizer import (
-    OptimStepRequest,
-    OptimStepResponse,
-    ZeroGradRequest,
-    ZeroGradResponse,
+from tinkerbell.types.base import BaseModel, StrictBase
+from tinkerbell.types.data import PaddingStrategy
+from tinkerbell.types.deploy import DeployConfig, ModalDeployConfig
+from tinkerbell.types.jobs import (
+    ErrorRecord,
+    JobHandle,
+    JobKind,
+    JobRecord,
+    JobStatus,
+    PollRequest,
+    SubmitResponse,
 )
-from .requests import (
+from tinkerbell.types.requests import (
     ActorStatusRequest,
     CreateSamplingActorRequest,
     CreateTrainingActorsRequest,
     ForwardBackwardRequest,
     ForwardRequest,
     LoadCheckpointRequest,
+    OptimStepRequest,
     PollResultRequest,
     PushToHubRequest,
     SampleRequest,
     SaveCheckpointRequest,
     ShutdownSamplingActorRequest,
+    ZeroGradRequest,
 )
-from .responses import (
+from tinkerbell.types.responses import (
     ActorStatusResponse,
     CreateSamplingActorResponse,
     CreateTrainingActorsResponse,
     ForwardBackwardResponse,
     ForwardResponse,
-    GetRayActorsResponse,
     HealthResponse,
     LoadCheckpointResponse,
+    OptimStepResponse,
     PollResultResponse,
     PushToHubResponse,
-    RemoteFuture,
+    SampleResponse,
     SaveCheckpointResponse,
     ShutdownSamplingActorResponse,
+    ZeroGradResponse,
 )
-
-# Internal SampleResponse (different from tinker's - this is our SGLang wrapper)
-from .responses import SampleResponse as InternalSampleResponse
+from tinkerbell.types.route import RouteKey
 
 __all__ = [
-    # tinker SDK types (public API)
+    # tinker SDK re-exports
     "AdamParams",
     "Datum",
     "EncodedTextChunk",
@@ -80,43 +76,51 @@ __all__ = [
     "SamplingParams",
     "TensorData",
     "TensorDtype",
-    "TinkerSampleResponse",
-    # Internal base models
+    # Base models
     "BaseModel",
     "StrictBase",
-    # Internal data utilities
+    # Data utilities
     "PaddingStrategy",
     # Infrastructure
     "DeployConfig",
     "ModalDeployConfig",
-    # Internal server protocol
-    "OptimStepRequest",
-    "OptimStepResponse",
-    "ZeroGradRequest",
-    "ZeroGradResponse",
+    # Job system
+    "ErrorRecord",
+    "JobHandle",
+    "JobKind",
+    "JobRecord",
+    "JobStatus",
+    "PollRequest",
+    "SubmitResponse",
+    # Routing
+    "RouteKey",
+    # Protocol — requests
     "ActorStatusRequest",
     "CreateSamplingActorRequest",
     "CreateTrainingActorsRequest",
     "ForwardBackwardRequest",
     "ForwardRequest",
     "LoadCheckpointRequest",
+    "OptimStepRequest",
     "PollResultRequest",
     "PushToHubRequest",
     "SampleRequest",
     "SaveCheckpointRequest",
     "ShutdownSamplingActorRequest",
+    "ZeroGradRequest",
+    # Protocol — responses
     "ActorStatusResponse",
     "CreateSamplingActorResponse",
     "CreateTrainingActorsResponse",
     "ForwardBackwardResponse",
     "ForwardResponse",
-    "GetRayActorsResponse",
     "HealthResponse",
-    "InternalSampleResponse",
     "LoadCheckpointResponse",
+    "OptimStepResponse",
     "PollResultResponse",
     "PushToHubResponse",
-    "RemoteFuture",
+    "SampleResponse",
     "SaveCheckpointResponse",
     "ShutdownSamplingActorResponse",
+    "ZeroGradResponse",
 ]

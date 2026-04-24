@@ -14,7 +14,7 @@ deploy_config = ModalDeployConfig(
     gpu=GPU_TYPE, 
     num_gpus=6,
     timeout=86400,
-    container_idle_timeout=600,
+    scaledown_window=600,
     max_inputs=200,
     max_wait_time=1200.0,
 )
@@ -42,14 +42,6 @@ print("Deployed to: ", service_client.server_url)
 print("Server health check:")
 health_response = service_client.get_health()
 print("Health Response: ", health_response)
-
-print("Get Ray Actors:")
-ray_actors = service_client.get_ray_actors()
-print("Ray actors: ", ray_actors)
-
-print(f"\nRay Actors ({len(ray_actors)} total):")
-for actor_name in ray_actors:
-    print(f"  - {actor_name}")
 
 print("Get Store Keys:")
 store_keys_response = service_client.get_store_keys()
@@ -132,9 +124,6 @@ print("=" * 70)
 # ============================================================================
 print("\n" + "=" * 70)
 print("TRAINING EXAMPLE: Multi-adapter training with separate clients")
-print("Get Ray Actors:")
-ray_actors = service_client.get_ray_actors()
-print("Ray actors: ", ray_actors)
 print("=" * 70)
 
 # Create different training examples for different adapters
@@ -338,10 +327,6 @@ print("=" * 70)
 # ============================================================================
 print("\n" + "=" * 70)
 print("INFERENCE EXAMPLE: Generating text with trained models")
-print("Get Ray Actors:")
-ray_actors = service_client.get_ray_actors()
-print("Ray actors: ", ray_actors)
-
 print("=" * 70 + "\n")
 
 # Prepare inference prompts for different tasks

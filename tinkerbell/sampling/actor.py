@@ -37,6 +37,7 @@ class SGLangSamplingActor:
 
         self.client = None
         self.server_process = None
+        self._loaded_adapters = {}
         self.port = self._find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
 
@@ -199,7 +200,9 @@ class SGLangSamplingActor:
                 },
                 timeout=600.0,
             )
-            logger.debug(f"Load LoRA response: {response.status_code} - {response.text}")
+            logger.debug(
+                f"Load LoRA response: {response.status_code} - {response.text}"
+            )
 
             if response.status_code == 200:
                 try:

@@ -3,11 +3,10 @@
 Re-exports core types from tinker SDK for API compatibility.
 """
 
-from tinker.types.loss_fn_type import LossFnType
-from tinker.types.tensor_dtype import TensorDtype
-
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict
+from tinker.types.loss_fn_type import LossFnType
+from tinker.types.tensor_dtype import TensorDtype
 
 __all__ = ["StrictBase", "BaseModel", "TensorDtype", "LossFnType", "_key_to_type"]
 
