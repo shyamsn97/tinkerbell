@@ -1,12 +1,30 @@
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import Field
+from tinker.types import Datum, LoraConfig, LossFnType, TensorData
 
-from ._models import BaseModel, LossFnType, StrictBase
-from .data import MultimodalDataInputFormat, TensorData
-from .datum import Datum
-from .lora_config import LoraConfig
-from .optimizer import DEFAULT_SCHEDULER_PARAMS
+from .base import BaseModel, StrictBase
+from .data import MultimodalDataInputFormat
+
+DEFAULT_OPTIMIZER_PARAMS: dict[str, Any] = {
+    "name": "adamw",
+    "lr": 5e-5,
+    "betas": (0.9, 0.95),
+    "eps": 1e-8,
+    "weight_decay": 0.01,
+}
+DEFAULT_SCHEDULER_PARAMS: dict[str, Any] = {"scheduler": "cosine"}
+
+
+class ZeroGradRequest(StrictBase):
+    model_name: str
+    adapter_name: Optional[str] = None
+
+
+class OptimStepRequest(StrictBase):
+    model_name: str
+    adapter_name: Optional[str] = None
+    optimizer_params: dict[str, Any] = {}
 
 
 class CreateTrainingActorsRequest(StrictBase):
@@ -45,27 +63,23 @@ class PushToHubRequest(StrictBase):
 
 class ForwardRequest(StrictBase):
     model_name: str  # Actor group name for routing
-    request_id: Optional[str] = None
     data: list[Datum] = Field(default_factory=lambda: [])
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
 
 
 class ForwardBackwardRequest(StrictBase):
     model_name: str  # Actor group name for routing
-    request_id: Optional[str] = None
     adapter_name: Optional[str] = None  # Which LoRA adapter to use
     data: list[Datum] = Field(default_factory=lambda: [])
     forward_kwargs: dict[str, Any] = Field(default_factory=lambda: {})
     loss_fn: LossFnType = "cross_entropy"
+    loss_fn_config: Optional[dict[str, float]] = None
     return_logprobs: bool = False
     zero_grad: bool = (
         True  # Zero gradients before forward/backward (set False for gradient accumulation)
     )
     optimizer_params: Optional[dict[str, Any]] = (
         None  # If provided, run optim_step after backward (combines into single round trip)
-    )
-    immediate: bool = (
-        False  # If True, process the batch queue immediately instead of waiting for clock cycle
     )
 
 

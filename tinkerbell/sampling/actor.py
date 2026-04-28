@@ -33,10 +33,11 @@ class SGLangSamplingActor:
         from sglang.srt.entrypoints.http_server import launch_server
         from sglang.srt.server_args import ServerArgs
 
-        print(f"🚀 Initializing SGLang: model={base_model}, tp={tp_size}", flush=True)
+        logger.info(f"Initializing SGLang: model={base_model}, tp={tp_size}")
 
         self.client = None
         self.server_process = None
+        self._loaded_adapters = {}
         self.port = self._find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
 
@@ -70,7 +71,7 @@ class SGLangSamplingActor:
             raise
 
         self.client = httpx.Client(base_url=self.base_url, timeout=httpx.Timeout(600.0))
-        print(f"✓ SGLang server running on {self.base_url}", flush=True)
+        logger.info(f"SGLang server running on {self.base_url}")
 
     def _find_free_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -161,19 +162,13 @@ class SGLangSamplingActor:
                 logger.info(
                     f"  SGLang lora_target_modules: {list(SUPPORTED_LORA_TARGET_MODULES)}"
                 )
-            # Try to unload any existing LoRAs with similar paths to force fresh load
+            # Unload any existing LoRAs with similar paths to force fresh load
             try:
-                # Get list of currently loaded LoRAs
                 info_resp = self.client.get("/get_server_info", timeout=10.0)
                 if info_resp.status_code == 200:
                     server_info = info_resp.json()
                     lora_paths_info = server_info.get("lora_paths", [])
-                    print(
-                        f"Currently loaded LoRAs: {[lp.get('lora_name') for lp in lora_paths_info]}",
-                        flush=True,
-                    )
 
-                    # Unload any LoRA with matching base path
                     base_path = (
                         lora_path.rsplit("-step", 1)[0]
                         if "-step" in lora_path
@@ -187,22 +182,16 @@ class SGLangSamplingActor:
                             else existing_name
                         )
                         if existing_base == base_path or existing_name == lora_name:
-                            print(
-                                f"Unloading existing LoRA: {existing_name}", flush=True
-                            )
-                            unload_resp = self.client.post(
+                            logger.debug(f"Unloading existing LoRA: {existing_name}")
+                            self.client.post(
                                 "/unload_lora_adapter",
                                 json={"lora_name": existing_name},
                                 timeout=60.0,
                             )
-                            print(
-                                f"Unload response: {unload_resp.status_code} - {unload_resp.text}",
-                                flush=True,
-                            )
             except Exception as e:
-                print(f"Error checking/unloading existing LoRAs: {e}", flush=True)
+                logger.warning(f"Error checking/unloading existing LoRAs: {e}")
 
-            print(f"Loading LoRA '{lora_name}' from path: {lora_path}", flush=True)
+            logger.info(f"Loading LoRA '{lora_name}' from path: {lora_path}")
             response = self.client.post(
                 "/load_lora_adapter",
                 json={
@@ -211,37 +200,18 @@ class SGLangSamplingActor:
                 },
                 timeout=600.0,
             )
-            print(
-                f"Load LoRA response: {response.status_code} - {response.text}",
-                flush=True,
+            logger.debug(
+                f"Load LoRA response: {response.status_code} - {response.text}"
             )
 
-            # Track dynamically loaded adapters from the response
             if response.status_code == 200:
                 try:
-                    load_result = response.json()
-                    loaded_adapters = load_result.get("loaded_adapters", {})
+                    loaded_adapters = response.json().get("loaded_adapters", {})
                     if not hasattr(self, "_loaded_adapters"):
                         self._loaded_adapters = {}
                     self._loaded_adapters.update(loaded_adapters)
-                    print(
-                        f"Tracked loaded adapters: {list(self._loaded_adapters.keys())}",
-                        flush=True,
-                    )
                 except Exception as e:
-                    print(f"Error parsing load response: {e}", flush=True)
-
-            # Verify the LoRA was actually loaded (check our tracked adapters, not server_info)
-            if hasattr(self, "_loaded_adapters") and lora_name in self._loaded_adapters:
-                print(
-                    f"✓ Verified: LoRA '{lora_name}' is in tracked loaded adapters",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"⚠️  WARNING: LoRA '{lora_name}' not in tracked loaded adapters!",
-                    flush=True,
-                )
+                    logger.warning(f"Error parsing load response: {e}")
         else:
             response = self.client.post(
                 "/update_weights_from_disk",
@@ -255,10 +225,7 @@ class SGLangSamplingActor:
         if response.status_code != 200:
             logger.error(f"SGLang response {response.status_code}: {response.text}")
         response.raise_for_status()
-        print(
-            f"✓ {'LoRA' if is_lora else 'Checkpoint'} loaded: {checkpoint_path}",
-            flush=True,
-        )
+        logger.info(f"{'LoRA' if is_lora else 'Checkpoint'} loaded: {checkpoint_path}")
         return {"is_lora": is_lora, "lora_name": lora_name}
 
     def get_lora_info(self) -> dict[str, Any]:
@@ -288,15 +255,9 @@ class SGLangSamplingActor:
         return {"error": "Failed to get server info"}
 
     def sample(self, sample_request: dict[str, Any]):
-        # Debug: log the lora_path being used
         lora_path = sample_request.get("lora_path")
-        # Also set lora_name in case SGLang expects that instead
         if lora_path and "lora_name" not in sample_request:
             sample_request["lora_name"] = lora_path
-        print(
-            f"[SAMPLE] lora_path={lora_path}, lora_name={sample_request.get('lora_name')}",
-            flush=True,
-        )
         response = self.client.post("/generate", json=sample_request)
         response.raise_for_status()
         result = response.json()

@@ -2,11 +2,8 @@
 
 from enum import StrEnum
 
+from tinker.types import Datum, ModelInput, TensorData
 from transformers import AutoTokenizer
-
-from tinkerbell.types.data import TensorData
-from tinkerbell.types.datum import Datum
-from tinkerbell.types.model_input import ModelInput
 
 MASK_TOKEN_ID = -100
 
@@ -102,16 +99,7 @@ class Renderer:
                 )
             input_ids = self.tokenizer.encode(text, add_special_tokens=False)
             return Datum(
-                model_input=ModelInput(
-                    input_ids=TensorData(
-                        data=input_ids, dtype="int64", shape=[len(input_ids)]
-                    ),
-                    attention_mask=TensorData(
-                        data=[1] * len(input_ids),
-                        dtype="int64",
-                        shape=[len(input_ids)],
-                    ),
-                ),
+                model_input=ModelInput.from_ints(input_ids),
                 loss_fn_inputs={},
             )
 
@@ -123,7 +111,6 @@ class Renderer:
             **kwargs,
         )
         full_ids = self.tokenizer.encode(full_text, add_special_tokens=True)
-        attention_mask = [1] * len(full_ids)
 
         train_roles = None
         if train_on_what == TrainOnWhat.LAST_ASSISTANT_MESSAGE:
@@ -149,14 +136,7 @@ class Renderer:
         labels = labels[1:] + [mask_value]
 
         return Datum(
-            model_input=ModelInput(
-                input_ids=TensorData(
-                    data=full_ids, dtype="int64", shape=[len(full_ids)]
-                ),
-                attention_mask=TensorData(
-                    data=attention_mask, dtype="int64", shape=[len(attention_mask)]
-                ),
-            ),
+            model_input=ModelInput.from_ints(full_ids),
             loss_fn_inputs={
                 "labels": TensorData(data=labels, dtype="int64", shape=[len(labels)])
             },

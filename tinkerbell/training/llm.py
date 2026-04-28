@@ -7,6 +7,7 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from tinker.types import Datum, LoraConfig
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -18,8 +19,7 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
-from tinkerbell.types.datum import Datum
-from tinkerbell.types.lora_config import SUPPORTED_LORA_TARGET_MODULES, LoraConfig
+from tinkerbell.types.lora_config import SUPPORTED_LORA_TARGET_MODULES
 from tinkerbell.utils import get_submodules_with_wildcard
 
 logger = logging.getLogger(__name__)
@@ -183,12 +183,30 @@ class LLM:
         self.model.set_adapter(adapter_name)
         self.active_adapter = adapter_name
 
+    def _datum_to_tensors(self, datum: Datum, device: torch.device) -> dict:
+        """Convert a tinker Datum to internal tensor representation."""
+        input_ids = datum.model_input.to_ints()
+        input_ids_tensor = torch.tensor(input_ids, dtype=torch.long, device=device)
+        attention_mask_tensor = torch.ones_like(input_ids_tensor)
+
+        loss_fn_tensors = {}
+        for key, td in (datum.loss_fn_inputs or {}).items():
+            loss_fn_tensors[key] = td.to_torch().to(device)
+
+        return {
+            "model_input": {
+                "input_ids": input_ids_tensor,
+                "attention_mask": attention_mask_tensor,
+            },
+            "loss_fn_inputs": loss_fn_tensors,
+        }
+
     def prepare_inputs(
         self, data: list[Datum], device: torch.device
     ) -> dict[str, torch.Tensor]:
         from tinkerbell.utils import get_nested, set_nested
 
-        torch_data = [d.to_torch(device=device) for d in data]
+        torch_data = [self._datum_to_tensors(d, device) for d in data]
         result = {}
 
         for path, padding_strategy in self.padding_strategies.items():
@@ -208,6 +226,9 @@ class LLM:
 
             set_nested(result, path, padding_strategy.pad_sequence(values))
         return result
+
+    # Alias for backwards compatibility (scripts use model.pad())
+    pad = prepare_inputs
 
     def forward(
         self,

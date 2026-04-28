@@ -8,6 +8,7 @@ def cross_entropy_loss(
     logprobs: torch.Tensor,
     labels: torch.Tensor,
     mask_token_id: int = MASK_TOKEN_ID,
+    **kwargs,
 ) -> torch.Tensor:
     """Compute cross-entropy loss for causal language modeling.
 
@@ -47,86 +48,46 @@ def importance_sampling_loss(
     advantages: torch.Tensor,
     mask_token_id: int = MASK_TOKEN_ID,
     ratio_clip: float = 10.0,
-    debug: bool = True,
+    **kwargs,
 ) -> torch.Tensor:
-    """Compute truncated importance sampling loss per the off-policy RL fix.
+    """Compute truncated importance sampling loss for off-policy GRPO.
 
-    Implements: min(π_learner/π_sampler, C) · R(a) · ∇_θ log π_learner
+    Implements: loss = -min(π_learner/π_sampler, C) · advantage · log π_learner
 
-    This handles the mismatch between vLLM/SGLang (sampler) and HF (learner)
-    by using truncated importance sampling.
+    The truncated ratio handles the log-probability mismatch between the
+    sampling engine (SGLang/vLLM) and the training model (HuggingFace) by
+    capping the importance weight, preventing exploding/vanishing gradients.
 
     Args:
-        logprobs: Model log probabilities of size (batch_size, seq_len, vocab_size) or (batch_size, seq_len)]
-        labels: Target labels of shape [batch_size, seq_len]
-        sampling_logprobs: Log probabilities from the sampler for each token
-        advantages: Advantage values of shape [batch_size, seq_len]
-        ratio_clip: Maximum value for importance ratio (C in the paper)
+        logprobs: [batch, seq, vocab] or [batch, seq] model log-probs.
+        labels: [batch, seq] target token ids (-100 = masked).
+        sampling_logprobs: [batch, seq] log-probs from the sampler.
+        advantages: [batch, seq] per-token advantage values.
+        ratio_clip: Upper bound C for the importance ratio.
 
     Returns:
-        Per-example loss of shape [batch_size]
+        Per-example loss of shape [batch].
     """
-    batch_size = labels.shape[0]
-    seq_len = labels.shape[1]
+    batch_size, seq_len = labels.shape
 
-    # Ensure logprobs are float32
     logprobs = logprobs.float()
     sampling_logprobs = sampling_logprobs.float()
     advantages = advantages.float()
 
-    if len(logprobs.shape) == 3:
-        # Replace -100 (mask token) with 0 for gathering - these positions will be masked later
-        gather_indices = labels.clone()
-        gather_indices[gather_indices == mask_token_id] = 0
-        logprobs = torch.gather(
-            logprobs, dim=-1, index=gather_indices.view(batch_size, seq_len, 1)
-        )
+    if logprobs.ndim == 3:
+        gather_idx = labels.clone()
+        gather_idx[gather_idx == mask_token_id] = 0
+        logprobs = torch.gather(logprobs, dim=-1, index=gather_idx.unsqueeze(-1))
 
-    target_logprobs = logprobs.view(batch_size, seq_len)
-    sampling_logprobs = sampling_logprobs.view(batch_size, seq_len)
+    target_lp = logprobs.view(batch_size, seq_len)
+    sampling_lp = sampling_logprobs.view(batch_size, seq_len)
     advantages = advantages.view(batch_size, seq_len)
-
-    # Mask for valid tokens
     mask = (labels != mask_token_id).float()
 
-    # Compute importance ratio: π_learner / π_sampler
-    # Use clamp on log-space difference to prevent numerical issues
-    log_ratio = target_logprobs - sampling_logprobs
-    log_ratio_clamped = torch.clamp(
-        log_ratio, min=-20.0, max=20.0
-    )  # Prevent exp overflow/underflow
-    prob_ratio = torch.exp(log_ratio_clamped)
+    log_ratio = torch.clamp(target_lp - sampling_lp, min=-20.0, max=20.0)
+    truncated_ratio = torch.clamp(torch.exp(log_ratio), min=1e-4, max=ratio_clip)
 
-    # Truncated importance sampling: min(ratio, C)
-    # Also add a lower bound to prevent completely dead gradients
-    truncated_ratio = torch.clamp(prob_ratio, min=1e-4, max=ratio_clip)
-
-    if debug:
-        print(
-            f"  [LOSS DEBUG] target_logprobs mean: {(target_logprobs * mask).sum() / mask.sum():.4f}"
-        )
-        print(
-            f"  [LOSS DEBUG] sampling_logprobs mean: {(sampling_logprobs * mask).sum() / mask.sum():.4f}"
-        )
-        print(
-            f"  [LOSS DEBUG] log_ratio mean: {(log_ratio * mask).sum() / mask.sum():.4f}"
-        )
-        print(
-            f"  [LOSS DEBUG] truncated_ratio mean: {(truncated_ratio * mask).sum() / mask.sum():.4f}"
-        )
-        print(
-            f"  [LOSS DEBUG] advantages mean: {(advantages * mask).sum() / mask.sum():.4f}"
-        )
-
-    # Loss = -truncated_ratio * advantage * log_π_learner
-    # Gradient: truncated_ratio * advantage * ∇log_π_learner (REINFORCE with IS correction)
-    # Note: truncated_ratio is detached to only use it as a weight, not for its own gradient
-    loss_per_token = -truncated_ratio.detach() * advantages * target_logprobs * mask
-    loss = loss_per_token.sum(dim=-1)
-
-    if debug:
-        print(f"  [LOSS DEBUG] per-sample loss: {loss.tolist()[:5]}")
-
+    loss = -(truncated_ratio.detach() * advantages * target_lp * mask).sum(dim=-1)
     return loss
 
 

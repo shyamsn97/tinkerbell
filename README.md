@@ -39,7 +39,7 @@ pip install "sglang[all]"
 ### 1. Start the Service
 
 ```python
-from tinkerbell.service.server import deploy_service
+from tinkerbell.api import deploy_service
 
 # Deploy the training service
 server_url = deploy_service(
