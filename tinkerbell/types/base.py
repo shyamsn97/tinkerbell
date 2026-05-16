@@ -29,7 +29,7 @@ _key_to_type = {
 class StrictBase(PydanticBaseModel):
     """Base model for request types with strict validation."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     def __str__(self) -> str:
         return repr(self)
@@ -38,7 +38,7 @@ class StrictBase(PydanticBaseModel):
 class BaseModel(PydanticBaseModel):
     """Base model for response types with flexible validation."""
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
+    model_config = ConfigDict(frozen=True, extra="ignore", arbitrary_types_allowed=True)
 
     def __str__(self) -> str:
         return repr(self)

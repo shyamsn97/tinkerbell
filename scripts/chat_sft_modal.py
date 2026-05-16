@@ -186,6 +186,7 @@ def train():
     # Initialize wandb
     wandb.init(
         project="tinkerbell-chat-sft-local",
+        settings=wandb.Settings(x_save_requirements=False, disable_code=True),
         config={
             "base_model": MODEL_ID,
             "gpu_type": GPU_TYPE,

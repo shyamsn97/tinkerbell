@@ -36,8 +36,14 @@ class SGLangSamplingActor:
         logger.info(f"Initializing SGLang: model={base_model}, tp={tp_size}")
 
         self.client = None
+        # AsyncClient is created lazily on first sample() call, so the asyncio
+        # loop (created by Ray for async actors) is guaranteed to exist.
+        self.async_client: httpx.AsyncClient | None = None
         self.server_process = None
         self._loaded_adapters = {}
+        self._inflight_samples = 0
+        self._loading_weights = False
+        self._barrier = None
         self.port = self._find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
 
@@ -119,114 +125,141 @@ class SGLangSamplingActor:
                 return True
         return False
 
-    def update_weights_from_disk(
+    async def _ensure_async_client(self) -> httpx.AsyncClient:
+        if self.async_client is None:
+            self.async_client = httpx.AsyncClient(
+                base_url=self.base_url, timeout=httpx.Timeout(600.0)
+            )
+        return self.async_client
+
+    def _ensure_barrier(self):
+        import asyncio
+
+        if self._barrier is None:
+            self._barrier = asyncio.Condition()
+        return self._barrier
+
+    async def _begin_sample(self) -> None:
+        barrier = self._ensure_barrier()
+        async with barrier:
+            while self._loading_weights:
+                await barrier.wait()
+            self._inflight_samples += 1
+
+    async def _end_sample(self) -> None:
+        barrier = self._ensure_barrier()
+        async with barrier:
+            self._inflight_samples -= 1
+            if self._inflight_samples == 0:
+                barrier.notify_all()
+
+    async def _begin_weight_mutation(self) -> None:
+        barrier = self._ensure_barrier()
+        async with barrier:
+            while self._loading_weights or self._inflight_samples:
+                await barrier.wait()
+            self._loading_weights = True
+
+    async def _end_weight_mutation(self) -> None:
+        barrier = self._ensure_barrier()
+        async with barrier:
+            self._loading_weights = False
+            barrier.notify_all()
+
+    async def update_weights_from_disk(
         self,
         checkpoint_path: str,
         load_format: Optional[str] = None,
         pin_lora: bool = False,
     ) -> Dict[str, Any]:
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        if not self.is_server_alive():
-            raise RuntimeError("SGLang server not alive")
+        """Async so weight loads (which can take 30-60s on a big LoRA) don't
+        block the actor's asyncio loop. While this is awaiting on SGLang HTTP
+        responses, in-flight `sample()` tasks continue making progress.
+        """
+        await self._begin_weight_mutation()
+        try:
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+            if not self.is_server_alive():
+                raise RuntimeError("SGLang server not alive")
 
-        is_lora = self._is_lora_adapter_path(checkpoint_path)
-        lora_name = None
-        lora_path = checkpoint_path
+            client = await self._ensure_async_client()
+            is_lora = self._is_lora_adapter_path(checkpoint_path)
+            lora_name = None
+            lora_path = checkpoint_path
+            t0 = time.time()
 
-        if is_lora:
-            # Find actual adapter path (might be in subdirectory)
-            if "adapter_config.json" not in os.listdir(checkpoint_path):
-                for f in os.listdir(checkpoint_path):
-                    subdir = os.path.join(checkpoint_path, f)
-                    if os.path.isdir(subdir) and "adapter_config.json" in os.listdir(
-                        subdir
-                    ):
-                        lora_path = subdir
-                        break
+            if is_lora:
+                if "adapter_config.json" not in os.listdir(checkpoint_path):
+                    for f in os.listdir(checkpoint_path):
+                        subdir = os.path.join(checkpoint_path, f)
+                        if os.path.isdir(
+                            subdir
+                        ) and "adapter_config.json" in os.listdir(subdir):
+                            lora_path = subdir
+                            break
 
-            lora_name = os.path.normpath(lora_path)
+                lora_name = os.path.normpath(lora_path)
+                logger.info(f"Loading LoRA '{lora_name}' from path: {lora_path}")
 
-            # Log adapter config for debugging
-            adapter_config_path = os.path.join(lora_path, "adapter_config.json")
-            if os.path.exists(adapter_config_path):
-                import json
-
-                with open(adapter_config_path) as f:
-                    adapter_config = json.load(f)
-                logger.info(f"Loading LoRA '{lora_name}' from {lora_path}")
-                logger.info(
-                    f"  Adapter target_modules: {adapter_config.get('target_modules')}"
-                )
-                logger.info(f"  Adapter rank (r): {adapter_config.get('r')}")
-                logger.info(
-                    f"  SGLang lora_target_modules: {list(SUPPORTED_LORA_TARGET_MODULES)}"
-                )
-            # Unload any existing LoRAs with similar paths to force fresh load
-            try:
-                info_resp = self.client.get("/get_server_info", timeout=10.0)
-                if info_resp.status_code == 200:
-                    server_info = info_resp.json()
-                    lora_paths_info = server_info.get("lora_paths", [])
-
-                    base_path = (
-                        lora_path.rsplit("-step", 1)[0]
-                        if "-step" in lora_path
-                        else lora_path
-                    )
-                    for lp in lora_paths_info:
-                        existing_name = lp.get("lora_name", "")
-                        existing_base = (
-                            existing_name.rsplit("-step", 1)[0]
-                            if "-step" in existing_name
-                            else existing_name
-                        )
-                        if existing_base == base_path or existing_name == lora_name:
-                            logger.debug(f"Unloading existing LoRA: {existing_name}")
-                            self.client.post(
-                                "/unload_lora_adapter",
-                                json={"lora_name": existing_name},
-                                timeout=60.0,
-                            )
-            except Exception as e:
-                logger.warning(f"Error checking/unloading existing LoRAs: {e}")
-
-            logger.info(f"Loading LoRA '{lora_name}' from path: {lora_path}")
-            response = self.client.post(
-                "/load_lora_adapter",
-                json={
-                    "lora_name": lora_name,
-                    "lora_path": lora_path,
-                },
-                timeout=600.0,
-            )
-            logger.debug(
-                f"Load LoRA response: {response.status_code} - {response.text}"
-            )
-
-            if response.status_code == 200:
+                # Keep SGLang GPU memory bounded across repeated train/sample syncs.
                 try:
-                    loaded_adapters = response.json().get("loaded_adapters", {})
-                    if not hasattr(self, "_loaded_adapters"):
-                        self._loaded_adapters = {}
-                    self._loaded_adapters.update(loaded_adapters)
+                    info_resp = await client.get("/get_server_info", timeout=10.0)
+                    if info_resp.status_code == 200:
+                        lora_paths_info = info_resp.json().get("lora_paths", []) or []
+                        base_path = (
+                            lora_path.rsplit("-step", 1)[0]
+                            if "-step" in lora_path
+                            else lora_path
+                        )
+                        for lp in lora_paths_info:
+                            existing_name = lp.get("lora_name", "")
+                            existing_base = (
+                                existing_name.rsplit("-step", 1)[0]
+                                if "-step" in existing_name
+                                else existing_name
+                            )
+                            if existing_base == base_path or existing_name == lora_name:
+                                logger.info(f"Unloading existing LoRA: {existing_name}")
+                                await client.post(
+                                    "/unload_lora_adapter",
+                                    json={"lora_name": existing_name},
+                                    timeout=60.0,
+                                )
                 except Exception as e:
-                    logger.warning(f"Error parsing load response: {e}")
-        else:
-            response = self.client.post(
-                "/update_weights_from_disk",
-                json={"model_path": checkpoint_path, "load_format": load_format},
-                timeout=600.0,
+                    logger.warning(f"Error checking/unloading existing LoRAs: {e}")
+
+                response = await client.post(
+                    "/load_lora_adapter",
+                    json={"lora_name": lora_name, "lora_path": lora_path},
+                    timeout=600.0,
+                )
+                if response.status_code == 200:
+                    try:
+                        self._loaded_adapters.update(
+                            response.json().get("loaded_adapters", {})
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error parsing load response: {e}")
+            else:
+                response = await client.post(
+                    "/update_weights_from_disk",
+                    json={"model_path": checkpoint_path, "load_format": load_format},
+                    timeout=600.0,
+                )
+
+            if not self.is_server_alive():
+                raise RuntimeError("SGLang server died during checkpoint loading")
+            if response.status_code != 200:
+                logger.error(f"SGLang response {response.status_code}: {response.text}")
+            response.raise_for_status()
+            logger.info(
+                f"{'LoRA' if is_lora else 'Checkpoint'} loaded: {checkpoint_path} "
+                f"in {time.time() - t0:.1f}s"
             )
-
-        if not self.is_server_alive():
-            raise RuntimeError("SGLang server died during checkpoint loading")
-
-        if response.status_code != 200:
-            logger.error(f"SGLang response {response.status_code}: {response.text}")
-        response.raise_for_status()
-        logger.info(f"{'LoRA' if is_lora else 'Checkpoint'} loaded: {checkpoint_path}")
-        return {"is_lora": is_lora, "lora_name": lora_name}
+            return {"is_lora": is_lora, "lora_name": lora_name}
+        finally:
+            await self._end_weight_mutation()
 
     def get_lora_info(self) -> dict[str, Any]:
         """Get info about loaded LoRAs from SGLang."""
@@ -254,14 +287,36 @@ class SGLangSamplingActor:
             logger.warning(f"Failed to get LoRA info: {e}")
         return {"error": "Failed to get server info"}
 
-    def sample(self, sample_request: dict[str, Any]):
-        lora_path = sample_request.get("lora_path")
-        if lora_path and "lora_name" not in sample_request:
-            sample_request["lora_name"] = lora_path
-        response = self.client.post("/generate", json=sample_request)
-        response.raise_for_status()
-        result = response.json()
-        return self._parse_sglang_response(result)
+    async def sample(self, sample_request: dict[str, Any]):
+        """Async so Ray fans out many concurrent /generate calls instead of
+        serializing them. Without this, SGLang's continuous batcher only ever
+        sees one request at a time."""
+        try:
+            await self._begin_sample()
+            # Keep direct actor calls compatible with the client defaults:
+            # GRPO relies on output token logprobs from SGLang.
+            sample_request.setdefault("return_logprob", True)
+            sample_request.setdefault("top_logprobs_num", 1)
+            lora_path = sample_request.get("lora_path")
+            if lora_path and "lora_name" not in sample_request:
+                sample_request["lora_name"] = lora_path
+            client = await self._ensure_async_client()
+            t0 = time.time()
+            try:
+                response = await client.post("/generate", json=sample_request)
+            except httpx.ReadTimeout:
+                logger.error(
+                    f"sample /generate timed out after {time.time() - t0:.0f}s "
+                    f"(req max_new_tokens={sample_request.get('sampling_params', {}).get('max_new_tokens')})"
+                )
+                raise
+            elapsed = time.time() - t0
+            if elapsed > 30.0:
+                logger.warning(f"sample /generate took {elapsed:.1f}s (slow)")
+            response.raise_for_status()
+            return self._parse_sglang_response(response.json())
+        finally:
+            await self._end_sample()
 
     def _parse_sglang_response(self, result) -> dict:
         response_data = {
@@ -280,8 +335,14 @@ class SGLangSamplingActor:
             response_data["outputs"] = [result["text"]]
             if meta := result.get("meta_info"):
                 response_data["meta_info"] = meta
-                response_data["logprobs"] = _wrap(meta.get("logprobs"))
-                response_data["top_logprobs"] = _wrap(meta.get("top_logprobs"))
+                response_data["logprobs"] = _wrap(
+                    meta.get("output_top_logprobs")
+                    or meta.get("output_token_logprobs")
+                    or meta.get("logprobs")
+                )
+                response_data["top_logprobs"] = _wrap(
+                    meta.get("output_top_logprobs") or meta.get("top_logprobs")
+                )
                 response_data["output_token_ids"] = _wrap(meta.get("output_token_ids"))
                 if fr := meta.get("finish_reason"):
                     response_data["finish_reasons"] = [
@@ -291,8 +352,14 @@ class SGLangSamplingActor:
             if result and isinstance(result[0], dict):
                 response_data["outputs"] = [o.get("text", str(o)) for o in result]
                 metas = [o.get("meta_info", {}) for o in result]
-                if any(m.get("logprobs") for m in metas):
-                    response_data["logprobs"] = [m.get("logprobs") for m in metas]
+                logprobs = [
+                    m.get("output_top_logprobs")
+                    or m.get("output_token_logprobs")
+                    or m.get("logprobs")
+                    for m in metas
+                ]
+                if any(logprobs):
+                    response_data["logprobs"] = logprobs
                 if any(m.get("output_token_ids") for m in metas):
                     response_data["output_token_ids"] = [
                         m.get("output_token_ids") for m in metas
@@ -303,12 +370,18 @@ class SGLangSamplingActor:
             response_data["outputs"] = [str(result)]
         return response_data
 
-    def shutdown(self):
+    async def shutdown(self):
+        await self._begin_weight_mutation()
         try:
             if self.client:
                 self.client.close()
+            if self.async_client is not None:
+                await self.async_client.aclose()
+                self.async_client = None
             if self.server_process:
                 kill_process_tree(self.server_process.pid)
         except Exception as e:
             logger.error(f"Shutdown error: {e}")
+        finally:
+            await self._end_weight_mutation()
         return True

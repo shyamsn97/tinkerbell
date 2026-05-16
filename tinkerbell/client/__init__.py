@@ -1,15 +1,16 @@
-from tinkerbell.client.common import BaseClient, JobHandle
-from tinkerbell.client.sampling import SamplingClient
-from tinkerbell.client.service import ServiceClient
-from tinkerbell.client.training import TrainingClient
-from tinkerbell.client.transport import AsyncTransport
+from tinkerbell.client.service import (
+    HTTPFuture,
+    SamplingClient,
+    ServiceClient,
+    TrainingClient,
+)
+from tinkerbell.runtime.futures import Future, JobHandle
 
-# Backwards-compat alias: v1 scripts imported TinkerbellFuture.
-TinkerbellFuture = JobHandle
+TinkerbellFuture = Future
 
 __all__ = [
-    "AsyncTransport",
-    "BaseClient",
+    "Future",
+    "HTTPFuture",
     "JobHandle",
     "SamplingClient",
     "ServiceClient",

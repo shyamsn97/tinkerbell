@@ -106,6 +106,7 @@ if original_count > 0:
 # Initialize wandb
 wandb.init(
     project="tinkerbell-chat-sft",
+    settings=wandb.Settings(x_save_requirements=False, disable_code=True),
     config={
         "base_model": MODEL_ID,
         "gpu_type": GPU_TYPE,

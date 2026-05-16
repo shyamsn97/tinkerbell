@@ -1,7 +1,5 @@
 from typing import Any, Literal, Optional
 
-from tinker.types import TensorData
-
 from .base import BaseModel
 
 
@@ -21,15 +19,9 @@ class OptimStepResponse(BaseModel):
     metrics: Optional[dict[str, float]] = None
 
 
-class CreateTrainingActorsResponse(BaseModel):
-    success: bool
-    model_name: str  # Actor group name
-    message: str
-
-
 class ForwardResponse(BaseModel):
     model_name: str  # Actor group name
-    logprobs: TensorData | None = None
+    logprobs: Any = None
     outputs: dict[str, Any] | None = None
     metrics: Optional[dict[str, float]] = None
 
@@ -37,8 +29,8 @@ class ForwardResponse(BaseModel):
 class ForwardBackwardResponse(BaseModel):
     model_name: str  # Actor group name
     loss: float | list[float] | None = None
-    logprobs: TensorData | None = None
-    outputs: dict[str, TensorData] | None = None
+    logprobs: Any = None
+    outputs: dict[str, Any] | None = None
     metrics: Optional[dict[str, float]] = None
     sum_gradient: Optional[dict[str, float]] = None
 
@@ -62,14 +54,9 @@ class PushToHubResponse(BaseModel):
     repo_id: Optional[str] = None
 
 
-class CreateSamplingActorResponse(BaseModel):
-    success: bool
-    message: str | None = None
-
-
 class LogprobsResponse(BaseModel):
-    logprobs: list[list[float]] | TensorData | None = None
-    token_ids: list[list[int]] | TensorData | None = None
+    logprobs: Any = None
+    token_ids: Any = None
 
 
 class SampleResponse(BaseModel):
@@ -98,10 +85,3 @@ class ShutdownSamplingActorResponse(BaseModel):
     model_name: str  # Actor group name
     success: bool
     message: str | None = None
-
-
-class PollResultResponse(BaseModel):
-    status: Literal["pending", "completed", "error"]
-    request_id: str
-    result: dict[str, Any] | None = None
-    error: str | None = None

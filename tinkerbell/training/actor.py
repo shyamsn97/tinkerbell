@@ -3,7 +3,7 @@
 One `TrainingActor` per TP rank. Responsibilities:
   - Bring up torch.distributed.
   - Own a `Trainer` instance.
-  - Expose async methods that the `TrainingExecutor` calls directly via
+  - Expose methods that the local `TrainGroup` proxy calls directly via
     `actor.method.remote(...)`.
 
 Blocking I/O (HF upload, checkpoint save on large models) is offloaded to a
@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 import ray
 import torch
 import torch.distributed as dist
-from tinker.types import Datum, LoraConfig, LossFnType
+from tinker.types import Datum, LoraConfig, LossFnType, TensorData
 
 from tinkerbell.training.trainer import Trainer
 
@@ -39,6 +39,7 @@ class TrainingActor:
         master_addr: str,
         master_port: str,
         base_model: str,
+        model_name: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         parallelize_plan: dict[str, str] | None = None,
         lora_config: Optional[LoraConfig | dict[str, Any]] = None,
@@ -64,6 +65,7 @@ class TrainingActor:
             adapter_name=adapter_name,
             initialize_base_model=initialize_base_model,
         )
+        self.model_name = model_name or base_model
 
     def setup_distributed(self) -> None:
         if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
@@ -110,8 +112,14 @@ class TrainingActor:
         self,
         data: list[Datum],
         forward_kwargs: dict[str, Any] | None = None,
-    ) -> torch.Tensor:
-        return self.trainer.forward(data, forward_kwargs=forward_kwargs)
+    ) -> dict[str, Any] | None:
+        logprobs = self.trainer.forward(data, forward_kwargs=forward_kwargs)
+        if self.rank != 0:
+            return None
+        return {
+            "model_name": self.model_name,
+            "logprobs": TensorData.from_torch(logprobs.detach().cpu()),
+        }
 
     async def forward_backward(
         self,
@@ -188,3 +196,6 @@ class TrainingActor:
         if dist.is_available() and dist.is_initialized():
             dist.destroy_process_group()
         return self.rank == 0
+
+
+TrainingWorker = TrainingActor

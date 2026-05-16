@@ -1,24 +1,23 @@
-import logging
+"""Minimal server deployment config."""
 
-from .base import BaseModel
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+from tinkerbell.types.base import BaseModel
 
 
 class DeployConfig(BaseModel):
-    server_url: str = "https://0.0.0.0:8000"
+    server_url: str = "http://127.0.0.1:8000"
+    namespace: str = "tinkerbell"
     max_wait_time: float = 600.0
     clock_cycle: float = 2.0
 
-    @property
-    def deployment_type(self) -> str:
-        return "local"
-
     def connect(self) -> str:
-        raise NotImplementedError("Connect is not implemented for local deployment")
+        raise ConnectionError("No existing local server connection is configured")
 
     def deploy(self) -> str:
-        raise NotImplementedError("Deploy is not implemented for local deployment")
+        from tinkerbell.api.server import deploy_service
+
+        return deploy_service(server_url=self.server_url, namespace=self.namespace)
 
 
 class ModalDeployConfig(DeployConfig):
@@ -27,51 +26,39 @@ class ModalDeployConfig(DeployConfig):
     timeout: int = 86400
     scaledown_window: int = 600
     max_inputs: int = 100
-
-    @property
-    def deployment_type(self) -> str:
-        return "modal"
+    max_containers: int = 1
+    memory_mb: int = 8192
 
     def connect(self) -> str:
-        try:
-            import httpx
-            import modal
+        import httpx
+        import modal
 
-            existing_function = modal.Function.from_name("tinkerbell-service", "serve")
-            existing_url = existing_function.web_url
-
-            # Verify the server is actually active by checking health endpoint
-            try:
-                response = httpx.get(f"{existing_url}/health", timeout=5.0)
-                response.raise_for_status()
-                logger.info(f"Server is active and responding at: {existing_url}")
-                return existing_url
-            except (
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                httpx.HTTPStatusError,
-            ) as e:
-                logger.warning(
-                    f"Found Modal function but server is not responding: {e}. "
-                    "Treating as if no server exists."
-                )
-                raise ConnectionError(
-                    f"Modal function exists but server is not responding: {e}"
-                ) from e
-        except Exception as e:
-            raise e
+        existing_function = modal.Function.from_name("tinkerbell-service", "serve")
+        existing_url = existing_function.web_url
+        response = httpx.get(f"{existing_url}/health", timeout=5.0)
+        response.raise_for_status()
+        health = response.json()
+        if (
+            health.get("name") != "TinkerbellServer"
+            or health.get("job_protocol") != "ray_internal_kv"
+            or health.get("container_model") != "single"
+        ):
+            raise ConnectionError("existing Modal function is not the current server")
+        return existing_url
 
     def deploy(self) -> str:
         from tinkerbell.api.deploy import deploy_on_modal
 
-        modal_url = deploy_on_modal(
+        return deploy_on_modal(
             server_url=self.server_url,
-            max_wait_time=self.max_wait_time,
-            clock_cycle=self.clock_cycle,
             gpu=self.gpu,
             num_gpus=self.num_gpus,
             timeout=self.timeout,
             scaledown_window=self.scaledown_window,
             max_inputs=self.max_inputs,
+            max_containers=self.max_containers,
+            memory_mb=self.memory_mb,
         )
-        return modal_url
+
+
+__all__ = ["DeployConfig", "ModalDeployConfig"]
