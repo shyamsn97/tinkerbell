@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import dataclasses
+import os
 import time
 from typing import Any, Callable, Generic, TypeVar
 
@@ -29,6 +31,25 @@ from tinkerbell.utils import clean_model_name
 T = TypeVar("T")
 
 
+@dataclasses.dataclass
+class SampledSequence:
+    """Tinker-shaped view over a Tinkerbell sample response."""
+
+    tokens: list[int]
+    logprobs: list[float]
+    output: str
+    stop_reason: str | None = None
+
+    @property
+    def finish_reason(self) -> str | None:
+        return self.stop_reason
+
+
+@dataclasses.dataclass
+class SampleResult:
+    sequences: list[SampledSequence]
+
+
 def _tensordata_to_wire(td: Any) -> dict[str, Any]:
     """Serialize a tinker `TensorData` into the stable `{data, dtype, shape}`
     wire format accepted by `TensorData.__init__` on both old (pydantic) and
@@ -41,11 +62,25 @@ def _tensordata_to_wire(td: Any) -> dict[str, Any]:
     }
 
 
+def _datum_to_jsonable(datum: Datum) -> dict[str, Any]:
+    loss_fn_inputs = dict(datum.loss_fn_inputs or {})
+    if "target_tokens" in loss_fn_inputs and "labels" not in loss_fn_inputs:
+        loss_fn_inputs["labels"] = loss_fn_inputs.pop("target_tokens")
+    if "logprobs" in loss_fn_inputs and "sampling_logprobs" not in loss_fn_inputs:
+        loss_fn_inputs["sampling_logprobs"] = loss_fn_inputs.pop("logprobs")
+    return {
+        "model_input": _jsonable(datum.model_input),
+        "loss_fn_inputs": _jsonable(loss_fn_inputs),
+    }
+
+
 def _jsonable(value):
     from tinker.types import TensorData
 
     if isinstance(value, TensorData):
         return _tensordata_to_wire(value)
+    if isinstance(value, Datum):
+        return _datum_to_jsonable(value)
     if hasattr(value, "model_dump"):
         return value.model_dump()
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -101,6 +136,78 @@ def _to_tensordata(value: Any) -> Any:
     return value
 
 
+def _object_to_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    data = {}
+    for name in dir(value):
+        if name.startswith("_"):
+            continue
+        try:
+            attr = getattr(value, name)
+        except Exception:
+            continue
+        if not callable(attr):
+            data[name] = attr
+    return data
+
+
+def _sampling_params_to_dict(value: Any) -> dict[str, Any]:
+    params = _object_to_dict(value)
+    if "max_tokens" in params and "max_new_tokens" not in params:
+        params["max_new_tokens"] = params.pop("max_tokens")
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _optimizer_params_to_dict(value: Any) -> dict[str, Any]:
+    params = _object_to_dict(value)
+    if "learning_rate" in params and "lr" not in params:
+        params["lr"] = params.pop("learning_rate")
+    beta1 = params.pop("beta1", None)
+    beta2 = params.pop("beta2", None)
+    if "betas" not in params and beta1 is not None and beta2 is not None:
+        params["betas"] = [beta1, beta2]
+    params.setdefault("name", "adam")
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _model_input_to_ints(prompt: Any) -> list[int]:
+    if isinstance(prompt, list):
+        return prompt
+    if hasattr(prompt, "to_ints"):
+        return list(prompt.to_ints())
+    if hasattr(prompt, "tokens"):
+        return list(prompt.tokens)
+    raise TypeError(f"Cannot convert {type(prompt).__name__} to input token ids")
+
+
+def _sample_response_to_sequence(response: SampleResponse) -> SampledSequence:
+    logprobs: list[float] = []
+    if response.logprobs is not None and response.logprobs.logprobs is not None:
+        values = response.logprobs.logprobs
+        if hasattr(values, "to_torch"):
+            logprobs = values.to_torch().tolist()
+        else:
+            logprobs = list(values)
+    tokens = list(response.output_token_ids or [])
+    if logprobs and len(logprobs) != len(tokens):
+        n = min(len(tokens), len(logprobs))
+        tokens = tokens[:n]
+        logprobs = logprobs[:n]
+    return SampledSequence(
+        tokens=tokens,
+        logprobs=logprobs,
+        output=response.output,
+        stop_reason=response.finish_reason,
+    )
+
+
 class HTTPFuture(Generic[T]):
     def __init__(self, future: concurrent.futures.Future, parse: Callable[[Any], T]):
         self._future = future
@@ -112,6 +219,9 @@ class HTTPFuture(Generic[T]):
 
     def result(self) -> T:
         return self._parse(_drop_none(self._future.result()))
+
+    async def result_async(self) -> T:
+        return await asyncio.to_thread(self.result)
 
 
 class ServiceClient:
@@ -298,7 +408,6 @@ class ServiceClient:
         initialize_base_model: bool = False,
         **_,
     ) -> "TrainingClient":
-        del wait_until_ready
         model_name = model_name or clean_model_name(base_model)
         self._submit_and_wait(
             "/trainers",
@@ -313,12 +422,40 @@ class ServiceClient:
                 "initialize_base_model": initialize_base_model,
             },
         )
-        return TrainingClient(
+        client = TrainingClient(
             service=self,
             base_model=base_model,
             model_name=model_name,
             adapter_name=adapter_name,
         )
+        if wait_until_ready:
+            client.wait_until_ready()
+        return client
+
+    async def create_lora_training_client_async(
+        self,
+        base_model: str,
+        rank: int,
+        **kwargs,
+    ) -> "TrainingClient":
+        from tinker.types import LoraConfig
+
+        lora_config = kwargs.pop(
+            "lora_config",
+            LoraConfig(
+                rank=rank,
+                train_unembed=False,
+                train_attn=True,
+                train_mlp=True,
+            ).model_dump(),
+        )
+        client = self.create_training_client(
+            base_model=base_model,
+            lora_config=lora_config,
+            **kwargs,
+        )
+        client.wait_until_ready()
+        return client
 
     def create_sampling_client(
         self,
@@ -330,7 +467,6 @@ class ServiceClient:
         wait_until_ready: bool = False,
         **_,
     ) -> "SamplingClient":
-        del wait_until_ready
         model_name = model_name or clean_model_name(base_model)
         self._submit_and_wait(
             "/samplers",
@@ -342,12 +478,15 @@ class ServiceClient:
                 "engine_kwargs": engine_kwargs or {},
             },
         )
-        return SamplingClient(
+        client = SamplingClient(
             service=self,
             base_model=base_model,
             model_name=model_name,
             adapter_name=adapter_name,
         )
+        if wait_until_ready:
+            client.wait_until_ready()
+        return client
 
 
 class TrainingClient:
@@ -393,7 +532,7 @@ class TrainingClient:
         data: list[Datum],
         forward_kwargs: dict[str, Any] | None = None,
         return_logprobs: bool = False,
-        zero_grad: bool = True,
+        zero_grad: bool = False,
         optimizer_params: dict[str, Any] | None = None,
         loss_fn: str = "cross_entropy",
         loss_fn_config: dict[str, float] | None = None,
@@ -413,6 +552,18 @@ class TrainingClient:
             lambda r: ForwardBackwardResponse(**_to_tensordata(r)),
         )
 
+    async def forward_backward_async(
+        self,
+        data: list[Datum],
+        loss_fn: str = "cross_entropy",
+        loss_fn_config: dict[str, float] | None = None,
+    ) -> HTTPFuture[ForwardBackwardResponse]:
+        return self.forward_backward(
+            data=data,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+        )
+
     def zero_grad(self) -> HTTPFuture[ZeroGradResponse]:
         return self.service._future(
             "/zero_grad",
@@ -425,9 +576,17 @@ class TrainingClient:
     ) -> HTTPFuture[OptimStepResponse]:
         return self.service._future(
             "/optim_step",
-            {"model_name": self.model_name, "optimizer_params": optimizer_params or {}},
+            {
+                "model_name": self.model_name,
+                "optimizer_params": _optimizer_params_to_dict(optimizer_params),
+            },
             lambda r: OptimStepResponse(**r),
         )
+
+    async def optim_step_async(
+        self, optimizer_params: dict[str, Any] | None = None
+    ) -> HTTPFuture[OptimStepResponse]:
+        return self.optim_step(optimizer_params=optimizer_params)
 
     def save_checkpoint(
         self, checkpoint_path: str
@@ -446,11 +605,14 @@ class TrainingClient:
 
     def save_weights_and_get_sampling_client(
         self,
-        checkpoint_path: str,
+        checkpoint_path: str | None = None,
         tp_size: int | None = None,
         engine_kwargs: dict[str, Any] | None = None,
         wait_until_ready: bool = False,
     ) -> "SamplingClient":
+        checkpoint_path = checkpoint_path or os.path.join(
+            "/tmp", f"tinkerbell-{self.model_name}-weights"
+        )
         self.save_checkpoint(checkpoint_path).result()
         final_kwargs = dict(engine_kwargs or {})
         if self.adapter_name:
@@ -470,6 +632,21 @@ class TrainingClient:
         if self.adapter_name:
             sampler.load_checkpoint(checkpoint_path).result()
         return sampler
+
+    async def save_weights_and_get_sampling_client_async(
+        self,
+        checkpoint_path: str | None = None,
+        tp_size: int | None = None,
+        engine_kwargs: dict[str, Any] | None = None,
+        wait_until_ready: bool = True,
+    ) -> "SamplingClient":
+        return await asyncio.to_thread(
+            self.save_weights_and_get_sampling_client,
+            checkpoint_path=checkpoint_path,
+            tp_size=tp_size,
+            engine_kwargs=engine_kwargs,
+            wait_until_ready=wait_until_ready,
+        )
 
     def get_tokenizer(self):
         if self._tokenizer is None:
@@ -538,6 +715,10 @@ class SamplingClient:
         )
 
     def sample(self, **kwargs) -> HTTPFuture[SampleResponse]:
+        if "sampling_params" in kwargs:
+            kwargs["sampling_params"] = _sampling_params_to_dict(
+                kwargs.get("sampling_params")
+            )
         return self.service._future(
             "/sample",
             {"model_name": self.model_name, **kwargs},
@@ -552,10 +733,42 @@ class SamplingClient:
     def sample_many(
         self, batch_kwargs: list[dict[str, Any]]
     ) -> HTTPFuture[list[SampleResponse]]:
+        batch_kwargs = [
+            (
+                {
+                    **kw,
+                    "sampling_params": _sampling_params_to_dict(
+                        kw.get("sampling_params")
+                    ),
+                }
+                if "sampling_params" in kw
+                else kw
+            )
+            for kw in batch_kwargs
+        ]
         return self.service._future(
             "/sample_batch",
             {"model_name": self.model_name, "batch_kwargs": batch_kwargs},
             lambda rows: [SampleResponse(**_to_tensordata(row)) for row in rows],
+        )
+
+    async def sample_async(
+        self,
+        prompt: Any,
+        num_samples: int,
+        sampling_params: Any,
+        **kwargs,
+    ) -> SampleResult:
+        input_ids = _model_input_to_ints(prompt)
+        params = _sampling_params_to_dict(sampling_params)
+        responses = await self.sample_many(
+            [
+                {"input_ids": input_ids, "sampling_params": params, **kwargs}
+                for _ in range(num_samples)
+            ]
+        ).result_async()
+        return SampleResult(
+            sequences=[_sample_response_to_sequence(row) for row in responses]
         )
 
     def load_checkpoint(
@@ -591,4 +804,11 @@ class SamplingClient:
         )
 
 
-__all__ = ["HTTPFuture", "SamplingClient", "ServiceClient", "TrainingClient"]
+__all__ = [
+    "HTTPFuture",
+    "SampleResult",
+    "SampledSequence",
+    "SamplingClient",
+    "ServiceClient",
+    "TrainingClient",
+]

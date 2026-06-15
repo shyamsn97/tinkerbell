@@ -1,22 +1,21 @@
 # Tinkerbell
 
-An small(ish) open-source reimplementation of [Tinker](https://tinker-docs.thinkingmachines.ai/) from Thinking Machines.
+A small open-source reimplementation of [Tinker](https://tinker-docs.thinkingmachines.ai/) from Thinking Machines.
 
-Tinkerbell is a distributed training and inference framework for large language models, built on Ray, PyTorch, and [SGlang](https://github.com/sgl-project/sglang). Like Tinker, it provides a simple API that lets you focus on your data and loss functions while handling the complexity of distributed training. You write a training loop that runs on your machine, and Tinkerbell figures out how to efficiently execute it across multiple GPUs.
+Tinkerbell is a thin distributed training and inference library for LLMs on top of Ray, PyTorch, and [SGLang](https://github.com/sgl-project/sglang). You write a normal Python training loop on your laptop with a handful of primitives (`forward_backward`, `optim_step`, `sample`, …) and Tinkerbell runs it across the GPUs of a remote server.
 
-**Key Philosophy** (inspired by Tinker):
-- 📊 **You focus on**: Your datasets, loss functions, and training logic
-- 💻 **You write**: Simple Python scripts with API calls like `forward_backward()`, `optim_step()`, `sample()`
-- ⚡ **We handle**: Distributed training across GPUs, tensor parallelism, and infrastructure complexity
+The API surface is intentionally small:
 
-## Features
+| Primitive | What it does |
+| --- | --- |
+| `ServiceClient` | HTTP client that talks to the server |
+| `create_training_client` | Spin up a tensor-parallel training group for a base model |
+| `create_sampling_client` | Spin up an SGLang inference group |
+| `forward_backward` / `optim_step` / `zero_grad` | One step of training |
+| `save_weights_and_get_sampling_client` | Snapshot adapter weights and get a sampler that uses them |
+| `sample` / `sample_many` | Generate from the current sampler |
 
-- 🚀 **Distributed Training**: Multi-GPU training with tensor parallelism
-- 🎯 **LoRA Support**: Parameter-efficient fine-tuning with Low-Rank Adaptation
-- 📝 **Smart Renderer**: Automatic chat formatting, label masking, and label shifting
-- ⚡ **Fast Inference**: Integrated SGLang backend for high-performance sampling
-- 🔄 **Seamless Workflow**: Train → Save → Load → Inference in one API
-- 📦 **Ray-Powered**: Built on Ray for distributed computing
+Everything runs through one process on the server side (Ray + Ray Serve), so state stays consistent and the same checkpoint can be trained and served without moving files around.
 
 ## Installation
 
@@ -24,259 +23,220 @@ Tinkerbell is a distributed training and inference framework for large language 
 pip install -e .
 ```
 
-### Optional Dependencies
+Optional extras:
 
 ```bash
-# For LoRA support
-pip install peft
-
-# For inference (SGLang)
-pip install "sglang[all]"
+pip install peft               # LoRA
+pip install "sglang[all]"      # high-throughput inference
+pip install modal              # remote GPU deployment
 ```
 
-## Quick Start
+Requirements: Python 3.9+, PyTorch 2.0+, Ray 2.0+, Transformers.
 
-### 1. Start the Service
+## Deployment
 
-```python
-from tinkerbell.api import deploy_service
+Tinkerbell needs a server to run training and sampling actors. There are two supported modes:
 
-# Deploy the training service
-server_url = deploy_service(
-    server_url="http://localhost:8000",
-    max_wait_time=600.0,
-    clock_cycle=10.0,
-)
-```
-
-### 2. Training with Renderer (Recommended)
+**Local** (single host, Ray runs in-process):
 
 ```python
 from tinkerbell.client import ServiceClient
-from tinkerbell.renderer import Renderer, TrainOnWhat
 
-# Initialize service client and create training actors
-service = ServiceClient(server_url="http://localhost:8000")
-training_client = service.create_training_client(
-    model_id="meta-llama/Llama-3.2-1B",
-    tp_size=2,  # Number of GPUs
-    model_kwargs={"torch_dtype": "bfloat16"},
-    parallelize_plan={
-        "model.layers.*.self_attn.q_proj": "column",
-        "model.layers.*.self_attn.k_proj": "column",
-        "model.layers.*.self_attn.v_proj": "column",
-        "model.layers.*.self_attn.o_proj": "row",
-    },
-)
-training_client.wait_until_ready()
-
-# Prepare training conversations
-conversations = [
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the capital of France?"},
-        {"role": "assistant", "content": "The capital of France is Paris."},
-    ],
-]
-
-# Use Renderer to create properly formatted training data
-tokenizer = training_client.get_tokenizer()
-renderer = Renderer(tokenizer)
-
-training_data = renderer.build_chat_examples(
-    conversations=conversations,
-    train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,  # Only train on assistant's response
-    mask_value=-100,
-)
-# Returns a list of Datum objects, each with structure:
-# Datum(
-#     model_input=ModelInput(input_ids=[...], attention_mask=[...]),
-#     loss_fn_inputs={"labels": TensorData([...])}  # -100 for masked tokens
-# )
-
-# Training loop
-for step in range(100):
-    training_client.zero_grad()
-    
-    response = training_client.forward_backward(
-        data=training_data,
-        forward_kwargs={},
-    )
-    result = response.result()
-    
-    losses = result.loss
-    if losses:
-        avg_loss = sum(losses) / len(losses)
-        print(f"Step {step}, Loss: {avg_loss:.4f}")
-    
-    training_client.optim_step(
-        optimizer_params={
-            "name": "adamw",
-            "lr": 1e-4,
-            "weight_decay": 0.01,
-        }
-    ).result()
-
-# Save checkpoint
-training_client.save_checkpoint("/tmp/my_model")
+service = ServiceClient.deploy()  # serves at http://127.0.0.1:8000
 ```
 
-### 3. LoRA Fine-Tuning Example
+**Modal** (remote GPUs, recommended):
 
 ```python
 from tinkerbell.client import ServiceClient
-from tinkerbell.types import LoraConfig
-from tinkerbell.renderer import Renderer, TrainOnWhat
+from tinkerbell.types import ModalDeployConfig
 
-# Create LoRA configuration
-lora_config = LoraConfig(
-    rank=8,              # LoRA rank
-    seed=42,             # For reproducible initialization
-    train_attn=True,     # Apply LoRA to attention layers
-    train_mlp=True,      # Apply LoRA to MLP layers
-    train_unembed=False, # Apply LoRA to output layer
+deploy_config = ModalDeployConfig(
+    gpu="H100",
+    num_gpus=2,
+    timeout=86400,
+    scaledown_window=600,
 )
 
-# Create training actors with LoRA
-service = ServiceClient(server_url="http://localhost:8000")
+service = ServiceClient.deploy_or_connect(deploy_config)
+```
+
+`deploy_or_connect` reuses a running Modal deployment if there is one, otherwise it deploys a new one.
+
+## Quickstart: full SFT loop
+
+Train a 0.6B model on a single chat example. End to end, including sampling from the trained adapter.
+
+```python
+from tinker.types import LoraConfig
+from tinkerbell.client import ServiceClient
+from tinkerbell.types import ModalDeployConfig
+from tinkerbell.renderer import Renderer, TrainOnWhat
+
+service = ServiceClient.deploy_or_connect(ModalDeployConfig(gpu="H100", num_gpus=1))
+
+# 1. Training group
 training_client = service.create_training_client(
-    model_id="meta-llama/Llama-3.2-1B",
+    base_model="Qwen/Qwen3-0.6B-Base",
+    model_name="qwen-sft",
     tp_size=1,
-    lora_config=lora_config.model_dump(),  # Enable LoRA
-    model_kwargs={"torch_dtype": "bfloat16"},
+    lora_config=LoraConfig(rank=64, train_attn=True, train_mlp=True).model_dump(),
+    model_kwargs={"torch_dtype": "bfloat16", "gradient_checkpointing": True},
 )
 training_client.wait_until_ready()
 
-# Prepare training data with Renderer
-tokenizer = training_client.get_tokenizer()
-renderer = Renderer(tokenizer)
+# 2. Build training data with the renderer (handles chat template, label masking, shifting)
 conversations = [
     [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is 2 + 2?"},
-        {"role": "assistant", "content": "The answer is 4."},
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "Paris."},
     ],
 ]
-training_data = renderer.build_chat_examples(
-    conversations=conversations,
+data = training_client.build_chat_samples(
+    messages=conversations,
     train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
-    mask_value=-100,
 )
 
-# Training loop (same as above, but only LoRA parameters are updated!)
-for step in range(100):
-    training_client.zero_grad()
-    response = training_client.forward_backward(data=training_data, forward_kwargs={})
-    result = response.result()
+# 3. Train
+for step in range(50):
+    fb = training_client.forward_backward(data=data, loss_fn="cross_entropy").result()
     training_client.optim_step(
-        optimizer_params={"name": "adamw", "lr": 1e-4, "weight_decay": 0.01}
+        optimizer_params={"name": "adamw", "lr": 1e-4, "weight_decay": 0.0}
     ).result()
+    print(f"step {step}  loss={fb.loss}")
 
-# Save LoRA adapters (much smaller than full model!)
-training_client.save_checkpoint("/tmp/lora_adapters")
-```
-
-### 4. Inference After Training
-
-```python
-# Save checkpoint and create sampling actor in one call
+# 4. Snapshot weights and get a sampler that uses them
 sampling_client = training_client.save_weights_and_get_sampling_client(
-    checkpoint_path="/tmp/my_model",
+    checkpoint_path="/tmp/qwen-sft-step50",
     tp_size=1,
-    wait_until_ready=True,
 )
+sampling_client.wait_until_ready()
 
-# Prepare inference prompts
-inference_prompts = [
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the capital of France?"},
-    ],
-]
+# 5. Generate
+prompt_ids = training_client.build_chat_samples(
+    messages=[[{"role": "user", "content": "What is the capital of France?"}]],
+    include_labels=False,
+)[0].model_input.to_ints()
 
-# Tokenize prompts for inference
-formatted_prompts = tokenizer.apply_chat_template(
-    inference_prompts, 
-    add_generation_prompt=True, 
-    tokenize=False
-)
-encoded = tokenizer(formatted_prompts, padding=True, return_tensors="pt")
-
-# Generate text
-tinkerbell_future = sampling_client.sample(
-    input_ids=encoded["input_ids"][0],
-    sampling_params={"max_new_tokens": 100, "temperature": 0.7},
-)
-outputs = tinkerbell_future.result()
-
-print(outputs)
+out = sampling_client.sample(
+    input_ids=prompt_ids,
+    sampling_params={"max_new_tokens": 32, "temperature": 0.7},
+).result()
+print(out.output)
 ```
 
-## LoRA Configuration Options
+Both `forward_backward` and `sample` return futures — call `.result()` to block, or fire off many in parallel and join later.
+
+## Async / batched sampling
+
+For RL or eval workloads where you want N completions from M prompts in one round trip:
 
 ```python
-LoraConfig(
-    rank=8,              # LoRA rank (higher = more parameters)
-    seed=42,             # Optional: for reproducible initialization
-    train_attn=True,     # Apply to attention layers (Q,K,V,O)
-    train_mlp=True,      # Apply to MLP/FFN layers
-    train_unembed=False, # Apply to output embedding layer
-)
+batch_kwargs = [
+    {"input_ids": ids, "sampling_params": {"max_new_tokens": 256, "temperature": 1.0}}
+    for ids in prompts
+    for _ in range(8)            # 8 samples per prompt
+]
+samples = sampling_client.sample_many(batch_kwargs).result()  # flat list
 ```
 
-**Benefits of LoRA:**
-- 💾 **Memory Efficient**: Only trains 0.1-1% of parameters
-- ⚡ **Faster Training**: Fewer parameters = faster updates
-- 💰 **Lower Storage**: Adapter files are 10-100MB vs full model GBs
-- 🎯 **Same Quality**: Often matches full fine-tuning performance
+Set `sampling_params={"return_logprob": True, "top_logprobs_num": 1, ...}` if you need per-token sampler logprobs (required for importance-sampling losses, GRPO etc.).
+
+## RL example: GRPO on GSM8K
+
+`scripts/grpo_example.py` is a complete, ~450-line GRPO loop that trains Qwen3-1.7B on GSM8K. The training-relevant core looks like this:
+
+```python
+for step in range(NUM_GRPO_STEPS):
+    # 1. Sample N completions per prompt
+    samples = sampling_client.sample_many([
+        {"input_ids": ids, "sampling_params": SAMPLING_PARAMS}
+        for ids in prompt_token_ids for _ in range(NUM_SAMPLES_PER_PROMPT)
+    ]).result()
+
+    # 2. Score, group-relative advantages
+    rewards = [reward_fn(s.output, gt) for s, gt in zip(samples, gts)]
+    advantages = [r - mean(group) for group, r in groups(rewards)]
+
+    # 3. Build a Datum per rollout (prompt + sampled tokens + sampler logprobs + advantage)
+    data = [build_grpo_datum(...) for sample, adv in zip(samples, advantages)]
+
+    # 4. Microbatched forward_backward + one optim_step
+    for chunk in chunked(data, MICROBATCH_SIZE):
+        training_client.forward_backward(
+            data=chunk,
+            loss_fn="importance_sampling",
+        ).result()
+    training_client.optim_step(optimizer_params=OPTIMIZER_PARAMS).result()
+
+    # 5. Sync new weights to a fresh sampler for the next step
+    sampling_client = training_client.save_weights_and_get_sampling_client(
+        checkpoint_path=f"/tmp/grpo-step{step}", tp_size=1,
+    )
+    sampling_client.wait_until_ready()
+```
+
+The full script also handles dynamic oversampling (keep drawing prompts until enough live groups), microbatched gradient accumulation, W&B logging, and per-step checkpoint cleanup.
+
+## Renderer
+
+The `Renderer` (and its higher-level wrapper `training_client.build_chat_samples`) does three things you'd otherwise have to do by hand:
+
+1. Apply the model's chat template.
+2. Mask labels: by default only the last assistant message contributes to the loss; everything else is `-100`.
+3. Right-shift labels so position `i` predicts token `i+1`.
+
+`TrainOnWhat` controls what counts as a labeled span:
+
+```python
+TrainOnWhat.ALL_ASSISTANT_MESSAGES   # train on every assistant turn
+TrainOnWhat.LAST_ASSISTANT_MESSAGE   # train only on the final assistant turn
+TrainOnWhat.NOTHING                  # inference-only (used by sampling)
+```
 
 ## Architecture
 
-```
-┌────────────────────────────────────────────┐
-│        Tinkerbell Service (Ray Serve)      │
-│  ┌─────────────────────────────────────┐   │
-│  │      Training Manager               │   │
-│  │  ┌─────────────────────────────┐    │   │
-│  │  │   Training Actor (Rank 0)   │    │   │
-│  │  │   - PyTorch Model           │    │   │
-│  │  │   - Tensor Parallel         │    │   │
-│  │  │   - LoRA (optional)         │    │   │
-│  │  └─────────────────────────────┘    |   |
-|  |              ...                    |   │
-│  │  ┌─────────────────────────────┐    │   │
-│  │  │   Training Actor (Rank n)   │    │   │
-│  │  └─────────────────────────────┘    │   │
-│  └─────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────┐   │
-│  │      Sampling Manager               │   │
-│  │  ┌─────────────────────────────┐    │   │
-│  │  │   Sampling Actor 0 (SGLang) │    │   │
-│  │  └─────────────────────────────┘    |   |
-|  |                ...                  |   |
-│  |  ┌─-───────────────────────────┐    │   │
-│  │  │   Sampling Actor n (SGLang) │    │   │
-│  │  └─────────────────────────────┘    │   │
-│  └─────────────────────────────────────┘   │
-└────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────┐
+│  Tinkerbell Server  (FastAPI + Ray Serve, single replica)│
+│                                                          │
+│   /forward_backward, /optim_step, /sample, /sample_batch │
+│              │                          │                │
+│              ▼                          ▼                │
+│   ┌────────────────────┐    ┌────────────────────┐       │
+│   │   TrainGroup       │    │   Sampler          │       │
+│   │  Ray actors, TP    │    │  SGLang engine     │       │
+│   │  PyTorch + LoRA    │    │  LoRA hot-swap     │       │
+│   └────────────────────┘    └────────────────────┘       │
+└──────────────────────────────────────────────────────────┘
+                  ▲ HTTP submit + poll
+                  │
+              ServiceClient  (your laptop)
 ```
 
-## Examples
+- One server process owns all Ray actors. The HTTP layer is a thin gateway: every "heavy" call returns a `job_id` immediately and the client polls `/poll`. Job state lives in Ray's internal KV store, so it survives across HTTP replicas without losing track of in-flight work.
+- Training and sampling run as separate Ray actor groups. They share the same model weights via on-disk LoRA checkpoints and SGLang's hot-swap path, which is why `save_weights_and_get_sampling_client` can hand you a sampler with the freshly-trained adapter without restarting anything heavy.
 
-See the `examples/` and `scripts/` directories for more:
-- `scripts/test_client.py` - Complete training and inference example with LoRA and Renderer
-- `examples/tutorial.py` - Getting started tutorial
-- `examples/futures_api_example.py` - Async API examples
+## Repo layout
 
-## Requirements
+```text
+tinkerbell/
+  api/         # FastAPI + Ray Serve gateway, Modal deploy helper
+  client/      # ServiceClient, TrainingClient, SamplingClient
+  runtime/     # Ray session, futures, resource specs
+  training/    # TrainGroup, Trainer, loss functions
+  sampling/    # Sampler, SGLang actor
+  renderer.py  # Chat-template + label-masking helper
+  types/       # Pydantic request/response models, deploy configs
 
-- Python 3.9+
-- PyTorch 2.0+
-- Ray 2.0+
-- Transformers
-- PEFT (for LoRA)
-- SGLang (for inference)
+scripts/
+  chat_sft.py        # SFT against an OpenAssistant-style chat dataset
+  grpo_example.py    # GRPO on GSM8K, end-to-end RL loop
+  multi_gpu.py       # Tensor-parallel sanity check
+  test_sampling.py   # Sampling-only smoke test
+  count_lines.py     # Library line count (excludes scripts/, examples/, tests/)
+```
 
 ## License
 
-See LICENSE file for details.
+See `LICENSE`.

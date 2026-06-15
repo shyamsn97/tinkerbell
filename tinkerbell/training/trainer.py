@@ -207,9 +207,12 @@ class Trainer:
     ) -> None:
         if adapter_name and self.llm.adapters:
             self.llm.set_active_adapter(adapter_name)
-        optimizer = self.optim_manager.get(
-            self.trainable_params, optimizer_params or {}
-        )
+        optimizer_config = dict(optimizer_params or {})
+        grad_clip_norm = float(optimizer_config.pop("grad_clip_norm", 0.0) or 0.0)
+        trainable_params = list(self.trainable_params())
+        optimizer = self.optim_manager.get(lambda: trainable_params, optimizer_config)
+        if grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip_norm)
         optimizer.step()
         self.clear_grads()
 

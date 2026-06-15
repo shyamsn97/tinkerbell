@@ -291,6 +291,8 @@ class SGLangSamplingActor:
         """Async so Ray fans out many concurrent /generate calls instead of
         serializing them. Without this, SGLang's continuous batcher only ever
         sees one request at a time."""
+        import asyncio
+
         try:
             await self._begin_sample()
             # Keep direct actor calls compatible with the client defaults:
@@ -300,23 +302,61 @@ class SGLangSamplingActor:
             lora_path = sample_request.get("lora_path")
             if lora_path and "lora_name" not in sample_request:
                 sample_request["lora_name"] = lora_path
-            client = await self._ensure_async_client()
-            t0 = time.time()
-            try:
-                response = await client.post("/generate", json=sample_request)
-            except httpx.ReadTimeout:
-                logger.error(
-                    f"sample /generate timed out after {time.time() - t0:.0f}s "
-                    f"(req max_new_tokens={sample_request.get('sampling_params', {}).get('max_new_tokens')})"
-                )
-                raise
-            elapsed = time.time() - t0
-            if elapsed > 30.0:
-                logger.warning(f"sample /generate took {elapsed:.1f}s (slow)")
-            response.raise_for_status()
-            return self._parse_sglang_response(response.json())
+
+            # Retry transport-level errors. SGLang's HTTP server occasionally
+            # drops a connection mid-request (especially right after a LoRA
+            # hot-swap or under load); a stale keep-alive in the pool surfaces
+            # as ReadError/RemoteProtocolError. Reset the client and try again.
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                client = await self._ensure_async_client()
+                t0 = time.time()
+                try:
+                    response = await client.post("/generate", json=sample_request)
+                    elapsed = time.time() - t0
+                    if elapsed > 30.0:
+                        logger.warning(f"sample /generate took {elapsed:.1f}s (slow)")
+                    response.raise_for_status()
+                    return self._parse_sglang_response(response.json())
+                except httpx.ReadTimeout:
+                    logger.error(
+                        f"sample /generate timed out after {time.time() - t0:.0f}s "
+                        f"(req max_new_tokens={sample_request.get('sampling_params', {}).get('max_new_tokens')})"
+                    )
+                    raise
+                except (httpx.TransportError, httpx.HTTPStatusError) as e:
+                    last_exc = e
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    transient = isinstance(e, httpx.TransportError) or status in {
+                        408,
+                        425,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    }
+                    if not transient or attempt == 2:
+                        raise
+                    logger.warning(
+                        f"sample /generate transient error ({type(e).__name__}: {e}); "
+                        f"resetting client and retrying (attempt {attempt + 1}/3)"
+                    )
+                    await self._reset_async_client()
+                    await asyncio.sleep(0.5 * (2**attempt))
+            assert last_exc is not None
+            raise last_exc
         finally:
             await self._end_sample()
+
+    async def _reset_async_client(self) -> None:
+        client = self.async_client
+        self.async_client = None
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
     def _parse_sglang_response(self, result) -> dict:
         response_data = {

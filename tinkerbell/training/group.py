@@ -75,7 +75,7 @@ class TrainGroup:
         data: list[Any],
         forward_kwargs: dict[str, Any] | None = None,
         return_logprobs: bool = False,
-        zero_grad: bool = True,
+        zero_grad: bool = False,
         optimizer_params: dict[str, Any] | None = None,
         loss_fn: str = "cross_entropy",
         loss_fn_config: dict[str, float] | None = None,

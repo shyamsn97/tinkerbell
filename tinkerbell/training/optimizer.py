@@ -34,6 +34,7 @@ def build_optimizer(
     """
     config = config.copy()
     name = config.pop("name", "adam").lower()
+    config.pop("grad_clip_norm", None)
     if name not in OPTIMIZER_REGISTRY:
         raise ValueError(
             f"Unknown optimizer '{name}'. Available: {sorted(OPTIMIZER_REGISTRY)}"

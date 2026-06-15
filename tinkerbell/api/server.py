@@ -203,7 +203,7 @@ class TinkerbellServer:
                 data=self._datums(payload),
                 forward_kwargs=payload.get("forward_kwargs") or {},
                 return_logprobs=payload.get("return_logprobs", False),
-                zero_grad=payload.get("zero_grad", True),
+                zero_grad=payload.get("zero_grad", False),
                 optimizer_params=payload.get("optimizer_params"),
                 loss_fn=payload.get("loss_fn", "cross_entropy"),
                 loss_fn_config=payload.get("loss_fn_config"),

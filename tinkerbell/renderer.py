@@ -222,3 +222,34 @@ class Renderer:
             add_generation_prompt=add_generation_prompt,
             **kwargs,
         )[0]
+
+    def build_generation_prompt(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs,
+    ) -> ModelInput:
+        """Tinker-cookbook-compatible prompt builder."""
+        return self.build_message_samples(
+            messages,
+            include_labels=False,
+            add_generation_prompt=True,
+            **kwargs,
+        ).model_input
+
+    def get_stop_sequences(self) -> list[str]:
+        stops = []
+        for token in (self.tokenizer.eos_token, "<|im_end|>", "<|endoftext|>"):
+            if token and token not in stops:
+                stops.append(token)
+        return stops
+
+    def parse_response(self, tokens: list[int]):
+        text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+        return {"role": "assistant", "content": text}, None
+
+
+def get_text_content(message) -> str:
+    if isinstance(message, dict):
+        return str(message.get("content", ""))
+    content = getattr(message, "content", message)
+    return str(content)

@@ -15,6 +15,22 @@ def deploy_service(*args, **kwargs):
 
 
 def __getattr__(name: str):
+    if name == "ServiceClient":
+        from tinkerbell.client import ServiceClient
+
+        return ServiceClient
+    if name in {
+        "AdamParams",
+        "Datum",
+        "EncodedTextChunk",
+        "LoraConfig",
+        "ModelInput",
+        "SamplingParams",
+        "TensorData",
+    }:
+        from tinkerbell import types
+
+        return getattr(types, name)
     if name == "Session":
         from tinkerbell.runtime.session import Session
 
@@ -36,10 +52,18 @@ def __getattr__(name: str):
 
 __all__ = [
     "ActorResources",
+    "AdamParams",
+    "Datum",
+    "EncodedTextChunk",
     "Future",
     "JobHandle",
+    "LoraConfig",
+    "ModelInput",
+    "SamplingParams",
     "Sampler",
     "Session",
+    "ServiceClient",
+    "TensorData",
     "TinkerbellServer",
     "TrainGroup",
     "deploy_service",
